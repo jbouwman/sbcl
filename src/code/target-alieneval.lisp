@@ -178,6 +178,14 @@ This is SETFable."
                            ,(append *new-auxiliary-types*
                                     (auxiliary-type-definitions env))))
          ,@(cond
+             ;; When in callback struct return context, skip the binding.
+             ;; The outer callback wrapper already established a single
+             ;; *alien-stack-pointer* binding that will clean up all
+             ;; allocations after the struct is copied to the result area.
+             ;; Check for the %defer-nsp-to-outer% symbol-macrolet marker.
+             ((and bind-alien-stack-pointer
+                   (nth-value 1 (macroexpand-1 '%defer-nsp-to-outer% env)))
+              body)
              (bind-alien-stack-pointer
               ;; The LET IR1-translator will actually turn this into
               ;; RESTORING-NSP on #-c-stack-is-control-stack to avoid

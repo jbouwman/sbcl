@@ -100,12 +100,16 @@
 
 (defun alien-callback-argument-bytes (spec env)
   (let ((type (parse-alien-type spec env)))
-    (if (or (alien-integer-type-p type)
-            (alien-float-type-p type)
-            (alien-pointer-type-p type)
-            (alien-system-area-pointer-type-p type))
-        (ceiling (alien-type-word-aligned-bits type) sb-vm:n-byte-bits)
-        (error "Unsupported callback argument type: ~A" type))))
+    (cond ((or (alien-integer-type-p type)
+               (alien-float-type-p type)
+               (alien-pointer-type-p type)
+               (alien-system-area-pointer-type-p type))
+           (ceiling (alien-type-word-aligned-bits type) sb-vm:n-byte-bits))
+          ;; Struct types: return the struct size rounded up to word alignment
+          ((alien-record-type-p type)
+           (ceiling (alien-type-word-aligned-bits type) sb-vm:n-byte-bits))
+          (t
+           (error "Unsupported callback argument type: ~A" type)))))
 
 (defun enter-alien-callback (index arguments return)
   (declare (optimize speed (safety 0)))
@@ -201,6 +205,17 @@
                             `(unsigned
                               ,(alien-type-word-aligned-bits result-type))
                             `(unsigned-byte ,(alien-type-bits result-type)))))
+                      ;; For struct return types, wrap the entire expression
+                      ;; in a number-stack-preserving context. The symbol-macrolet
+                      ;; for %defer-nsp-to-outer% signals to inner with-alien forms
+                      ;; that they should skip their own *alien-stack-pointer*
+                      ;; binding and defer cleanup to this outer binding. This
+                      ;; ensures with-alien allocations survive until after the
+                      ;; struct is copied to the result area.
+                      ((alien-record-type-p result-type)
+                       `(symbol-macrolet ((%defer-nsp-to-outer% t))
+                          (let ((sb-c:*alien-stack-pointer* sb-c:*alien-stack-pointer*))
+                            ,(store (unparse-alien-type result-type) nil))))
                       (t
                        (store (unparse-alien-type result-type) nil))))))
          0))))
