@@ -714,7 +714,7 @@
                              (inst str temp-tn target-tn)))
                           (incf stack-argument-bytes size)))
                    (incf fp-registers)
-                   (incf frame-offset (if (alien-single-float-type-p type) 4 8)))
+                   (incf frame-offset n-word-bytes))
                   ;; Handle struct-by-value arguments
                   ((sb-alien::alien-record-type-p type)
                    (let* ((struct-bytes (argument-byte-size type))
