@@ -14,7 +14,7 @@ struct tiny_align_8 tiny_align_8_identity(struct tiny_align_8 m) {
   return m;
 }
 
-/** A small structure with 8-byte alignment.
+/* A small structure with 8-byte alignment.
     SysV x86-64 and AAPCS64 will pass this by register.
 */
 struct small_align_8 {
@@ -36,7 +36,7 @@ struct small_align_8 small_align_8_identity(struct small_align_8 m) {
   return m;
 }
 
-/** A large structure with 8-byte alignment.
+/* A large structure with 8-byte alignment.
     This should be too big for any architecture to pass by registers.
 */
 struct large_align_8 {
@@ -66,7 +66,7 @@ large_align_8_get(m13);
 large_align_8_get(m14);
 large_align_8_get(m15);
 
-/** Mutates the input struct. Volatile to avoid compiler optimizing away the mutation.*/
+/* Mutates the input struct. Volatile to avoid compiler optimizing away the mutation.*/
 void large_align_8_mutate(volatile struct large_align_8 m) {
   m.m0++;
   m.m1++;
@@ -95,7 +95,7 @@ struct large_align_8 large_align_8_identity(struct large_align_8 m) {
   return m;
 }
 
-/** Structs with floating point members for SSE register testing */
+/* Structs with floating point members for SSE register testing */
 struct two_doubles {
   double d0, d1;
 };
@@ -128,7 +128,7 @@ struct two_floats two_floats_identity(struct two_floats m) {
   return m;
 }
 
-/** Mixed int and float struct - tests split register handling on x86-64 */
+/* Mixed int and float struct - tests split register handling on x86-64 */
 struct int_double {
   long long i;
   double d;
@@ -145,7 +145,7 @@ struct int_double int_double_identity(struct int_double m) {
   return m;
 }
 
-/** Medium struct (24 bytes) - too large for ARM64 registers, tests boundary */
+/* Medium struct (24 bytes) - too large for ARM64 registers, tests boundary */
 struct medium_align_8 {
   long long m0, m1, m2;
 };
@@ -163,7 +163,7 @@ struct medium_align_8 medium_align_8_identity(struct medium_align_8 m) {
   return m;
 }
 
-/** Four floats struct - tests HFA (Homogeneous Floating-point Aggregate) on ARM64 */
+/* Four floats struct - tests HFA (Homogeneous Floating-point Aggregate) on ARM64 */
 struct four_floats {
   float f0, f1, f2, f3;
 };
@@ -182,7 +182,7 @@ struct four_floats four_floats_identity(struct four_floats m) {
   return m;
 }
 
-/** Three doubles struct - tests HFA boundary (3 doubles = 24 bytes) */
+/* Three doubles struct - tests HFA boundary (3 doubles = 24 bytes) */
 struct three_doubles {
   double d0, d1, d2;
 };
@@ -200,7 +200,7 @@ struct three_doubles three_doubles_identity(struct three_doubles m) {
   return m;
 }
 
-/** HFA with array of 4 floats - tests array-based HFA detection on ARM64 */
+/* HFA with array of 4 floats - tests array-based HFA detection on ARM64 */
 struct float_array_4 {
   float arr[4];
 };
@@ -222,7 +222,7 @@ struct float_array_4 float_array_4_identity(struct float_array_4 m) {
   return m;
 }
 
-/** HFA with array of 2 doubles - tests array-based HFA with doubles */
+/* HFA with array of 2 doubles - tests array-based HFA with doubles */
 struct double_array_2 {
   double arr[2];
 };
@@ -242,7 +242,7 @@ struct double_array_2 double_array_2_identity(struct double_array_2 m) {
   return m;
 }
 
-/** HFA with array of 3 floats - tests odd-sized array HFA */
+/* HFA with array of 3 floats - tests odd-sized array HFA */
 struct float_array_3 {
   float arr[3];
 };
@@ -260,7 +260,7 @@ struct float_array_3 float_array_3_identity(struct float_array_3 m) {
   return m;
 }
 
-/** Callback tests for struct-by-value parameters */
+/* Callback tests for struct-by-value parameters */
 
 /* Callback type taking a small struct (16 bytes, passed in registers) */
 typedef long long (*small_struct_callback)(struct small_align_8 s);
@@ -311,4 +311,31 @@ double call_with_float_struct(float_struct_callback cb, double d0, double d1) {
   s.d0 = d0;
   s.d1 = d1;
   return cb(s);
+}
+
+/* Callback type returning a small struct (16 bytes, in registers) */
+typedef struct small_align_8 (*small_struct_return_callback)(long long v0, long long v1);
+
+/* Callback type returning a struct with doubles (SSE registers) */
+typedef struct two_doubles (*double_struct_return_callback)(double d0, double d1);
+
+/* Callback type returning a large struct (>16 bytes, via hidden pointer) */
+typedef struct medium_align_8 (*medium_struct_return_callback)(long long v0, long long v1, long long v2);
+
+/* Function that calls a callback returning a small struct */
+struct small_align_8 call_returning_small_struct(small_struct_return_callback cb,
+                                                  long long v0, long long v1) {
+  return cb(v0, v1);
+}
+
+/* Function that calls a callback returning a struct with doubles */
+struct two_doubles call_returning_double_struct(double_struct_return_callback cb,
+                                                 double d0, double d1) {
+  return cb(d0, d1);
+}
+
+/* Function that calls a callback returning a large struct (hidden pointer) */
+struct medium_align_8 call_returning_medium_struct(medium_struct_return_callback cb,
+                                                    long long v0, long long v1, long long v2) {
+  return cb(v0, v1, v2);
 }

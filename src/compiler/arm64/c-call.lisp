@@ -248,9 +248,9 @@
     (when (and base-type (<= 1 count 4))
       (values base-type count))))
 
-;;; Main classification function.
-(defun classify-struct (record-type)
-  "Classify struct for ARM64 AAPCS return."
+;;; Main classification function for ARM64 AAPCS64.
+(defun classify-struct-aapcs64 (record-type)
+  "Classify struct for ARM64 AAPCS64 return."
   (let* ((bits (sb-alien::alien-type-bits record-type))
          (byte-size (ceiling bits 8))
          (alignment (sb-alien::alien-type-alignment record-type)))
@@ -283,7 +283,7 @@
 ;;; Called from src/code/c-call.lisp
 (defun record-result-tn (type state)
   "Handle struct return values."
-  (let ((classification (classify-struct type)))
+  (let ((classification (classify-struct-aapcs64 type)))
     (if (sb-alien::struct-classification-memory-p classification)
         ;; Large struct: return via hidden pointer in x8
         ;; The caller allocates space and passes pointer in x8
@@ -372,7 +372,7 @@
   "Handle struct arguments.
    For large structs (>16 bytes), returns a SAP TN for pointer passing.
    For small structs, returns a function that emits load VOPs."
-  (let ((classification (classify-struct type)))
+  (let ((classification (classify-struct-aapcs64 type)))
     (if (sb-alien::struct-classification-memory-p classification)
         ;; Large struct: pass by pointer
         (int-arg state 'system-area-pointer sap-reg-sc-number sap-stack-sc-number)
@@ -458,7 +458,7 @@
              ;; We just return a flag indicating this is a large struct return
              (large-struct-return-p
                (when (sb-alien::alien-record-type-p result-type)
-                 (let ((classification (classify-struct result-type)))
+                 (let ((classification (classify-struct-aapcs64 result-type)))
                    (sb-alien::struct-classification-memory-p classification)))))
         (values (make-normal-tn *fixnum-primitive-type*)
                 stack-frame-size
@@ -629,29 +629,52 @@
              (ceiling (sb-alien::alien-type-bits type) n-byte-bits))
            (round-up-to-word (bytes)
              (* n-word-bytes (ceiling bytes n-word-bytes))))
-    ;; Calculate frame size: sum of all argument sizes
-    (let* ((segment (make-segment))
-           ;; Current byte offset in the argument frame
-           (frame-offset 0)
-           ;; How many bytes have been read from the stack argument area
-           (stack-argument-bytes 0)
-           (r0-tn (make-tn 0))
-           (r1-tn (make-tn 1))
-           (r2-tn (make-tn 2))
-           (r3-tn (make-tn 3))
-           (temp-tn (make-tn 9))
-           (nsp-save-tn (make-tn 10))
-           (gprs (loop for i below 8
-                       collect (make-tn i)))
-           (fp-registers 0)
-           ;; Calculate frame size from argument types (word-aligned)
-           (frame-size (loop for type in argument-types
-                             sum (round-up-to-word (argument-byte-size type)))))
+    ;; Check for struct return type and classify it
+    (let* ((result-classification
+             (when (alien-record-type-p result-type)
+               (classify-struct-aapcs64 result-type)))
+           (large-struct-return-p
+             (and result-classification
+                  (sb-alien::struct-classification-memory-p result-classification))))
+      ;; Calculate frame size: sum of all argument sizes
+      (let* ((segment (make-segment))
+             ;; Current byte offset in the argument frame
+             (frame-offset 0)
+             ;; How many bytes have been read from the stack argument area
+             (stack-argument-bytes 0)
+             (r0-tn (make-tn 0))
+             (r1-tn (make-tn 1))
+             (r2-tn (make-tn 2))
+             (r3-tn (make-tn 3))
+             (temp-tn (make-tn 9))
+             (nsp-save-tn (make-tn 10))
+             ;; x8 is used for large struct return pointer
+             (x8-tn (make-tn 8))
+             ;; x12 used to save x8 across the call (x11 is used for ptr-tn in struct arg processing)
+             (x8-save-tn (make-tn 12))
+             (gprs (loop for i below 8
+                         collect (make-tn i)))
+             (fp-registers 0)
+             ;; Calculate frame size from argument types (word-aligned)
+             (frame-size (loop for type in argument-types
+                               sum (round-up-to-word (argument-byte-size type))))
+             ;; Return value slot count - enough for large struct if needed
+             (return-slot-count
+               (if large-struct-return-p
+                   (ceiling (sb-alien::struct-classification-size result-classification) n-word-bytes)
+                   2)))
       (setf frame-size (logandc2 (+ frame-size +number-stack-alignment-mask+)
                                  +number-stack-alignment-mask+))
+      ;; Return value allocation size - must be 16-byte aligned for stack alignment
+      (let ((return-bytes (logandc2 (+ (* n-word-bytes return-slot-count) 15) 15)))
       (assemble (segment 'nil)
         (inst mov-sp nsp-save-tn nsp-tn)
         (inst str lr-tn (@ nsp-tn -16 :pre-index))
+        ;; Save x8 (hidden struct return pointer) to stack if returning large struct
+        ;; We save to stack because x8-15 are caller-saved and would be clobbered by the call
+        ;; After the str above, nsp points to saved LR, and [nsp+8] is free space
+        (when large-struct-return-p
+          (inst str x8-tn (@ nsp-tn 8)))
         ;; Make room on the stack for arguments.
         (when (plusp frame-size)
           (inst sub nsp-tn nsp-tn frame-size))
@@ -719,7 +742,7 @@
                   ((sb-alien::alien-record-type-p type)
                    (let* ((struct-bytes (argument-byte-size type))
                           (struct-bytes-aligned (round-up-to-word struct-bytes))
-                          (classification (classify-struct type))
+                          (classification (classify-struct-aapcs64 type))
                           ;; Use r11 as additional temp for struct pointer
                           (ptr-tn (make-tn 11)))
                      (cond
@@ -779,7 +802,7 @@
         ;; arg1 to ENTER-ALIEN-CALLBACK (pointer to argument vector)
         (inst mov-sp r1-tn nsp-tn)
         ;; add room on stack for return value
-        (inst sub nsp-tn nsp-tn (* n-word-bytes 2))
+        (inst sub nsp-tn nsp-tn return-bytes)
         ;; arg2 to ENTER-ALIEN-CALLBACK (pointer to return value)
         (inst mov-sp r2-tn nsp-tn)
 
@@ -801,9 +824,52 @@
                                   'double-reg))
                  nsp-tn))
           ((alien-void-type-p result-type))
+          ;; Struct return types
+          ((alien-record-type-p result-type)
+           (cond
+             ;; Large struct: copy result to x8 pointer location, return pointer in x0
+             (large-struct-return-p
+              (let ((struct-size (sb-alien::struct-classification-size result-classification))
+                    ;; x8 was saved at [original - 8]
+                    ;; After call: nsp = original - 16 - frame-size - return-bytes
+                    ;; So x8 is at [nsp + 8 + frame-size + return-bytes]
+                    (x8-offset (+ 8 frame-size return-bytes)))
+                ;; Load saved x8 from stack into x8-save-tn (x12)
+                ;; We can't use nsp-save-tn as it may have been clobbered by the call
+                (inst ldr x8-save-tn (@ nsp-tn x8-offset))
+                (loop for off from 0 below struct-size by 8
+                      for remaining = (- struct-size off)
+                      do (cond ((>= remaining 8)
+                                (inst ldr temp-tn (@ nsp-tn off))
+                                (inst str temp-tn (@ x8-save-tn off)))
+                               ((>= remaining 4)
+                                (inst ldr (32-bit-reg temp-tn) (@ nsp-tn off))
+                                (inst str (32-bit-reg temp-tn) (@ x8-save-tn off)))
+                               (t
+                                (loop for b from 0 below remaining
+                                      do (inst ldrb (32-bit-reg temp-tn) (@ nsp-tn (+ off b)))
+                                         (inst strb (32-bit-reg temp-tn) (@ x8-save-tn (+ off b)))))))
+                ;; Return the pointer in x0
+                (inst mov r0-tn x8-save-tn)))
+             ;; HFA: load into floating-point registers
+             ((multiple-value-bind (hfa-type hfa-count) (hfa-base-type result-type)
+                (when hfa-type
+                  (let ((fp-size (if (eq hfa-type 'single-float) 4 8))
+                        (sc-name (if (eq hfa-type 'single-float) 'single-reg 'double-reg)))
+                    (dotimes (i hfa-count)
+                      (inst ldr (make-tn i sc-name) (@ nsp-tn (* i fp-size)))))
+                  t)))
+             ;; Small non-HFA struct (<=16 bytes): load into x0/x1
+             (t
+              (let* ((struct-size (sb-alien::struct-classification-size result-classification))
+                     (num-regs (ceiling struct-size 8)))
+                (when (>= num-regs 1)
+                  (inst ldr r0-tn (@ nsp-tn 0)))
+                (when (>= num-regs 2)
+                  (inst ldr r1-tn (@ nsp-tn 8)))))))
           (t
            (error "Unrecognized alien type: ~A" result-type)))
-        (inst add nsp-tn nsp-tn (+ frame-size (* n-word-bytes 2)))
+        (inst add nsp-tn nsp-tn (+ frame-size return-bytes))
         (inst ldr lr-tn (@ nsp-tn 16 :post-index))
         (inst ret))
       (finalize-segment segment)
@@ -824,4 +890,4 @@
                                  system-area-pointer
                                  unsigned-long))
          sap (length buffer))
-        vector))))
+        vector))))))

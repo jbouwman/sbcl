@@ -138,11 +138,23 @@
 
 ;;;; Struct Return-by-Value Support
 
-;;; Classification categories for struct fields
-;;; :integer - pass/return in general-purpose registers
-;;; :single - pass/return in floating-point registers (single precision)
-;;; :double - pass/return in floating-point registers (double precision)
-;;; :memory - pass/return via hidden pointer (struct too large for registers)
+;;; Classification categories for struct fields/eightbytes per ABI.
+;;; These values have architecture-specific semantics:
+;;;
+;;; :integer - Pass/return in general-purpose registers (RAX/RDX on x86-64,
+;;;            x0/x1 on ARM64). Used for integer, pointer, and mixed types.
+;;;
+;;; :single  - ARM64 HFA (Homogeneous Floating-point Aggregate) only.
+;;;            Pass/return in single-precision FP registers (s0-s3).
+;;;            x86-64 never uses this; single-floats become :double (SSE class).
+;;;
+;;; :double  - Pass/return in floating-point/SSE registers.
+;;;            On x86-64: SSE class (XMM0/XMM1) for both single and double floats.
+;;;            On ARM64: HFA double-precision (d0-d3).
+;;;
+;;; :memory  - Struct too large for registers; pass/return via hidden pointer.
+;;;            x86-64: hidden pointer in RDI, returned in RAX.
+;;;            ARM64: hidden pointer in x8.
 (deftype struct-class () '(member :integer :single :double :memory))
 
 (defstruct (struct-classification (:copier nil))
@@ -165,11 +177,20 @@
   "Classify how a struct should be returned according to platform ABI.
    Returns (values in-registers-p register-slots size) or (values nil nil nil) for non-structs."
   (declare (ignorable alien-type))
-  #+(and (or arm64 x86-64) (not sb-xc-host))
+  #+(and arm64 (not sb-xc-host))
   (progn
     (unless (alien-record-type-p alien-type)
       (return-from struct-return-info (values nil nil nil)))
-    (let ((classification (sb-vm::classify-struct alien-type)))
+    (let ((classification (sb-vm::classify-struct-aapcs64 alien-type)))
+      (when classification
+        (values (not (struct-classification-memory-p classification))
+                (struct-classification-register-slots classification)
+                (struct-classification-size classification)))))
+  #+(and x86-64 (not sb-xc-host))
+  (progn
+    (unless (alien-record-type-p alien-type)
+      (return-from struct-return-info (values nil nil nil)))
+    (let ((classification (sb-vm::classify-struct-sysv-amd64 alien-type)))
       (when classification
         (values (not (struct-classification-memory-p classification))
                 (struct-classification-register-slots classification)
@@ -177,23 +198,22 @@
   #-(and (or arm64 x86-64) (not sb-xc-host))
   (error "struct-return-info not available on this platform"))
 
-;;; Forward declaration for platform-specific helpers defined in
-;;; compiler/{arch}/c-call.lisp
+;;; Methods for struct by value - platform-specific implementations in
+;;; compiler/{arch}/c-call.lisp define record-arg-tn and record-result-tn.
 #+(and (or x86-64 arm64) (not sb-xc-host))
-(declaim (ftype (function (t t) t) sb-vm::record-arg-tn sb-vm::record-result-tn))
+(progn
+  (declaim (ftype (function (t t) t) sb-vm::record-arg-tn sb-vm::record-result-tn))
+  (define-alien-type-method (record :arg-tn) (type state)
+    (sb-vm::record-arg-tn type state))
+  (define-alien-type-method (record :result-tn) (type state)
+    (sb-vm::record-result-tn type state)))
 
-;;; Methods for struct by value
-(define-alien-type-method (record :arg-tn) (type state)
-  (declare (ignorable type state))
-  #+(and (or x86-64 arm64) (not sb-xc-host))
-  (sb-vm::record-arg-tn type state)
-  #-(and (or x86-64 arm64) (not sb-xc-host))
-  (error "Passing structs by value is unsupported on this platform."))
-
-(define-alien-type-method (record :result-tn) (type state)
-  (declare (ignorable type state))
-  #+(and (or x86-64 arm64) (not sb-xc-host))
-  (sb-vm::record-result-tn type state)
-  #-(and (or x86-64 arm64) (not sb-xc-host))
-  (error "Returning structs by value is unsupported on this platform."))
+#-(and (or x86-64 arm64) (not sb-xc-host))
+(progn
+  (define-alien-type-method (record :arg-tn) (type state)
+    (declare (ignore type state))
+    (error "Passing structs by value is unsupported on this platform."))
+  (define-alien-type-method (record :result-tn) (type state)
+    (declare (ignore type state))
+    (error "Returning structs by value is unsupported on this platform.")))
 
