@@ -23,6 +23,10 @@
   (stack-frame-size 0))
 (declaim (freeze-type arg-state))
 
+;;; Cache for struct classification to avoid redundant computation.
+;;; Bound in make-call-out-tns when processing struct return types.
+(defvar *cached-struct-classification* nil)
+
 (defconstant max-int-args #.(length *c-call-register-arg-offsets*))
 (defconstant max-xmm-args #+win32 4 #-win32 8)
 
@@ -135,13 +139,16 @@
     ((sb-alien::alien-array-type-p type)
      (let ((element-type (sb-alien::alien-array-type-element-type type)))
        (classify-field-x86-64 element-type)))
-    ;; Nested struct - recursively classify
+    ;; Nested struct - recursively classify and inherit eightbyte classes
     ((sb-alien::alien-record-type-p type)
-     (let ((nested (classify-struct type)))
+     (let ((nested (classify-struct-sysv-amd64 type)))
        (if (sb-alien::struct-classification-memory-p nested)
            :memory
-           ;; For nested structs that fit in registers, treat as INTEGER
-           :integer)))
+           ;; Merge all slots from nested struct to get dominant class
+           ;; e.g., struct { double d; } should contribute :double, not :integer
+           (reduce #'merge-classes
+                   (sb-alien::struct-classification-register-slots nested)
+                   :initial-value :no-class))))
     ;; System-area-pointer (must come after array/record checks)
     ((typep type 'sb-alien::alien-system-area-pointer-type) :integer)
     (t :memory)))
@@ -158,8 +165,8 @@
     ((or (eq class1 :integer) (eq class2 :integer)) :integer)
     (t :double)))
 
-;;; Main classification function for x86-64
-(defun classify-struct (record-type)
+;;; Main classification function for x86-64 System V AMD64 ABI
+(defun classify-struct-sysv-amd64 (record-type)
   "Classify struct for x86-64 System V ABI return.
    Returns STRUCT-CLASSIFICATION."
   (let* ((bits (sb-alien::alien-type-bits record-type))
@@ -167,7 +174,7 @@
          (alignment (sb-alien::alien-type-alignment record-type)))
     ;; Rule: Structs > 16 bytes always use memory (hidden pointer)
     (when (> byte-size 16)
-      (return-from classify-struct
+      (return-from classify-struct-sysv-amd64
         (sb-alien::make-struct-classification
          :register-slots '(:memory)
          :size byte-size
@@ -212,7 +219,8 @@
 ;;; Called from src/code/c-call.lisp
 (defun record-result-tn (type state)
   "Handle struct return values."
-  (let ((classification (classify-struct type)))
+  (let ((classification (or *cached-struct-classification*
+                            (classify-struct-sysv-amd64 type))))
     (if (sb-alien::struct-classification-memory-p classification)
         ;; Large struct: return via hidden pointer
         ;; Caller passes pointer in RDI, callee returns it in RAX
@@ -236,8 +244,7 @@
                                      double-reg-sc-number
                                      sse-results)
                      result-tns)
-               (incf sse-results))
-              (t))) ; :no-class - skip
+               (incf sse-results))))
           (setf (result-state-num-results state) (+ int-results sse-results))
           (nreverse result-tns)))))
 
@@ -292,7 +299,7 @@
   "Handle struct arguments.
    For large structs (>16 bytes), copies to stack per System V AMD64 ABI.
    For small structs, returns a function that emits load VOPs into registers."
-  (let ((classification (classify-struct type)))
+  (let ((classification (classify-struct-sysv-amd64 type)))
     (if (sb-alien::struct-classification-memory-p classification)
         ;; Large struct: copy to stack (System V AMD64 ABI)
         ;; The struct is passed by value on the stack, not by pointer
@@ -331,8 +338,7 @@
                                 double-reg-sc-number
                                 double-stack-sc-number)
                      arg-tns)
-               (push (cons offset :double) offsets))
-              (t)) ; :no-class - skip
+               (push (cons offset :double) offsets)))
             (incf offset 8))
           (setf arg-tns (nreverse arg-tns))
           (setf offsets (nreverse offsets))
@@ -372,10 +378,13 @@
   (let ((arg-state (make-arg-state))
         (result-type (alien-fun-type-result-type type)))
     ;; Check for large struct return FIRST - we need to reserve RDI for sret pointer
-    (let ((large-struct-return-p
-            (when (sb-alien::alien-record-type-p result-type)
-              (let ((classification (classify-struct result-type)))
-                (sb-alien::struct-classification-memory-p classification)))))
+    ;; Cache the classification to avoid recomputing it in record-result-tn
+    (let* ((result-classification
+             (when (alien-record-type-p result-type)
+               (classify-struct-sysv-amd64 result-type)))
+           (large-struct-return-p
+             (and result-classification
+                  (sb-alien::struct-classification-memory-p result-classification))))
       ;; For large struct returns, consume RDI (first int arg register)
       ;; so regular arguments start from RSI
       (when large-struct-return-p
@@ -383,7 +392,9 @@
       (collect ((arg-tns))
         (dolist (arg-type (alien-fun-type-arg-types type))
           (arg-tns (invoke-alien-type-method :arg-tn arg-type arg-state)))
-        (let ((stack-frame-size (* (arg-state-stack-frame-size arg-state) n-word-bytes)))
+        (let ((stack-frame-size (* (arg-state-stack-frame-size arg-state) n-word-bytes))
+              ;; Bind cached classification so record-result-tn doesn't recompute
+              (*cached-struct-classification* result-classification))
           (values (make-wired-tn* 'positive-fixnum any-reg-sc-number rsp-offset)
                   stack-frame-size
                   (arg-tns)
@@ -748,7 +759,14 @@
              (ceiling (sb-alien::alien-type-bits type) n-byte-bits))
            (round-up-to-word (bytes)
              (* n-word-bytes (ceiling bytes n-word-bytes))))
-    (let* ((segment (make-segment))
+    ;; Check for struct return type and classify it
+    (let* ((result-classification
+             (when (alien-record-type-p result-type)
+               (classify-struct-sysv-amd64 result-type)))
+           (large-struct-return-p
+             (and result-classification
+                  (sb-alien::struct-classification-memory-p result-classification)))
+           (segment (make-segment))
            (rax rax-tn)
            #+win32 (rcx rcx-tn)
            #-(and win32 sb-thread) (rdi rdi-tn)
@@ -758,6 +776,7 @@
            (rsp rsp-tn)
            #+(and win32 sb-thread) (r8 r8-tn)
            (xmm0 float0-tn)
+           (xmm1 float1-tn)
            ([rsp] (ea rsp))
            ;; Calculate total argument vector size in bytes
            (total-arg-bytes
@@ -769,12 +788,36 @@
            (arg-offset 0)
            ;; Count of 8-byte slots consumed (for stack offset calculation)
            (arg-slot-count (ceiling total-arg-bytes n-word-bytes))
-           (gprs (mapcar (make-tn-maker 'any-reg) *c-call-register-arg-offsets*))
+           ;; For large struct returns, RDI contains the hidden pointer, not an argument
+           ;; Skip it in the GPR list so arguments start at RSI
+           (gprs (let ((all-gprs (mapcar (make-tn-maker 'any-reg) *c-call-register-arg-offsets*)))
+                   (if large-struct-return-p
+                       (rest all-gprs)  ; Skip RDI
+                       all-gprs)))
            (fprs (mapcar (make-tn-maker 'double-reg)
                          ;; Only 8 first XMM registers are used for
                          ;; passing arguments
-                         (subseq *float-regs* 0 #-win32 8 #+win32 4))))
+                         (subseq *float-regs* 0 #-win32 8 #+win32 4)))
+           ;; R11 is caller-saved and not used for arguments - use it to save hidden ptr
+           (r11 (make-random-tn (sc-or-lose 'any-reg) r11-offset))
+           ;; Calculate return value slot count (in 8-byte words)
+           ;; For large struct returns, we need enough space for the entire struct
+           ;; For small structs and primitives, 2 slots (16 bytes) is enough
+           (return-slot-count
+             (if large-struct-return-p
+                 (ceiling (sb-alien::struct-classification-size result-classification) n-word-bytes)
+                 2))
+           ;; Adjust for alignment (must be even for 16-byte stack alignment)
+           (return-slot-count-aligned
+             (if (evenp (+ arg-slot-count return-slot-count))
+                 return-slot-count
+                 (1+ return-slot-count))))
       (assemble (segment 'nil)
+        ;; For large struct returns, save the hidden pointer (in RDI) to R11
+        ;; before we use RDI for anything else
+        #-win32
+        (when large-struct-return-p
+          (inst mov r11 rdi))
         ;; Make room on the stack for argument vector.
         (when (plusp total-arg-bytes)
           (inst sub rsp total-arg-bytes))
@@ -791,7 +834,7 @@
             (cond
               ;; Struct types
               ((sb-alien::alien-record-type-p type)
-               (let* ((classification (classify-struct type))
+               (let* ((classification (classify-struct-sysv-amd64 type))
                       (memory-p (sb-alien::struct-classification-memory-p classification))
                       (slots (sb-alien::struct-classification-register-slots classification))
                       (struct-size (sb-alien::struct-classification-size classification)))
@@ -884,9 +927,7 @@
           ;; arg1 to ENTER-ALIEN-CALLBACK (pointer to argument vector)
           (inst mov rdi rsp)
           ;; add room on stack for return value
-          (inst sub rsp (if (evenp arg-slot-count)
-                            (* n-word-bytes 2)
-                            n-word-bytes))
+          (inst sub rsp (* return-slot-count-aligned n-word-bytes))
           ;; arg2 to ENTER-ALIEN-CALLBACK (pointer to return value)
           (inst mov rsi rsp)
 
@@ -907,9 +948,7 @@
           ;; arg1 to ENTER-ALIEN-CALLBACK (pointer to argument vector)
           (inst mov #-win32 rsi #+win32 rdx rsp)
           ;; add room on stack for return value
-          (inst sub rsp (if (evenp arg-slot-count)
-                            (* n-word-bytes 2)
-                            n-word-bytes))
+          (inst sub rsp (* return-slot-count-aligned n-word-bytes))
           ;; arg2 to ENTER-ALIEN-CALLBACK (pointer to return value)
           (inst mov #-win32 rdx #+win32 r8 rsp)
           ;; Make new frame
@@ -934,18 +973,46 @@
                (alien-double-float-type-p result-type))
            (inst movq xmm0 [rsp]))
           ((alien-void-type-p result-type))
+          ;; Struct return types
+          ((alien-record-type-p result-type)
+           #-win32
+           (cond
+             ;; Large struct: copy result to hidden pointer location, return pointer
+             (large-struct-return-p
+              (let ((struct-size (sb-alien::struct-classification-size result-classification)))
+                ;; Copy struct data from stack to hidden pointer destination
+                (loop for off from 0 below struct-size by 8
+                      do (inst mov rax (ea off rsp))
+                         (inst mov (ea off r11) rax))
+                ;; Return the hidden pointer in RAX
+                (inst mov rax r11)))
+             ;; Small struct: copy to registers based on classification
+             (t
+              (let ((slots (sb-alien::struct-classification-register-slots result-classification))
+                    (int-reg-idx 0)
+                    (sse-reg-idx 0))
+                (loop for slot in slots
+                      for offset from 0 by 8
+                      do (ecase slot
+                           (:integer
+                            (let ((target (case int-reg-idx
+                                            (0 rax)
+                                            (1 rdx))))
+                              (inst mov target (ea offset rsp)))
+                            (incf int-reg-idx))
+                           (:double
+                            (let ((target (case sse-reg-idx
+                                            (0 xmm0)
+                                            (1 xmm1))))
+                              (inst movq target (ea offset rsp)))
+                            (incf sse-reg-idx))))))))
           (t
            (error "Unrecognized alien type: ~A" result-type)))
 
         ;; Pop the arguments and the return value from the stack to get
         ;; the return address at top of stack.
 
-        (inst add rsp (* (+ arg-slot-count
-                            ;; Plus the return value and make sure it's aligned
-                            (if (evenp arg-slot-count)
-                                2
-                                1))
-                         n-word-bytes))
+        (inst add rsp (* (+ arg-slot-count return-slot-count-aligned) n-word-bytes))
         ;; Return
         (inst ret))
       (finalize-segment segment)

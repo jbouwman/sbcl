@@ -565,6 +565,7 @@
          (push `(setf (sb-sys:sap-ref-double ,result-sap ,offset) ,(nth temp-idx temps)) stores)
          (incf offset 8)
          (incf temp-idx))
+        ;; :single is ARM64 HFA only - x86-64 classifies all floats as :double
         (:single
          (push `(setf (sb-sys:sap-ref-single ,result-sap ,offset) ,(nth temp-idx temps)) stores)
          (incf offset 4)

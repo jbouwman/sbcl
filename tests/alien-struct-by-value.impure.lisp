@@ -70,7 +70,7 @@
     (setf (slot s 'm0) -123456789)
     (assert (= (tiny-align-8-get-m0 s) -123456789))))
 
-;;; Runtime tests for tiny struct RETURN
+;;; Runtime tests for tiny struct return
 #+(or x86-64 arm64)
 (with-test (:name :struct-by-value-tiny-align-8-return-runtime)
   ;; Test return from C function
@@ -120,7 +120,7 @@
     (assert (= (small-align-8-get-m0 s) -999))
     (assert (= (small-align-8-get-m1 s) 888))))
 
-;;; Runtime tests for small struct RETURN
+;;; Runtime tests for small struct return
 #+(or x86-64 arm64)
 (with-test (:name :struct-by-value-small-align-8-return-runtime)
   ;; Test return from C function
@@ -221,7 +221,7 @@
     (setf (slot s 'd1) 2.5d0)
     (assert (= (two-doubles-sum s) 4.0d0))))
 
-;;; Runtime tests for floating-point struct RETURN
+;;; Runtime tests for floating-point struct return
 #+(or x86-64 arm64)
 (with-test (:name :struct-by-value-two-doubles-return-runtime)
   ;; Test return from C function
@@ -250,7 +250,7 @@
   (define-alien-routine two-floats-sum single-float (m (struct two-floats)))
   (define-alien-routine two-floats-identity (struct two-floats) (m (struct two-floats))))
 
-;;; Runtime tests for single-float struct RETURN
+;;; Runtime tests for single-float struct return
 #+(or x86-64 arm64)
 (with-test (:name :struct-by-value-two-floats-return-runtime)
   ;; Test return from C function
@@ -276,7 +276,7 @@
   (define-alien-routine int-double-get-double double (m (struct int-double)))
   (define-alien-routine int-double-identity (struct int-double) (m (struct int-double))))
 
-;;; Runtime tests for mixed int-double struct RETURN
+;;; Runtime tests for mixed int-double struct return
 #+(or x86-64 arm64)
 (with-test (:name :struct-by-value-int-double-return-runtime)
   ;; Test return from C function
@@ -550,6 +550,66 @@
          (+ (slot s 'd0) (slot s 'd1))))
     (assert (= (call-with-float-struct (alien-sap cb) 1.5d0 2.5d0) 4.0d0))
     (assert (= (call-with-float-struct (alien-sap cb) 100.0d0 200.0d0) 300.0d0))))
+
+;;; Define alien routines that call callbacks returning structs
+(define-struct-by-value-test :callback-struct-return-routines
+  (define-alien-routine call-returning-small-struct (struct small-align-8)
+    (cb system-area-pointer) (v0 (integer 64)) (v1 (integer 64)))
+  (define-alien-routine call-returning-double-struct (struct two-doubles)
+    (cb system-area-pointer) (d0 double) (d1 double))
+  (define-alien-routine call-returning-medium-struct (struct medium-align-8)
+    (cb system-area-pointer) (v0 (integer 64)) (v1 (integer 64)) (v2 (integer 64))))
+
+;;; Test callback returning small struct (16 bytes, in registers)
+#+(or x86-64 arm64)
+(with-test (:name :callback-struct-return-small)
+  (with-alien-callable
+      ((cb (struct small-align-8) ((v0 (integer 64)) (v1 (integer 64)))
+         (with-alien ((s (struct small-align-8)))
+           (setf (slot s 'm0) v0)
+           (setf (slot s 'm1) v1)
+           s)))
+    (let ((result (call-returning-small-struct (alien-sap cb) 100 200)))
+      (assert (= (slot result 'm0) 100))
+      (assert (= (slot result 'm1) 200)))
+    (let ((result (call-returning-small-struct (alien-sap cb) -42 42)))
+      (assert (= (slot result 'm0) -42))
+      (assert (= (slot result 'm1) 42)))))
+
+;;; Test callback returning struct with doubles (SSE registers)
+#+(or x86-64 arm64)
+(with-test (:name :callback-struct-return-doubles)
+  (with-alien-callable
+      ((cb (struct two-doubles) ((d0 double) (d1 double))
+         (with-alien ((s (struct two-doubles)))
+           (setf (slot s 'd0) d0)
+           (setf (slot s 'd1) d1)
+           s)))
+    (let ((result (call-returning-double-struct (alien-sap cb) 1.5d0 2.5d0)))
+      (assert (= (slot result 'd0) 1.5d0))
+      (assert (= (slot result 'd1) 2.5d0)))
+    (let ((result (call-returning-double-struct (alien-sap cb) -3.14d0 2.71d0)))
+      (assert (< (abs (- (slot result 'd0) -3.14d0)) 1d-10))
+      (assert (< (abs (- (slot result 'd1) 2.71d0)) 1d-10)))))
+
+;;; Test callback returning large struct (24 bytes, via hidden pointer)
+#+(or x86-64 arm64)
+(with-test (:name :callback-struct-return-large)
+  (with-alien-callable
+      ((cb (struct medium-align-8) ((v0 (integer 64)) (v1 (integer 64)) (v2 (integer 64)))
+         (with-alien ((s (struct medium-align-8)))
+           (setf (slot s 'm0) v0)
+           (setf (slot s 'm1) v1)
+           (setf (slot s 'm2) v2)
+           s)))
+    (let ((result (call-returning-medium-struct (alien-sap cb) 111 222 333)))
+      (assert (= (slot result 'm0) 111))
+      (assert (= (slot result 'm1) 222))
+      (assert (= (slot result 'm2) 333)))
+    (let ((result (call-returning-medium-struct (alien-sap cb) -1 0 1)))
+      (assert (= (slot result 'm0) -1))
+      (assert (= (slot result 'm1) 0))
+      (assert (= (slot result 'm2) 1)))))
 
 ;;; Clean up
 #-win32 (ignore-errors (delete-file *soname*))
