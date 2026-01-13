@@ -611,5 +611,158 @@
       (assert (= (slot result 'm1) 0))
       (assert (= (slot result 'm2) 1)))))
 
+;;;; Union-by-value tests
+;;;; Unions are a special case of records where all members share the same memory
+
+;;; Small union (8 bytes) - fits in one register
+(define-alien-type nil (union small-union
+                               (as-int (integer 64))
+                               (as-double double)))
+
+(define-struct-by-value-test :union-by-value-small-definitions
+  (define-alien-routine small-union-from-int (union small-union) (val (integer 64)))
+  (define-alien-routine small-union-from-double (union small-union) (val double))
+  (define-alien-routine small-union-get-int (integer 64) (u (union small-union)))
+  (define-alien-routine small-union-get-double double (u (union small-union)))
+  (define-alien-routine small-union-identity (union small-union) (u (union small-union))))
+
+;;; Runtime tests for small union
+#+(or x86-64 arm64)
+(with-test (:name :union-by-value-small-runtime)
+  ;; Test creating union from int and reading back
+  (let ((result (small-union-from-int 42)))
+    (assert (= (slot result 'as-int) 42)))
+  ;; Test creating union from double and reading back
+  (let ((result (small-union-from-double 3.14159d0)))
+    (assert (< (abs (- (slot result 'as-double) 3.14159d0)) 1d-10)))
+  ;; Test passing union as argument (as int)
+  (with-alien ((u (union small-union)))
+    (setf (slot u 'as-int) 12345)
+    (assert (= (small-union-get-int u) 12345)))
+  ;; Test passing union as argument (as double)
+  (with-alien ((u (union small-union)))
+    (setf (slot u 'as-double) 2.71828d0)
+    (assert (< (abs (- (small-union-get-double u) 2.71828d0)) 1d-10)))
+  ;; Test identity
+  (with-alien ((u (union small-union)))
+    (setf (slot u 'as-int) 999)
+    (let ((result (small-union-identity u)))
+      (assert (= (slot result 'as-int) 999)))))
+
+;;; Medium union (16 bytes) - fits in two registers
+(define-alien-type nil (union medium-union
+                               (as-pair (struct medium-union-pair
+                                                (lo (integer 64))
+                                                (hi (integer 64))))
+                               (as-doubles (struct medium-union-doubles
+                                                   (d0 double)
+                                                   (d1 double)))))
+
+(define-struct-by-value-test :union-by-value-medium-definitions
+  (define-alien-routine medium-union-from-pair (union medium-union)
+    (lo (integer 64)) (hi (integer 64)))
+  (define-alien-routine medium-union-from-doubles (union medium-union)
+    (d0 double) (d1 double))
+  (define-alien-routine medium-union-get-lo (integer 64) (u (union medium-union)))
+  (define-alien-routine medium-union-get-hi (integer 64) (u (union medium-union)))
+  (define-alien-routine medium-union-get-d0 double (u (union medium-union)))
+  (define-alien-routine medium-union-get-d1 double (u (union medium-union)))
+  (define-alien-routine medium-union-identity (union medium-union) (u (union medium-union))))
+
+;;; Runtime tests for medium union
+#+(or x86-64 arm64)
+(with-test (:name :union-by-value-medium-runtime)
+  ;; Test creating union from pair of ints
+  (let ((result (medium-union-from-pair 100 200)))
+    (assert (= (slot (slot result 'as-pair) 'lo) 100))
+    (assert (= (slot (slot result 'as-pair) 'hi) 200)))
+  ;; Test creating union from pair of doubles
+  (let ((result (medium-union-from-doubles 1.5d0 2.5d0)))
+    (assert (= (slot (slot result 'as-doubles) 'd0) 1.5d0))
+    (assert (= (slot (slot result 'as-doubles) 'd1) 2.5d0)))
+  ;; Test passing union as argument
+  (with-alien ((u (union medium-union)))
+    (setf (slot (slot u 'as-pair) 'lo) 111)
+    (setf (slot (slot u 'as-pair) 'hi) 222)
+    (assert (= (medium-union-get-lo u) 111))
+    (assert (= (medium-union-get-hi u) 222))
+    (let ((result (medium-union-identity u)))
+      (assert (= (slot (slot result 'as-pair) 'lo) 111))
+      (assert (= (slot (slot result 'as-pair) 'hi) 222)))))
+
+;;; Large union (32 bytes) - uses hidden pointer for return
+(define-alien-type nil (union large-union
+                               (arr-int (array (integer 64) 4))
+                               (arr-double (array double 4))))
+
+(define-struct-by-value-test :union-by-value-large-definitions
+  (define-alien-routine large-union-from-ints (union large-union)
+    (v0 (integer 64)) (v1 (integer 64)) (v2 (integer 64)) (v3 (integer 64)))
+  (define-alien-routine large-union-get-int (integer 64)
+    (u (union large-union)) (index int))
+  (define-alien-routine large-union-get-double double
+    (u (union large-union)) (index int))
+  (define-alien-routine large-union-identity (union large-union) (u (union large-union))))
+
+;;; Runtime tests for large union
+#+(or x86-64 arm64)
+(with-test (:name :union-by-value-large-runtime)
+  ;; Test creating union from ints
+  (let ((result (large-union-from-ints 10 20 30 40)))
+    (assert (= (deref (slot result 'arr-int) 0) 10))
+    (assert (= (deref (slot result 'arr-int) 1) 20))
+    (assert (= (deref (slot result 'arr-int) 2) 30))
+    (assert (= (deref (slot result 'arr-int) 3) 40)))
+  ;; Test passing union as argument
+  (with-alien ((u (union large-union)))
+    (setf (deref (slot u 'arr-int) 0) 100)
+    (setf (deref (slot u 'arr-int) 1) 200)
+    (setf (deref (slot u 'arr-int) 2) 300)
+    (setf (deref (slot u 'arr-int) 3) 400)
+    (assert (= (large-union-get-int u 0) 100))
+    (assert (= (large-union-get-int u 1) 200))
+    (assert (= (large-union-get-int u 2) 300))
+    (assert (= (large-union-get-int u 3) 400)))
+  ;; Test identity
+  (with-alien ((u (union large-union)))
+    (setf (deref (slot u 'arr-int) 0) 1)
+    (setf (deref (slot u 'arr-int) 1) 2)
+    (setf (deref (slot u 'arr-int) 2) 3)
+    (setf (deref (slot u 'arr-int) 3) 4)
+    (let ((result (large-union-identity u)))
+      (assert (= (deref (slot result 'arr-int) 0) 1))
+      (assert (= (deref (slot result 'arr-int) 1) 2))
+      (assert (= (deref (slot result 'arr-int) 2) 3))
+      (assert (= (deref (slot result 'arr-int) 3) 4)))))
+
+;;; Callback tests for unions
+(define-struct-by-value-test :callback-union-routines
+  (define-alien-routine call-with-small-union (integer 64)
+    (cb system-area-pointer) (val (integer 64)))
+  (define-alien-routine call-returning-small-union (union small-union)
+    (cb system-area-pointer) (val (integer 64))))
+
+;;; Test callback with union parameter
+#+(or x86-64 arm64)
+(with-test (:name :callback-union-parameter)
+  (with-alien-callable
+      ((cb (integer 64) ((u (union small-union)))
+         (slot u 'as-int)))
+    (assert (= (call-with-small-union (alien-sap cb) 42) 42))
+    (assert (= (call-with-small-union (alien-sap cb) -999) -999))))
+
+;;; Test callback returning union
+#+(or x86-64 arm64)
+(with-test (:name :callback-union-return)
+  (with-alien-callable
+      ((cb (union small-union) ((val (integer 64)))
+         (with-alien ((u (union small-union)))
+           (setf (slot u 'as-int) val)
+           u)))
+    (let ((result (call-returning-small-union (alien-sap cb) 12345)))
+      (assert (= (slot result 'as-int) 12345)))
+    (let ((result (call-returning-small-union (alien-sap cb) -54321)))
+      (assert (= (slot result 'as-int) -54321)))))
+
 ;;; Clean up
 #-win32 (ignore-errors (delete-file *soname*))

@@ -339,3 +339,78 @@ struct medium_align_8 call_returning_medium_struct(medium_struct_return_callback
                                                     long long v0, long long v1, long long v2) {
   return cb(v0, v1, v2);
 }
+
+/** Union tests - unions are a special case of records where all members share memory */
+
+/* Small union (8 bytes) - fits in one register */
+union small_union {
+  long long as_int;
+  double as_double;
+};
+union small_union small_union_from_int(long long val) {
+  union small_union u;
+  u.as_int = val;
+  return u;
+}
+union small_union small_union_from_double(double val) {
+  union small_union u;
+  u.as_double = val;
+  return u;
+}
+long long small_union_get_int(union small_union u) { return u.as_int; }
+double small_union_get_double(union small_union u) { return u.as_double; }
+union small_union small_union_identity(union small_union u) { return u; }
+
+/* Medium union (16 bytes) - fits in two registers */
+union medium_union {
+  struct { long long lo, hi; } as_pair;
+  struct { double d0, d1; } as_doubles;
+};
+union medium_union medium_union_from_pair(long long lo, long long hi) {
+  union medium_union u;
+  u.as_pair.lo = lo;
+  u.as_pair.hi = hi;
+  return u;
+}
+union medium_union medium_union_from_doubles(double d0, double d1) {
+  union medium_union u;
+  u.as_doubles.d0 = d0;
+  u.as_doubles.d1 = d1;
+  return u;
+}
+long long medium_union_get_lo(union medium_union u) { return u.as_pair.lo; }
+long long medium_union_get_hi(union medium_union u) { return u.as_pair.hi; }
+double medium_union_get_d0(union medium_union u) { return u.as_doubles.d0; }
+double medium_union_get_d1(union medium_union u) { return u.as_doubles.d1; }
+union medium_union medium_union_identity(union medium_union u) { return u; }
+
+/* Large union (>16 bytes) - uses hidden pointer for return */
+union large_union {
+  long long arr_int[4];
+  double arr_double[4];
+};
+union large_union large_union_from_ints(long long v0, long long v1, long long v2, long long v3) {
+  union large_union u;
+  u.arr_int[0] = v0;
+  u.arr_int[1] = v1;
+  u.arr_int[2] = v2;
+  u.arr_int[3] = v3;
+  return u;
+}
+long long large_union_get_int(union large_union u, int index) { return u.arr_int[index]; }
+double large_union_get_double(union large_union u, int index) { return u.arr_double[index]; }
+union large_union large_union_identity(union large_union u) { return u; }
+
+/* Callback tests for unions */
+typedef long long (*small_union_callback)(union small_union u);
+typedef union small_union (*small_union_return_callback)(long long val);
+
+long long call_with_small_union(small_union_callback cb, long long val) {
+  union small_union u;
+  u.as_int = val;
+  return cb(u);
+}
+
+union small_union call_returning_small_union(small_union_return_callback cb, long long val) {
+  return cb(val);
+}
