@@ -295,7 +295,7 @@
               (int-results 0)
               (fp-results 0))
           (dolist (class (sb-alien::struct-classification-register-slots classification))
-            (case class
+            (ecase class
               (:integer
                (push (make-wired-tn* 'unsigned-byte-64
                                      unsigned-reg-sc-number
@@ -313,8 +313,7 @@
                                      double-reg-sc-number
                                      fp-results)
                      result-tns)
-               (incf fp-results))
-              (t))) ; skip unknown
+               (incf fp-results))))
           (setf (result-state-num-results state) (+ int-results fp-results))
           (nreverse result-tns)))))
 
@@ -381,7 +380,7 @@
               (offsets nil)
               (offset 0))
           (dolist (class (sb-alien::struct-classification-register-slots classification))
-            (case class
+            (ecase class
               (:integer
                (push (int-arg state 'unsigned-byte-64
                               unsigned-reg-sc-number
@@ -402,8 +401,7 @@
                                 double-stack-sc-number)
                      arg-tns)
                (push (cons offset :double) offsets)
-               (incf offset 8))
-              (t))) ; skip unknown
+               (incf offset 8))))
           (setf arg-tns (nreverse arg-tns))
           (setf offsets (nreverse offsets))
           ;; Return a function that emits the load VOPs
