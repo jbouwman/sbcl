@@ -14,7 +14,7 @@ struct tiny_align_8 tiny_align_8_identity(struct tiny_align_8 m) {
   return m;
 }
 
-/** A small structure with 8-byte alignment.
+/* A small structure with 8-byte alignment.
     SysV x86-64 and AAPCS64 will pass this by register.
 */
 struct small_align_8 {
@@ -36,7 +36,7 @@ struct small_align_8 small_align_8_identity(struct small_align_8 m) {
   return m;
 }
 
-/** A large structure with 8-byte alignment.
+/* A large structure with 8-byte alignment.
     This should be too big for any architecture to pass by registers.
 */
 struct large_align_8 {
@@ -66,7 +66,7 @@ large_align_8_get(m13);
 large_align_8_get(m14);
 large_align_8_get(m15);
 
-/** Mutates the input struct. Volatile to avoid compiler optimizing away the mutation.*/
+/* Mutates the input struct. Volatile to avoid compiler optimizing away the mutation.*/
 void large_align_8_mutate(volatile struct large_align_8 m) {
   m.m0++;
   m.m1++;

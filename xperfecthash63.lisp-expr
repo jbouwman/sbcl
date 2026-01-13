@@ -1687,5 +1687,11 @@
 (#(73D42188 937BB764 A4528420 D0F360C2 D5F368A1)
  "(TRUNCATE ABS ASH * /)"
  "((& (+ (>> val 5) (>> val 22)) 7))")
+(#(42D83FFB 71FB8EC1 9E6D8DE3 B8BBE117 FB0112B4)
+ "(:ALLOW-OTHER-KEYS :MEMORY-P :ALIGNMENT :SIZE :REGISTER-SLOTS)"
+ "((& (- (>> val 3) (>> val 22)) 7))")
+(#(8 A 10 12 30 32)
+ "(24 25 9 8 5 4)"
+ "((& (^ (>> val 1) (>> val 4)) 7))")
 )
 ;; EOF

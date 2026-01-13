@@ -612,7 +612,6 @@
       (assert (= (slot result 'm2) 1)))))
 
 ;;;; Union-by-value tests
-;;;; Unions are a special case of records where all members share the same memory
 
 ;;; Small union (8 bytes) - fits in one register
 (define-alien-type nil (union small-union
