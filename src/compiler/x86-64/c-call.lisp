@@ -219,6 +219,13 @@
 ;;; Called from src/code/c-call.lisp
 (defun record-result-tn (type state)
   "Handle struct return values."
+  ;; Windows x64 uses Microsoft calling convention, not System V AMD64.
+  ;; To add Windows support:
+  ;;   1. Implement classify-struct-win64: structs of 1/2/4/8 bytes return in RAX,
+  ;;      larger structs use hidden pointer in RCX (not RDI)
+  ;;   2. Adapt this function to use the Windows classification
+  ;;   3. Update make-call-out-tns to reserve RCX instead of RDI for sret pointer
+  #+win32 (error "Struct-by-value return not implemented for Windows x64 ABI")
   (let ((classification (or *cached-struct-classification*
                             (classify-struct-sysv-amd64 type))))
     (if (sb-alien::struct-classification-memory-p classification)
@@ -299,6 +306,13 @@
   "Handle struct arguments.
    For large structs (>16 bytes), copies to stack per System V AMD64 ABI.
    For small structs, returns a function that emits load VOPs into registers."
+  ;; Windows x64 uses Microsoft calling convention, not System V AMD64.
+  ;; To add Windows support:
+  ;;   1. Implement classify-struct-win64: structs >8 bytes are passed by pointer
+  ;;      (caller allocates, passes address in integer register)
+  ;;   2. Structs of 1/2/4/8 bytes are passed in a single integer register
+  ;;   3. Adapt this function to handle both cases
+  #+win32 (error "Struct-by-value arguments not implemented for Windows x64 ABI")
   (let ((classification (classify-struct-sysv-amd64 type)))
     (if (sb-alien::struct-classification-memory-p classification)
         ;; Large struct: copy to stack (System V AMD64 ABI)
@@ -751,6 +765,16 @@
 
 #-sb-xc-host
 (defun alien-callback-assembler-wrapper (index result-type argument-types)
+  ;; Windows x64 uses Microsoft calling convention, not System V AMD64.
+  ;; To add Windows struct-by-value callback support:
+  ;;   1. Struct arguments >8 bytes: caller passes pointer, not value
+  ;;   2. Struct arguments 1/2/4/8 bytes: passed in integer register as if integer
+  ;;   3. Struct returns >8 bytes: hidden pointer in RCX (first arg register)
+  ;;   4. Struct returns 1/2/4/8 bytes: returned in RAX
+  #+win32
+  (when (or (alien-record-type-p result-type)
+            (some #'sb-alien::alien-record-type-p argument-types))
+    (error "Struct-by-value callbacks not implemented for Windows x64 ABI"))
   (labels ((make-tn-maker (sc-name)
              (lambda (offset)
                (make-random-tn (sc-or-lose sc-name) offset)))
