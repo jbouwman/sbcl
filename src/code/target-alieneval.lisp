@@ -109,13 +109,9 @@ This is SETFable."
 ;;; WITH-ALIEN. Without this mechanism, the WITH-ALIEN cleanup would run
 ;;; before the struct data is copied to the return area, causing corruption.
 ;;;
-;;; WITH-OUTER-ALIEN-STACK-CLEANUP establishes a lexical marker that
-;;; IN-OUTER-ALIEN-STACK-CLEANUP-CONTEXT-P detects during macroexpansion.
-(defmacro in-outer-alien-stack-cleanup-context-p (&environment env)
-  "Check if we're in a context where an outer form handles *alien-stack-pointer* cleanup.
-   Returns T at macroexpansion time if WITH-OUTER-ALIEN-STACK-CLEANUP is in scope."
-  (nth-value 1 (macroexpand-1 '%in-outer-alien-stack-cleanup-context% env)))
-
+;;; WITH-OUTER-ALIEN-STACK-CLEANUP establishes a lexical marker (via symbol-macrolet)
+;;; that WITH-ALIEN detects during its macroexpansion using macroexpand-1.
+;;; The marker symbol %IN-OUTER-ALIEN-STACK-CLEANUP-CONTEXT% is internal.
 (defmacro with-outer-alien-stack-cleanup (&body body)
   "Establish an outer *alien-stack-pointer* binding and signal to inner WITH-ALIEN
    forms that they should skip their own cleanup. Used by callback struct returns."
@@ -202,8 +198,10 @@ This is SETFable."
              ;; The outer WITH-OUTER-ALIEN-STACK-CLEANUP already established
              ;; a single *alien-stack-pointer* binding that will clean up all
              ;; allocations after the struct is copied to the result area.
+             ;; Detect this by checking for the %in-outer-alien-stack-cleanup-context%
+             ;; symbol-macrolet marker in the lexical environment.
              ((and bind-alien-stack-pointer
-                   (in-outer-alien-stack-cleanup-context-p))
+                   (nth-value 1 (macroexpand-1 '%in-outer-alien-stack-cleanup-context% env)))
               body)
              (bind-alien-stack-pointer
               ;; The LET IR1-translator will actually turn this into
