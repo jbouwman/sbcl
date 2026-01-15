@@ -1,3 +1,6 @@
+;;;; IR2 converters that translate IR1 operations (particularly memory
+;;;; allocation primitives) into VOPs
+
 ;;;; This software is part of the SBCL system. See the README file for
 ;;;; more information.
 ;;;;
@@ -34,6 +37,24 @@
   t)
 (defoptimizer (%make-funcallable-instance stack-allocate-result) ((n) node)
   t)
+
+;;; struct-by-value return allocation can be stack allocated when the
+;;; result is declared dynamic-extent
+(defoptimizer (%allocate-struct-return stack-allocate-result) ((size) node)
+  t)
+
+#+x86-64
+(defoptimizer (%allocate-struct-return ir2-convert) ((size) node block)
+  (when (node-stack-allocate-p node)
+    (let* ((lvar (node-lvar node))
+           (locs (lvar-result-tns lvar (list (specifier-type 'system-area-pointer))))
+           (result (first locs))
+           (size-value (and (constant-lvar-p size) (lvar-value size))))
+      (unless size-value
+        (error "~S requires constant size argument" '%allocate-struct-return))
+      (vop sb-vm::alloc-alien-stack-space node block size-value result)
+      (move-lvar-result node block locs lvar)
+      t)))
 
 (defoptimizer ir2-convert-reffer ((object) node block name offset lowtag)
   (let* ((lvar (node-lvar node))
