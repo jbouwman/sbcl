@@ -69,6 +69,12 @@
 (defknown alien-funcall (alien-value &rest t) *
   (any recursive))
 
+(deftransform %allocate-struct-return ((size) * * :node node)
+  ;; stack allocation is handled in IR2
+  (if (node-stack-allocate-p node)
+      (give-up-ir1-transform)
+      `(sb-alien::%make-alien size)))
+
 (defknown sb-alien::string-to-c-string (simple-string t) (or (simple-array (unsigned-byte 8) (*))
                                                              simple-base-string)
     (movable flushable))
@@ -672,14 +678,14 @@
               ((multiple-value-bind (in-registers-p register-slots size)
                    (sb-alien::struct-return-info return-type)
                  (cond
-                   ;; Small struct: returned in registers, store to heap memory
+                   ;; Small struct: returned in registers
                    (in-registers-p
                     (let* ((num-values (length register-slots))
                            (temps (loop repeat num-values collect (gensym)))
                            (result-sap (gensym "RESULT-SAP")))
                       (setf body
                             `(multiple-value-bind ,temps ,body
-                               (let ((,result-sap (sb-alien::%make-alien ,size)))
+                               (let ((,result-sap (%allocate-struct-return ,size)))
                                  ,@(generate-struct-store-code temps register-slots result-sap)
                                  (sb-alien::%sap-alien ,result-sap ',return-type))))
                       t))
@@ -689,7 +695,7 @@
                    ((and size (not in-registers-p))
                     ;; sret-sap was defined at the top of this let*
                     (setf body
-                          `(let ((,sret-sap (sb-alien::%make-alien ,size)))
+                          `(let ((,sret-sap (%allocate-struct-return ,size)))
                              ,body  ; %alien-funcall with sret-sap as first arg
                              ;; The callee wrote to sret-sap, return it as alien
                              (sb-alien::%sap-alien ,sret-sap ',return-type)))

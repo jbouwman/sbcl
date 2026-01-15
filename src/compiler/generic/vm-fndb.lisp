@@ -911,3 +911,9 @@
 
 (defknown sb-vm::%weakvec-ref (weak-pointer index) t (flushable))
 (defknown sb-vm::%weakvec-set (weak-pointer index t) (values) ())
+
+;;; %allocate-struct-return is used for struct-by-value alien
+;;; calls. For stack allocation, IR2 converter emits
+;;; alloc-alien-stack-space VOP. Otherwise falls back to %make-alien
+;;; via source transform.
+(defknown %allocate-struct-return (index) system-area-pointer (flushable))
