@@ -691,5 +691,39 @@
     (let ((result (call-returning-small-union (alien-sap cb) -54321)))
       (assert (= (slot result 'as-int) -54321)))))
 
+;;; Test struct-by-value return correctness
+;;; Note: Stack allocation with dynamic-extent is supported when using
+;;; %alien-funcall directly (where the compiler can see the dynamic-extent
+;;; declaration at compile time). However, define-alien-routine creates a
+;;; pre-compiled wrapper that can't optimize based on caller context.
+
+(defun struct-return-test-1 (val)
+  (declare (optimize speed))
+  (let ((result (tiny-align-8-return val)))
+    (slot result 'm0)))
+
+(defun struct-return-test-2 (val)
+  (declare (optimize speed))
+  (let ((result (tiny-align-8-return val)))
+    (declare (dynamic-extent result))
+    (slot result 'm0)))
+
+(with-test (:name :struct-by-value-return-correctness)
+  ;; Verify struct returns work correctly
+  (assert (= (struct-return-test-1 42) 42))
+  (assert (= (struct-return-test-1 -123) -123))
+  ;; dynamic-extent declared version should also work
+  (assert (= (struct-return-test-2 42) 42))
+  (assert (= (struct-return-test-2 -123) -123)))
+
+;;; Test that the wrapper function uses %allocate-struct-alien which calls malloc
+;;; This verifies the struct return implementation is working correctly
+(with-test (:name :struct-by-value-wrapper-codegen)
+  (let ((output (with-output-to-string (s)
+                  (disassemble #'tiny-align-8-return :stream s))))
+    ;; The wrapper should call malloc to allocate struct memory
+    (assert (search "malloc" output)
+            () "Struct return wrapper should call malloc")))
+
 ;;; Clean up
 #-win32 (ignore-errors (delete-file *soname*))

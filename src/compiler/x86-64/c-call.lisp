@@ -817,7 +817,54 @@ Floats are passed in integer registers."
       (unless (zerop amount)
         (let ((delta (align-up amount 8)))
           (inst sub :qword (alien-stack-ptr) delta)))
-      (inst mov result (alien-stack-ptr)))))
+      (inst mov result (alien-stack-ptr))))
+
+  ;; Combined allocation of struct memory (on alien stack) and alien-value
+  ;; wrapper (on Lisp stack). This allows dynamic-extent to properly
+  ;; stack-allocate both together.
+  (define-vop (alloc-struct-alien-stack)
+    (:info struct-size)
+    (:args (type-arg :scs (constant)))
+    (:results (result :scs (descriptor-reg)))
+    (:temporary (:sc sap-reg) struct-sap)
+    (:generator 10
+      ;; 1. Allocate struct memory on alien stack
+      (unless (zerop struct-size)
+        (let ((delta (align-up struct-size 8)))
+          (inst sub :qword (alien-stack-ptr) delta)))
+      (inst mov struct-sap (alien-stack-ptr))
+
+      ;; 2. Allocate alien-value wrapper on Lisp stack (3 words = 24 bytes)
+      ;;    Layout: [header|layout] [sap-slot] [type-slot]
+      (let ((alien-value-bytes (pad-data-block 3)))
+        (inst sub rsp-tn alien-value-bytes)
+        (inst and rsp-tn #.(lognot lowtag-mask))
+
+        ;; 3. Initialize header (low 32 bits: instance-widetag with length=2)
+        (inst mov :dword (ea 0 rsp-tn)
+              (compute-object-header 3 instance-widetag))
+
+        ;; 4. Store layout for alien-value in high 32 bits of header
+        #+compact-instance-header
+        (inst mov :dword (ea 4 rsp-tn)
+              (make-fixup 'sb-alien-internals:alien-value :layout))
+
+        ;; 5. Store SAP slot (points to struct memory on alien stack)
+        (inst mov (ea (ash (+ (get-dsd-index sb-alien-internals:alien-value sb-kernel::sap)
+                              instance-slots-offset)
+                           word-shift)
+                      rsp-tn)
+              struct-sap)
+
+        ;; 6. Store type slot (the constant alien-type)
+        (inst mov (ea (ash (+ (get-dsd-index sb-alien-internals:alien-value sb-kernel::type)
+                              instance-slots-offset)
+                           word-shift)
+                      rsp-tn)
+              (tn-value type-arg))
+
+        ;; 7. Apply lowtag to result
+        (inst lea result (ea instance-pointer-lowtag rsp-tn))))))
 
 ;;; Callbacks
 

@@ -69,11 +69,16 @@
 (defknown alien-funcall (alien-value &rest t) *
   (any recursive))
 
-(deftransform %allocate-struct-return ((size) * * :node node)
-  ;; stack allocation is handled in IR2
+;;; %allocate-struct-alien allocates both struct memory and alien-value
+;;; wrapper. Stack allocation is handled in IR2; heap allocation falls
+;;; back to %make-alien + %sap-alien.
+(deftransform %allocate-struct-alien ((size type) * * :node node)
+  (unless (constant-lvar-p type)
+    (give-up-ir1-transform "type must be constant"))
   (if (node-stack-allocate-p node)
       (give-up-ir1-transform)
-      `(sb-alien::%make-alien size)))
+      (let ((type-value (lvar-value type)))
+        `(%sap-alien (sb-alien::%make-alien size) ',type-value))))
 
 (defknown sb-alien::string-to-c-string (simple-string t) (or (simple-array (unsigned-byte 8) (*))
                                                              simple-base-string)
@@ -673,7 +678,6 @@
                  (setf body
                        `(multiple-value-bind ,(temps) ,body
                           (values ,@(results))))))
-              ;; Struct-by-value return handling
               #-sb-xc-host
               ((multiple-value-bind (in-registers-p register-slots size)
                    (sb-alien::struct-return-info return-type)
@@ -682,23 +686,30 @@
                    (in-registers-p
                     (let* ((num-values (length register-slots))
                            (temps (loop repeat num-values collect (gensym)))
+                           (result-alien (gensym "RESULT-ALIEN"))
                            (result-sap (gensym "RESULT-SAP")))
                       (setf body
                             `(multiple-value-bind ,temps ,body
-                               (let ((,result-sap (%allocate-struct-return ,size)))
+                               (let* ((,result-alien (%allocate-struct-alien ,size ',return-type))
+                                      (,result-sap (sb-alien:alien-sap ,result-alien)))
                                  ,@(generate-struct-store-code temps register-slots result-sap)
-                                 (sb-alien::%sap-alien ,result-sap ',return-type))))
+                                 ,result-alien)))
                       t))
                    ;; Large struct: C expects hidden pointer (x8/RDI), returns it (x0/RAX)
                    ;; sret-sap was already added to %alien-funcall args at the top
-                   ;; Here we wrap with allocation and return the sap-alien
+                   ;; Here we wrap with allocation and return the alien-value
                    ((and size (not in-registers-p))
-                    ;; sret-sap was defined at the top of this let*
-                    (setf body
-                          `(let ((,sret-sap (%allocate-struct-return ,size)))
-                             ,body  ; %alien-funcall with sret-sap as first arg
-                             ;; The callee wrote to sret-sap, return it as alien
-                             (sb-alien::%sap-alien ,sret-sap ',return-type)))
+                    ;; For large structs, we still need sret-sap to
+                    ;; pass to C: allocate the combined alien-value
+                    ;; first, extract its SAP, and use that for the
+                    ;; hidden pointer.
+                    (let ((result-alien (gensym "RESULT-ALIEN")))
+                      (setf body
+                            `(let* ((,result-alien (%allocate-struct-alien ,size ',return-type))
+                                    (,sret-sap (sb-alien:alien-sap ,result-alien)))
+                               ,body  ; %alien-funcall with sret-sap as first arg
+                               ;; callee wrote to the memory, return the alien-value
+                               ,result-alien)))
                     t))))  ; close inner cond clause, inner cond, m-v-b, outer cond clause
               (t
                (setf body `(naturalize ,body ',return-type))))
