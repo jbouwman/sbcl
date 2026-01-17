@@ -827,6 +827,7 @@ Floats are passed in integer registers."
     (:args (type-arg :scs (constant)))
     (:results (result :scs (descriptor-reg)))
     (:temporary (:sc sap-reg) struct-sap)
+    (:temporary (:sc unsigned-reg) temp)
     (:generator 10
       ;; Allocate struct memory on alien stack
       (unless (zerop struct-size)
@@ -856,12 +857,13 @@ Floats are passed in integer registers."
             struct-sap)
 
       ;; Store type slot
+      (inst mov temp type-arg)
       (inst mov (ea (- (ash (+ (get-dsd-index sb-alien-internals:alien-value sb-kernel::type)
                                instance-slots-offset)
                             word-shift)
                        instance-pointer-lowtag)
                     result)
-            (tn-value type-arg)))))
+            temp))))
 
 ;;; Callbacks
 

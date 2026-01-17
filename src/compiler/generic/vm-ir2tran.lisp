@@ -53,8 +53,8 @@
         (error "~S requires constant size argument" '%allocate-struct-alien))
       (unless type-value
         (error "~S requires constant type argument" '%allocate-struct-alien))
-      (vop sb-vm::alloc-struct-alien-stack node block size-value
-           (emit-constant type-value) result)
+      (vop sb-vm::alloc-struct-alien-stack node block
+           (emit-constant type-value) size-value result)
       (move-lvar-result node block locs lvar)
       t)))
 
