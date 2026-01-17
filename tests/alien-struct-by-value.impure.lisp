@@ -725,5 +725,20 @@
     (assert (search "malloc" output)
             () "Struct return wrapper should call malloc")))
 
+;;; Test that %allocate-struct-alien with dynamic-extent uses stack allocation
+;;; This directly tests the stack allocation VOP
+(defun test-stack-alloc-struct-alien ()
+  (declare (optimize speed))
+  (let ((alien (sb-c::%allocate-struct-alien 8 '(struct tiny-align-8))))
+    (declare (dynamic-extent alien))
+    (sb-alien:alien-sap alien)))
+
+(with-test (:name :struct-alien-stack-allocation)
+  (let ((output (with-output-to-string (s)
+                  (disassemble #'test-stack-alloc-struct-alien :stream s))))
+    ;; With dynamic-extent, should NOT call malloc - uses stack allocation instead
+    (assert (not (search "malloc" output))
+            () "Stack-allocated struct-alien should not call malloc")))
+
 ;;; Clean up
 #-win32 (ignore-errors (delete-file *soname*))
