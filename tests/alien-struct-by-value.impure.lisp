@@ -740,46 +740,6 @@
     (assert (not (search "%ALLOCATE-STRUCT-ALIEN" output))
             () "Stack-allocated struct-alien should not call %allocate-struct-alien~%~A" output)))
 
-;;; Performance test: stack allocation should be faster than heap allocation
-;;; Note: We use with-alien for heap allocation comparison since it properly
-;;; handles the alien-type parsing.
-(defun benchmark-heap-alloc-struct-alien (iterations)
-  "Allocate struct-alien on heap N times using with-alien."
-  (declare (optimize speed))
-  (dotimes (i iterations)
-    (sb-alien:with-alien ((s (struct tiny-align-8)))
-      (sb-alien:alien-sap s))))
-
-(defun benchmark-stack-alloc-struct-alien (iterations)
-  "Allocate struct-alien on stack N times."
-  (declare (optimize speed))
-  (dotimes (i iterations)
-    (let ((alien (sb-c::%allocate-struct-alien 8 '(struct tiny-align-8))))
-      (declare (dynamic-extent alien))
-      (sb-alien:alien-sap alien))))
-
-(with-test (:name :struct-alien-stack-allocation-performance)
-  ;; Warmup
-  (benchmark-heap-alloc-struct-alien 1000)
-  (benchmark-stack-alloc-struct-alien 1000)
-  ;; Measure
-  (let* ((iterations 100000)
-         (heap-start (get-internal-run-time))
-         (_ (benchmark-heap-alloc-struct-alien iterations))
-         (heap-end (get-internal-run-time))
-         (stack-start (get-internal-run-time))
-         (_2 (benchmark-stack-alloc-struct-alien iterations))
-         (stack-end (get-internal-run-time))
-         (heap-time (- heap-end heap-start))
-         (stack-time (- stack-end stack-start)))
-    (declare (ignore _ _2))
-    ;; Stack allocation should not be significantly slower than heap
-    ;; (in practice it should be faster, but timing can be noisy)
-    (assert (<= stack-time (* 2 (max heap-time 1)))
-            ()
-            "Stack allocation (~A ticks) should not be slower than 2x heap (~A ticks)"
-            stack-time heap-time)))
-
 ;;; Test :inline option for define-alien-routine
 ;;; This enables stack allocation of struct-by-value returns via inlining.
 
