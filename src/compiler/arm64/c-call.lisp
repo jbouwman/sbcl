@@ -551,6 +551,43 @@
                              +number-stack-alignment-mask+)))
         (inst add nsp-tn nsp-tn (add-sub-immediate delta))))))
 
+;; Combined allocation of struct memory (on number stack) and alien-value
+;; wrapper (on Lisp stack). This allows dynamic-extent to properly
+;; stack-allocate both together.
+(define-vop (alloc-struct-alien-stack)
+  (:info struct-size)
+  (:args (layout-arg :scs (constant))
+         (type-arg :scs (constant)))
+  (:results (result :scs (descriptor-reg)))
+  (:temporary (:sc sap-reg) struct-sap)
+  (:temporary (:sc non-descriptor-reg) temp)
+  (:vop-var vop)
+  (:generator 10
+    ;; Allocate struct memory on number stack
+    (unless (zerop struct-size)
+      (let ((delta (logandc2 (+ struct-size +number-stack-alignment-mask+)
+                             +number-stack-alignment-mask+)))
+        (inst sub nsp-tn nsp-tn (add-sub-immediate delta))))
+    (inst mov-sp struct-sap nsp-tn)
+    ;; Allocate alien-value wrapper on Lisp stack
+    (with-fixed-allocation (result temp instance-widetag 4
+                            :lowtag instance-pointer-lowtag
+                            :stack-allocate-p t)
+      ;; Store layout slot
+      (load-constant vop layout-arg temp)
+      (storew temp result instance-slots-offset instance-pointer-lowtag)
+      ;; Store SAP slot (points to struct memory on number stack)
+      (storew struct-sap result
+              (+ instance-slots-offset
+                 (get-dsd-index sb-alien-internals:alien-value sb-kernel::sap))
+              instance-pointer-lowtag)
+      ;; Store type slot
+      (load-constant vop type-arg temp)
+      (storew temp result
+              (+ instance-slots-offset
+                 (get-dsd-index sb-alien-internals:alien-value sb-kernel::type))
+              instance-pointer-lowtag))))
+
 ;;; Callback
 #-sb-xc-host
 (defun alien-callback-accessor-form (type sap offset)

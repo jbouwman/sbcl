@@ -740,5 +740,78 @@
     (assert (not (search "%ALLOCATE-STRUCT-ALIEN" output))
             () "Stack-allocated struct-alien should not call %allocate-struct-alien~%~A" output)))
 
+;;; Performance test: stack allocation should be faster than heap allocation
+;;; Note: We use with-alien for heap allocation comparison since it properly
+;;; handles the alien-type parsing.
+(defun benchmark-heap-alloc-struct-alien (iterations)
+  "Allocate struct-alien on heap N times using with-alien."
+  (declare (optimize speed))
+  (dotimes (i iterations)
+    (sb-alien:with-alien ((s (struct tiny-align-8)))
+      (sb-alien:alien-sap s))))
+
+(defun benchmark-stack-alloc-struct-alien (iterations)
+  "Allocate struct-alien on stack N times."
+  (declare (optimize speed))
+  (dotimes (i iterations)
+    (let ((alien (sb-c::%allocate-struct-alien 8 '(struct tiny-align-8))))
+      (declare (dynamic-extent alien))
+      (sb-alien:alien-sap alien))))
+
+(with-test (:name :struct-alien-stack-allocation-performance)
+  ;; Warmup
+  (benchmark-heap-alloc-struct-alien 1000)
+  (benchmark-stack-alloc-struct-alien 1000)
+  ;; Measure
+  (let* ((iterations 100000)
+         (heap-start (get-internal-run-time))
+         (_ (benchmark-heap-alloc-struct-alien iterations))
+         (heap-end (get-internal-run-time))
+         (stack-start (get-internal-run-time))
+         (_2 (benchmark-stack-alloc-struct-alien iterations))
+         (stack-end (get-internal-run-time))
+         (heap-time (- heap-end heap-start))
+         (stack-time (- stack-end stack-start)))
+    (declare (ignore _ _2))
+    ;; Stack allocation should not be significantly slower than heap
+    ;; (in practice it should be faster, but timing can be noisy)
+    (assert (<= stack-time (* 2 (max heap-time 1)))
+            ()
+            "Stack allocation (~A ticks) should not be slower than 2x heap (~A ticks)"
+            stack-time heap-time)))
+
+;;; Test :inline option for define-alien-routine
+;;; This enables stack allocation of struct-by-value returns via inlining.
+
+(define-alien-routine ("tiny_align_8_return" tiny-align-8-return-inline)
+    (struct tiny-align-8)
+  :inline t
+  (val (integer 64)))
+
+;;; Test that the inline wrapper has an inline expansion recorded
+(with-test (:name :struct-by-value-inline-expansion)
+  (assert (eq (sb-int:info :function :inlinep 'tiny-align-8-return-inline) 'inline)
+          () "Inline wrapper should be declared inline")
+  (assert (sb-c::fun-name-inline-expansion 'tiny-align-8-return-inline)
+          () "Inline wrapper should have inline expansion recorded"))
+
+;;; Test that inlined wrapper with dynamic-extent uses stack allocation
+(defun test-inline-stack-alloc (val)
+  (declare (optimize speed))
+  (let ((result (tiny-align-8-return-inline val)))
+    (declare (dynamic-extent result))
+    (slot result 'm0)))
+
+(with-test (:name :struct-by-value-inline-stack-allocation)
+  ;; First verify the function works correctly
+  (assert (= (test-inline-stack-alloc 42) 42))
+  (assert (= (test-inline-stack-alloc -123) -123))
+  ;; Check that disassembly shows stack allocation (no call to %ALLOCATE-STRUCT-ALIEN)
+  (let ((output (with-output-to-string (s)
+                  (disassemble #'test-inline-stack-alloc :stream s))))
+    (assert (not (search "%ALLOCATE-STRUCT-ALIEN" output))
+            () "Inlined wrapper with dynamic-extent should use stack allocation~%~A"
+            output)))
+
 ;;; Clean up
 #-win32 (ignore-errors (delete-file *soname*))
