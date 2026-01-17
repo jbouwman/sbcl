@@ -733,12 +733,12 @@
     (declare (dynamic-extent alien))
     (sb-alien:alien-sap alien)))
 
+;;; Test that with stack allocation, the allocation is inlined
 (with-test (:name :struct-alien-stack-allocation)
   (let ((output (with-output-to-string (s)
                   (disassemble #'test-stack-alloc-struct-alien :stream s))))
-    ;; With dynamic-extent, should NOT call malloc - uses stack allocation instead
-    (assert (not (search "malloc" output))
-            () "Stack-allocated struct-alien should not call malloc")))
+    (assert (not (search "%ALLOCATE-STRUCT-ALIEN" output))
+            () "Stack-allocated struct-alien should not call %allocate-struct-alien~%~A" output)))
 
 ;;; Clean up
 #-win32 (ignore-errors (delete-file *soname*))
