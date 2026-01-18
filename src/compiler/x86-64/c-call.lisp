@@ -819,13 +819,9 @@ Floats are passed in integer registers."
           (inst sub :qword (alien-stack-ptr) delta)))
       (inst mov result (alien-stack-ptr))))
 
-  ;; Combined allocation of struct memory (on alien stack) and alien-value
-  ;; wrapper (on Lisp stack). This allows dynamic-extent to properly
-  ;; stack-allocate both together.
-  ;;
-  ;; Object layout depends on #+/-compact-instance-header:
-  ;;   #+compact-instance-header: [header|layout] [sap] [type]     = 3 words
-  ;;   #-compact-instance-header: [header] [layout] [sap] [type]   = 4 words
+  ;; Allocate struct memory on alien stack and alien-value wrapper on
+  ;; Lisp stack. This allows dynamic-extent to properly stack-allocate
+  ;; both at once.
   (define-vop (alloc-struct-alien-stack)
     (:info struct-size)
     (:args (layout-arg :scs (constant))
@@ -839,28 +835,24 @@ Floats are passed in integer registers."
         (let ((delta (align-up struct-size 8)))
           (inst sub :qword (alien-stack-ptr) delta)))
       (inst mov struct-sap (alien-stack-ptr))
-
       ;; Allocate alien-value wrapper on Lisp stack
-      ;; Total words = 1 (header) + dd-length (which includes layout slot if not compact)
-      ;; dd-length = instance-data-start + 2 data slots
+      ;; Total words = 1 (header) + instance-data-start + 2 data slots
       (let ((total-words (+ 1 instance-data-start 2)))
         (stack-allocation (pad-data-block total-words) instance-pointer-lowtag result)
         ;; Initialize header - encodes payload length (total-words - 1)
         (inst mov :dword (ea (- instance-pointer-lowtag) result)
               (compute-object-header total-words instance-widetag)))
-
       ;; Store layout for alien-value
       (inst mov temp layout-arg)
       #+compact-instance-header
       ;; Layout goes in high 32 bits of header word
       (inst mov :dword (ea (- 4 instance-pointer-lowtag) result) (reg-in-size temp :dword))
       #-compact-instance-header
-      ;; Layout goes in first slot after header (at instance-slots-offset)
+      ;; Layout goes in first slot after header
       (inst mov (ea (- (ash instance-slots-offset word-shift)
                        instance-pointer-lowtag)
                     result)
             temp)
-
       ;; Store SAP slot (points to struct memory on alien stack)
       (inst mov (ea (- (ash (+ (get-dsd-index sb-alien-internals:alien-value sb-kernel::sap)
                                instance-slots-offset)
@@ -868,7 +860,6 @@ Floats are passed in integer registers."
                        instance-pointer-lowtag)
                     result)
             struct-sap)
-
       ;; Store type slot
       (inst mov temp type-arg)
       (inst mov (ea (- (ash (+ (get-dsd-index sb-alien-internals:alien-value sb-kernel::type)
