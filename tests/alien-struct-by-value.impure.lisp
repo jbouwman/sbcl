@@ -727,9 +727,15 @@
 
 ;;; Test that %allocate-struct-alien with dynamic-extent uses stack allocation
 ;;; This directly tests the stack allocation VOP
+;;; Helper macro to get alien-type at compile time (required for constant-lvar-p)
+(defmacro %allocate-struct-alien-for-test (size type-spec)
+  `(sb-c::%allocate-struct-alien
+    ,size
+    ',(sb-alien-internals:parse-alien-type type-spec nil)))
+
 (defun test-stack-alloc-struct-alien ()
   (declare (optimize speed))
-  (let ((alien (sb-c::%allocate-struct-alien 8 '(struct tiny-align-8))))
+  (let ((alien (%allocate-struct-alien-for-test 8 (struct tiny-align-8))))
     (declare (dynamic-extent alien))
     (sb-alien:alien-sap alien)))
 
@@ -745,7 +751,7 @@
 ;;; while heap-allocated ones should use different addresses.
 (defun get-heap-alloc-sap ()
   (declare (optimize speed))
-  (let ((alien (sb-c::%allocate-struct-alien 8 '(struct tiny-align-8))))
+  (let ((alien (%allocate-struct-alien-for-test 8 (struct tiny-align-8))))
     ;; No dynamic-extent - heap allocated
     (sb-sys:sap-int (sb-alien:alien-sap alien))))
 

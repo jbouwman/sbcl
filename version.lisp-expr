@@ -1,4 +1,4 @@
 ;;; This file is auto-generated using generate-version.sh. Every time
 ;;; you re-run make.sh, this file will be overwritten if you are
 ;;; working from a Git checkout.
-"2.6.0.96.srbv-stack-alloc.7-f77e9d675-WIP"
+"2.6.0.96.srbv-stack-alloc.12-3e3656fe1-WIP"
