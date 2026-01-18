@@ -817,7 +817,65 @@ Floats are passed in integer registers."
       (unless (zerop amount)
         (let ((delta (align-up amount 8)))
           (inst sub :qword (alien-stack-ptr) delta)))
-      (inst mov result (alien-stack-ptr)))))
+      (inst mov result (alien-stack-ptr))))
+
+  ;; Allocate struct memory on alien stack, SAP object on Lisp stack,
+  ;; and alien-value wrapper on Lisp stack. This allows dynamic-extent
+  ;; to properly stack-allocate all three at once.
+  (define-vop (alloc-struct-alien-stack)
+    (:info struct-size)
+    (:args (layout-arg :scs (constant))
+           (type-arg :scs (constant)))
+    (:results (result :scs (descriptor-reg)))
+    (:temporary (:sc sap-reg) struct-sap)
+    (:temporary (:sc unsigned-reg) temp)
+    (:temporary (:sc unsigned-reg) sap-object)
+    (:generator 10
+      ;; Allocate struct memory on alien stack
+      (unless (zerop struct-size)
+        (let ((delta (align-up struct-size 8)))
+          (inst sub :qword (alien-stack-ptr) delta)))
+      (inst mov struct-sap (alien-stack-ptr))
+      ;; Allocate SAP object on Lisp stack (header + pointer slot)
+      (stack-allocation (pad-data-block sap-size) other-pointer-lowtag sap-object)
+      ;; Initialize SAP header
+      (inst mov :dword (ea (- other-pointer-lowtag) sap-object)
+            (compute-object-header sap-size sap-widetag))
+      ;; Store raw pointer in SAP object's pointer slot
+      (storew struct-sap sap-object sap-pointer-slot other-pointer-lowtag)
+      ;; Allocate alien-value wrapper on Lisp stack
+      ;; Total words = 1 (header) + instance-data-start + 2 data slots
+      (let ((total-words (+ 1 instance-data-start 2)))
+        (stack-allocation (pad-data-block total-words) instance-pointer-lowtag result)
+        ;; Initialize header - encodes payload length (total-words - 1)
+        (inst mov :dword (ea (- instance-pointer-lowtag) result)
+              (compute-object-header total-words instance-widetag)))
+      ;; Store layout for alien-value
+      (inst mov temp layout-arg)
+      #+compact-instance-header
+      ;; Layout goes in high 32 bits of header word
+      (inst mov :dword (ea (- 4 instance-pointer-lowtag) result) (reg-in-size temp :dword))
+      #-compact-instance-header
+      ;; Layout goes in first slot after header
+      (inst mov (ea (- (ash instance-slots-offset word-shift)
+                       instance-pointer-lowtag)
+                    result)
+            temp)
+      ;; Store SAP object in alien-value's sap slot
+      (inst mov (ea (- (ash (+ (get-dsd-index sb-alien-internals:alien-value sb-kernel::sap)
+                               instance-slots-offset)
+                            word-shift)
+                       instance-pointer-lowtag)
+                    result)
+            sap-object)
+      ;; Store type slot
+      (inst mov temp type-arg)
+      (inst mov (ea (- (ash (+ (get-dsd-index sb-alien-internals:alien-value sb-kernel::type)
+                               instance-slots-offset)
+                            word-shift)
+                       instance-pointer-lowtag)
+                    result)
+            temp))))
 
 ;;; Callbacks
 
