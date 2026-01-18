@@ -692,10 +692,10 @@
       (assert (= (slot result 'as-int) -54321)))))
 
 ;;; Test struct-by-value return correctness
-;;; Note: Stack allocation with dynamic-extent is supported when using
-;;; %alien-funcall directly (where the compiler can see the dynamic-extent
-;;; declaration at compile time). However, define-alien-routine creates a
-;;; pre-compiled wrapper that can't optimize based on caller context.
+;;; Note: Stack allocation with dynamic-extent requires the compiler to see
+;;; the declaration at the call site. Standard define-alien-routine creates
+;;; a pre-compiled wrapper where this isn't possible. The :inline option
+;;; (tested below) solves this by inlining the wrapper at each call site.
 
 (defun struct-return-test-1 (val)
   (declare (optimize speed))
@@ -739,6 +739,29 @@
                   (disassemble #'test-stack-alloc-struct-alien :stream s))))
     (assert (not (search "%ALLOCATE-STRUCT-ALIEN" output))
             () "Stack-allocated struct-alien should not call %allocate-struct-alien~%~A" output)))
+
+;;; Behavioral test: verify stack allocation reuses memory
+;;; Stack-allocated structs should use the same address range across calls,
+;;; while heap-allocated ones should use different addresses.
+(defun get-heap-alloc-sap ()
+  (declare (optimize speed))
+  (let ((alien (sb-c::%allocate-struct-alien 8 '(struct tiny-align-8))))
+    ;; No dynamic-extent - heap allocated
+    (sb-sys:sap-int (sb-alien:alien-sap alien))))
+
+(with-test (:name :struct-alien-stack-vs-heap-behavior)
+  ;; Stack allocation: addresses should be in same region (within 4KB)
+  (let* ((stack-addr1 (sb-sys:sap-int (test-stack-alloc-struct-alien)))
+         (stack-addr2 (sb-sys:sap-int (test-stack-alloc-struct-alien))))
+    (assert (< (abs (- stack-addr1 stack-addr2)) 4096)
+            () "Stack-allocated struct SAPs should be in same region: ~X vs ~X"
+            stack-addr1 stack-addr2))
+  ;; Heap allocation: addresses should be different (separate malloc calls)
+  (let* ((heap-addr1 (get-heap-alloc-sap))
+         (heap-addr2 (get-heap-alloc-sap)))
+    (assert (/= heap-addr1 heap-addr2)
+            () "Heap-allocated struct SAPs should be different: ~X vs ~X"
+            heap-addr1 heap-addr2)))
 
 ;;; Test :inline option for define-alien-routine
 ;;; This enables stack allocation of struct-by-value returns via inlining.

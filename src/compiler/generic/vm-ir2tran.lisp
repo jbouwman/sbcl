@@ -1,6 +1,3 @@
-;;;; IR2 converters that translate IR1 operations (particularly memory
-;;;; allocation primitives) into VOPs
-
 ;;;; This software is part of the SBCL system. See the README file for
 ;;;; more information.
 ;;;;
@@ -38,27 +35,12 @@
 (defoptimizer (%make-funcallable-instance stack-allocate-result) ((n) node)
   t)
 
+#+(or x86-64 arm64)
 (defoptimizer (%allocate-struct-alien stack-allocate-result) ((size type) node)
-  t)
+  ;; Stack allocation requires constant size and type for the VOP
+  (and (constant-lvar-p size) (constant-lvar-p type)))
 
-#+x86-64
-(defoptimizer (%allocate-struct-alien ir2-convert) ((size type) node block)
-  (when (node-stack-allocate-p node)
-    (let* ((lvar (node-lvar node))
-           (locs (lvar-result-tns lvar (list *universal-type*)))
-           (result (first locs))
-           (size-value (and (constant-lvar-p size) (lvar-value size)))
-           (type-value (and (constant-lvar-p type) (lvar-value type))))
-      (unless size-value
-        (error "~S requires constant size argument" '%allocate-struct-alien))
-      (unless type-value
-        (error "~S requires constant type argument" '%allocate-struct-alien))
-      (vop sb-vm::alloc-struct-alien-stack node block
-           (emit-constant type-value) size-value result)
-      (move-lvar-result node block locs lvar)
-      t)))
-
-#+arm64
+#+(or x86-64 arm64)
 (defoptimizer (%allocate-struct-alien ir2-convert) ((size type) node block)
   (when (node-stack-allocate-p node)
     (let* ((lvar (node-lvar node))

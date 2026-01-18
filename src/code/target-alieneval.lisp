@@ -812,10 +812,14 @@ way that the argument is passed.
              ;; which, if we didn't hide the local name, would get:
              ;;  "Attempt to bind a constant variable with SYMBOL-MACROLET: KILL"
              (local-name (copy-symbol lisp-name))
-             ;; Parse :inline option if present
+             ;; Parse :inline option if present (must appear before argument specs)
              (inline-option (when (eq (car args) :inline)
                               (pop args)
-                              (pop args))))
+                              (let ((value (pop args)))
+                                (unless (member value '(nil t :maybe-inline))
+                                  (error "Invalid :INLINE value ~S; expected NIL, T, or :MAYBE-INLINE"
+                                         value))
+                                value))))
     (collect ((docs) (lisp-args) (lisp-arg-types)
               (lisp-result-types
                (cond ((eql result-type 'void)

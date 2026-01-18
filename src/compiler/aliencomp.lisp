@@ -74,7 +74,7 @@
 ;;; back to %make-alien + %sap-alien.
 (deftransform %allocate-struct-alien ((size type) * * :node node)
   (unless (constant-lvar-p type)
-    (give-up-ir1-transform "type must be constant"))
+    (give-up-ir1-transform "type argument must be a compile-time constant"))
   (if (node-stack-allocate-p node)
       (give-up-ir1-transform)
       (let ((type-value (lvar-value type)))
