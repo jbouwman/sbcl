@@ -551,9 +551,9 @@
                              +number-stack-alignment-mask+)))
         (inst add nsp-tn nsp-tn (add-sub-immediate delta))))))
 
-;; Combined allocation of struct memory (on number stack) and alien-value
-;; wrapper (on Lisp stack). This allows dynamic-extent to properly
-;; stack-allocate both together.
+;; Allocate struct memory on number stack and alien-value
+;; wrapper on Lisp stack. This allows dynamic-extent to
+;; stack-allocate both at once.
 (define-vop (alloc-struct-alien-stack)
   (:info struct-size)
   (:args (layout-arg :scs (constant))
@@ -570,11 +570,18 @@
         (inst sub nsp-tn nsp-tn (add-sub-immediate delta))))
     (inst mov-sp struct-sap nsp-tn)
     ;; Allocate alien-value wrapper on Lisp stack
-    (with-fixed-allocation (result temp instance-widetag 4
+    ;; Total words = 1 (header) + instance-data-start + 2 data slots
+    (with-fixed-allocation (result temp instance-widetag
+                            (+ 1 instance-data-start 2)
                             :lowtag instance-pointer-lowtag
                             :stack-allocate-p t)
-      ;; Store layout slot
+      ;; Store layout for alien-value
       (load-constant vop layout-arg temp)
+      #+compact-instance-header
+      ;; Layout goes in high 32 bits of header word
+      (inst str (32-bit-reg temp) (@ result (- 4 instance-pointer-lowtag)))
+      #-compact-instance-header
+      ;; Layout goes in first slot after header
       (storew temp result instance-slots-offset instance-pointer-lowtag)
       ;; Store SAP slot (points to struct memory on number stack)
       (storew struct-sap result

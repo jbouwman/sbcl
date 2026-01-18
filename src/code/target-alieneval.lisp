@@ -760,7 +760,7 @@ type specifies the argument and result types."
 (defmacro define-alien-routine (name result-type
                                      &rest args
                                      &environment lexenv)
-  "DEFINE-ALIEN-ROUTINE Name Result-Type [:INLINE {T | :MAYBE-INLINE}]
+  "DEFINE-ALIEN-ROUTINE Name Result-Type [:INLINE {NIL | T | :MAYBE-INLINE}]
                         {(Arg-Name Arg-Type [Style])}*
 
 Define a foreign interface function for the routine with the specified NAME.
