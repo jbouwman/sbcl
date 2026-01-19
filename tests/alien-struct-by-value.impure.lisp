@@ -759,11 +759,10 @@
             heap-addr1 heap-addr2)))
 ) ; end progn for #+(or x86-64 arm64)
 
-;;; Test :inline option for define-alien-routine
-;;; This enables stack allocation of struct-by-value returns via inlining.
+;;; Test inline declamation for define-alien-routine
+(declaim (inline tiny-align-8-return-inline))
 (define-alien-routine ("tiny_align_8_return" tiny-align-8-return-inline)
     (struct tiny-align-8)
-  :inline t
   (val (integer 64)))
 
 ;;; Test that the inline wrapper has an inline expansion recorded
