@@ -1,0 +1,4 @@
+;;; This file is auto-generated using generate-version.sh. Every time
+;;; you re-run make.sh, this file will be overwritten if you are
+;;; working from a Git checkout.
+"2.6.0.147.srbv-cffi.3-e9ebf0d69-WIP"
