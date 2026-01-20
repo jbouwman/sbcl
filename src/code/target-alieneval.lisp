@@ -757,13 +757,16 @@ type specifies the argument and result types."
       (t
        (error "~S is not an alien function." alien)))))
 
-#+(or x86-64 arm64)
 (defun alien-funcall-into (alien result-buffer &rest args)
   "Call the foreign function ALIEN, writing the struct result to RESULT-BUFFER.
 RESULT-BUFFER should be a system-area-pointer to appropriately sized memory.
 Only supported on x86-64 and ARM64."
   (declare (type alien-value alien)
-           (type system-area-pointer result-buffer))
+           (type system-area-pointer result-buffer)
+           #-(or x86-64 arm64) (ignore args))
+  #-(or x86-64 arm64)
+  (error "ALIEN-FUNCALL-INTO is only supported on x86-64 and ARM64.")
+  #+(or x86-64 arm64)
   (let ((type (alien-value-type alien)))
     (unless (alien-fun-type-p type)
       (error "~S is not an alien function." alien))
@@ -787,12 +790,6 @@ Only supported on x86-64 and ARM64."
                             (alien-funcall-into ,fun ,buf ,@parms)))))
         (setf (alien-fun-type-into-stub type) stub))
       (apply stub alien result-buffer args))))
-
-#-(or x86-64 arm64)
-(defun alien-funcall-into (alien result-buffer &rest args)
-  "ALIEN-FUNCALL-INTO is only supported on x86-64 and ARM64."
-  (declare (ignore alien result-buffer args))
-  (error "ALIEN-FUNCALL-INTO is only supported on x86-64 and ARM64."))
 
 (defmacro define-alien-routine (name result-type
                                      &rest args
