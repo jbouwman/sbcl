@@ -737,7 +737,9 @@
       (assert (= (slot result 'm0) 12345)))))
 
 ;;; Test runtime evaluation path (function type not known at compile time)
-(with-test (:name :alien-funcall-into-runtime)
+;;; Skip in fasteval mode - this test requires COMPILE.
+(with-test (:name :alien-funcall-into-runtime
+            :skipped-on (and :sb-fasteval (not :sb-eval)))
   (let* ((func-ptr (sb-sys:find-foreign-symbol-address "tiny_align_8_return"))
          (func-sap (sb-sys:int-sap func-ptr)))
     (with-alien ((func (* (function (struct tiny-align-8) (integer 64))) func-sap)
