@@ -114,6 +114,7 @@ int internal_errors_enabled = 0; // read in cold-init
 static
 void (*interrupt_low_level_handlers[NSIG]) (int, siginfo_t*, os_context_t*);
 struct sigaction old_ll_sigactions[NSIG];
+static struct sigaction foreign_sigactions[NSIG];
 #endif
 lispobj lisp_sig_handlers[NSIG];
 
@@ -1786,6 +1787,10 @@ low_level_handle_now_handler(int signal, siginfo_t *info, void *void_context)
         // drop it
     } else if (old_ll_sigactions[signal].sa_handler != SIG_DFL) {
         (old_ll_sigactions[signal].sa_sigaction)(signal, info, context);
+    } else if (foreign_sigactions[signal].sa_handler != SIG_DFL
+               && foreign_sigactions[signal].sa_handler != SIG_IGN
+               && foreign_sigactions[signal].sa_handler != 0) {
+        (foreign_sigactions[signal].sa_sigaction)(signal, info, context);
     } else {
 #ifdef LISP_FEATURE_SB_THREAD
         lose("Can't handle sig%d in non-lisp thread %p @ %p",
@@ -1834,7 +1839,25 @@ ll_install_handler (int signal, interrupt_handler_t handler)
 #endif
 
     sigaction(signal, &sa, &old_ll_sigactions[signal]);
+    if (old_ll_sigactions[signal].sa_sigaction != low_level_handle_now_handler
+        && old_ll_sigactions[signal].sa_handler != SIG_DFL
+        && old_ll_sigactions[signal].sa_handler != SIG_IGN) {
+        foreign_sigactions[signal] = old_ll_sigactions[signal];
+    }
     interrupt_low_level_handlers[signal] = handler;
+}
+
+int save_foreign_signal_handler(int signal)
+{
+    if (signal < 0 || signal >= NSIG) return -1;
+    struct sigaction cur;
+    sigaction(signal, NULL, &cur);
+    if (cur.sa_sigaction != low_level_handle_now_handler
+        && cur.sa_handler != SIG_DFL
+        && cur.sa_handler != SIG_IGN) {
+        foreign_sigactions[signal] = cur;
+    }
+    return 0;
 }
 #endif
 

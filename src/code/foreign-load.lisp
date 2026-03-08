@@ -28,6 +28,15 @@
 (defstruct (shared-object (:copier nil)) pathname namestring handle dont-save)
 (declaim (freeze-type shared-object))
 
+#-(or win32 (not sb-thread))
+(defun save-foreign-signal-handlers ()
+  "Save the current SIGSEGV handler if a foreign library installed one.
+Saved in the runtime's foreign_sigactions array so that
+low_level_handle_now_handler can chain to it for signals on non-Lisp threads."
+  (alien-funcall (extern-alien "save_foreign_signal_handler"
+                               (function int int))
+                 sb-unix:sigsegv))
+
 (defun load-shared-object (pathname &key dont-save)
   "Load a shared library / dynamic shared object file / similar foreign
 container specified by designated PATHNAME, such as a .so on an ELF platform.
@@ -82,6 +91,11 @@ will be signalled when the core is saved -- this is orthogonal from DONT-SAVE."
         #+win32
         (unless old
           (dlopen-or-lose obj))
+        ;; A foreign library's constructor may have installed signal handlers
+        ;; (e.g. LLVM installs a SIGSEGV handler). Save any foreign handlers
+        ;; so SBCL can chain to them for signals on non-Lisp threads.
+        #-(or win32 (not sb-thread))
+        (save-foreign-signal-handlers)
         (setf *shared-objects* (append (remove obj *shared-objects*)
                                        (list obj)))
         (when (or old (cdr *linkage-info*))
