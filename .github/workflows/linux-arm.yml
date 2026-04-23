@@ -10,6 +10,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v1
+    - name: generate version.lisp-expr
+      run: echo "\"2.6.0.99-fork-`git rev-parse --short HEAD`\"" > version.lisp-expr
     - name: install host sbcl
       run: |
         sudo dpkg --add-architecture armhf
