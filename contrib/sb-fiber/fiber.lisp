@@ -342,12 +342,20 @@ control switches back to the fiber that most recently switched to it."
     (when (sb-sys:sap= sap (sb-sys:int-sap 0))
       (error "Failed to allocate fiber"))
     (let ((f (%make-fiber :sap sap :function function)))
-      (%fiber-register (sb-thread:current-thread-sap) sap)
-      (%fiber-registry-put f)
+      ;; Ordering is load-bearing: prepare sets ctx.rsp, and
+      ;; scan_fiber_stacks conservatively scans [ctx.rsp .. stack_end)
+      ;; for any FIBER_NEW fiber on the thread's fiber_list.  Register
+      ;; (which links the fiber into that list) MUST run last -- if GC
+      ;; fires between register and prepare, the scan walks from NULL
+      ;; upward into unmapped memory and faults.  Registry-put before
+      ;; register is fine: it allocates and may trigger GC, but a fiber
+      ;; that isn't on fiber_list yet isn't visited by scan_fiber_stacks.
       ;; Entry argument is the C SAP itself.  Crucial that this is
       ;; the stable mmap address, not the Lisp wrapper's address --
       ;; see the registry comment on why.
       (%fiber-prepare sap (ensure-lisp-entry-sap) sap)
+      (%fiber-registry-put f)
+      (%fiber-register (sb-thread:current-thread-sap) sap)
       f)))
 
 (defun destroy-fiber (fiber)
