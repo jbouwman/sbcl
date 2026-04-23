@@ -9,10 +9,10 @@
 # provided with absolutely no warranty. See the COPYING and CREDITS
 # files for more information.
 
-ASSEM_SRC = arm64-assem.S
+ASSEM_SRC = arm64-assem.S fiber_switch_arm64.S
 ARCH_SRC = arm64-arch.c
 
-OS_SRC = bsd-os.c arm64-bsd-os.c
+OS_SRC = bsd-os.c arm64-bsd-os.c fiber.c fiber-arm64.c
 
 ifdef LISP_FEATURE_GENCGC
   GC_SRC = fullcgc.c gencgc.c traceroot.c
