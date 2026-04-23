@@ -8,10 +8,10 @@ GREP = ggrep
 #CFLAGS += -xarch=generic64 -g -O2 -Wall -D__EXTENSIONS__ -DSVR4 -D_REENTRANT -fno-omit-frame-pointer
 #ASFLAGS = -xarch=generic64 -Wall
 
-ASSEM_SRC = x86-64-assem.S
+ASSEM_SRC = x86-64-assem.S fiber_switch_amd64.S
 ARCH_SRC = x86-64-arch.c
 
-OS_SRC = sunos-os.c x86-64-sunos-os.c
+OS_SRC = sunos-os.c x86-64-sunos-os.c fiber.c fiber-x86-64.c
 OS_LIBS= -ldl -lsocket -lnsl -lrt
 ifdef LISP_FEATURE_SB_CORE_COMPRESSION
   OS_LIBS += -lzstd

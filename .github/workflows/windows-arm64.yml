@@ -27,6 +27,8 @@ jobs:
         install: mingw-w64-${{matrix.env}}-clang mingw-w64-${{matrix.env}}-toolchain make diffutils git libzstd-devel
         msystem: ${{matrix.sys}}
 
+    - name: generate version.lisp-expr
+      run: echo "\"2.6.0.99-fork-`git rev-parse --short HEAD`\"" > version.lisp-expr
     - name: install host sbcl
       shell: pwsh
       run: |

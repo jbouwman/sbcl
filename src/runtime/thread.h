@@ -33,6 +33,8 @@ void* os_get_csp(struct thread* th);
 void assert_on_stack(struct thread *th, void *esp);
 #endif /* defined(LISP_FEATURE_SB_SAFEPOINT) */
 
+struct sb_fiber; /* forward declaration for fiber list in extra_thread_data */
+
 /* The thread struct is generated from lisp during genesis and it
  * needs to know the sizes of all its members, but some types may have
  * arbitrary lengths, thus the pointers are stored instead. This
@@ -92,6 +94,9 @@ struct extra_thread_data
     HANDLE synchronous_io_handle_and_flag;
     void* waiting_on_address; // used only if #+sb-futex
 #endif
+    struct sb_fiber *fiber_list; // head of registered fiber list (for GC scanning)
+    struct sb_fiber *fiber_freelist; // head of idle-pooled fibers (not GC-visible)
+    uint16_t fiber_freelist_count;   // current pool length, bounded by FIBER_POOL_MAX
     int arena_count; // number of structures in arena_saveareas
     arena_state* arena_savearea;
     // opaque pointer to zstd decompression context so it doesn't matter whether

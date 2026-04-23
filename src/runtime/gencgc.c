@@ -51,6 +51,11 @@
 #include "genesis/brothertree.h"
 #include "genesis/split-ordered-list.h"
 #include "var-io.h"
+#if (defined(LISP_FEATURE_X86_64) || defined(LISP_FEATURE_ARM64)) \
+    && !defined(LISP_FEATURE_WIN32)
+#define HAVE_SB_FIBER 1
+#include "fiber.h"
+#endif
 
 /* forward declarations */
 extern FILE *gc_activitylog();
@@ -1451,14 +1456,16 @@ static lispobj conservative_root_p(lispobj addr, page_index_t addr_page_index)
         && plausible_tag_p(addr)) return AMBIGUOUS_POINTER;
     return 0;
 }
-#elif defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC
+#elif defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC || defined LISP_FEATURE_ARM64
 /* Consider interior pointers to code as roots.
  * But most other pointers are *unambiguous* conservative roots.
  * This is not "less conservative" per se, than the non-precise code,
  * because it's actually up to the user of this predicate to decide whehther
  * the control stack as a whole is scanned for objects to pin.
  * The so-called "precise" code should generally NOT scan the stack,
- * and not call this on stack words.
+ * and not call this on stack words.  ARM64 uses this only for fiber
+ * stack scanning, where the C control stack of suspended fibers has
+ * no precise root information.
  * Anyway, this code isn't as performance-critical as the x86 variant,
  * so it's not worth trying to optimize out the search for the object */
 static lispobj conservative_root_p(lispobj addr, page_index_t addr_page_index)
@@ -2007,7 +2014,7 @@ static void impart_mark_stickiness(lispobj word)
 }
 #endif
 
-#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC
+#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC || defined LISP_FEATURE_ARM64
 /* Take a possible pointer to a Lisp object and mark its page in the
  * page_table so that it will not be relocated during a GC.
  *
@@ -3145,6 +3152,75 @@ static void pin_call_chain_and_boxed_registers(struct thread* th) {
 }
 #endif
 
+#ifdef HAVE_SB_FIBER
+static void preserve_ctx_reg_cb(lispobj word, void *unused)
+{
+    (void)unused;
+    if (word >= BACKEND_PAGE_BYTES)
+        preserve_pointer(word, 0);
+}
+
+/* Conservatively scan suspended fiber control stacks and
+ * callee-saved registers for GC roots.  On architectures with a
+ * separate Lisp control stack, also conservatively scan that region. */
+static void scan_fiber_stacks(struct thread *th)
+{
+    struct sb_fiber *f = thread_extra_data(th)->fiber_list;
+    while (f) {
+        if (f->state == FIBER_RUNNABLE || f->state == FIBER_NEW) {
+            /* Native C stack: scan from saved SP to region end.
+             * Child fibers own their stack via stack_end.  Main
+             * fibers don't own a native stack (stack_end == NULL)
+             * but on x86-64 Lisp frames live on the native C stack,
+             * so we must still scan the thread's own C stack range
+             * while main is suspended -- control_stack_end captures
+             * that top at make-main-fiber time.  Without this, roots
+             * reachable only through main's stack (e.g. let-bound
+             * values on the caller of fiber-switch) can be collected
+             * under a concurrent GC, and later allocations reuse
+             * their memory.  The arm64 Lisp control stack is a
+             * separate mmap'd region scanned by
+             * sb_fiber_foreach_lisp_stack_word below, so the fallback
+             * is gated to x86-64 -- elsewhere control_stack_end names
+             * a different region than the native stack. */
+            lispobj *hi = (lispobj *)f->stack_end;
+#ifdef LISP_FEATURE_X86_64
+            if (!hi) hi = f->control_stack_end;
+#endif
+            if (hi) {
+                lispobj *lo = (lispobj *)sb_fiber_ctx_sp(f);
+                for (lispobj *ptr = lo; ptr < hi; ptr++) {
+                    lispobj word = *ptr;
+                    if (word >= BACKEND_PAGE_BYTES)
+                        preserve_pointer(word, 0);
+                }
+            }
+            sb_fiber_ctx_foreach_gc_reg(f, preserve_ctx_reg_cb, NULL);
+            sb_fiber_foreach_lisp_stack_word(f, preserve_ctx_reg_cb, NULL);
+        }
+        f = f->next;
+    }
+}
+
+/* Scavenge binding stacks of suspended fibers.  Main fibers have
+ * binding_stack_base == NULL (they don't own a binding stack; the
+ * thread's own is the ground truth), so skip them. */
+static void scav_fiber_binding_stacks(struct thread *th)
+{
+    struct sb_fiber *f = thread_extra_data(th)->fiber_list;
+    while (f) {
+        if ((f->state == FIBER_RUNNABLE || f->state == FIBER_NEW)
+            && f->binding_stack_base) {
+            scav_binding_stack(
+                f->binding_stack_base,
+                f->binding_stack_pointer,
+                compacting_p() ? 0 : gc_mark_obj);
+        }
+        f = f->next;
+    }
+}
+#endif /* HAVE_SB_FIBER */
+
 #if !GENCGC_IS_PRECISE
 extern void visit_context_registers(void (*proc)(os_context_register_t, void*),
                                     os_context_t *context, void*);
@@ -3428,6 +3504,9 @@ garbage_collect_generation(generation_index_t generation, int raise,
 #elif defined reg_LINK_RETURN
             pin_call_chain_and_boxed_registers(th);
 #endif
+#ifdef HAVE_SB_FIBER
+            scan_fiber_stacks(th);
+#endif
         }
     }
 
@@ -3524,6 +3603,9 @@ garbage_collect_generation(generation_index_t generation, int raise,
             scav_binding_stack((lispobj*)th->binding_stack_start,
                                (lispobj*)get_binding_stack_pointer(th),
                                compacting_p() ? 0 : gc_mark_obj);
+#ifdef HAVE_SB_FIBER
+            scav_fiber_binding_stacks(th);
+#endif
             /* do the tls as well */
             lispobj* from = &th->lisp_thread;
             lispobj* to = (lispobj*)(SymbolValue(FREE_TLS_INDEX,0) + (char*)th);
