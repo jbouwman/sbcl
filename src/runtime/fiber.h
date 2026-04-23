@@ -96,7 +96,21 @@ struct sb_fiber {
      * fiber is running on the freed page while the RETURN guard
      * waits to re-trigger for re-protection. */
     unsigned char cs_guard_protected;
+
+    /* Park/unpark wakeup token.  Orthogonal to the main fiber_state
+     * enum above: state tracks execution position (RUNNING/RUNNABLE/
+     * ...), park_state tracks scheduler-visible "should this fiber
+     * be on the runqueue" with lost-wakeup avoidance.  A parked
+     * fiber is still FIBER_RUNNABLE from the switch primitive's
+     * perspective; the scheduler is expected to keep it off its
+     * runqueue until an unpark flips park_state back to READY. */
+    unsigned char park_state;
 };
+
+/* park_state values.  Accessed via __atomic_compare_exchange_n. */
+#define FIBER_PARK_READY   ((unsigned char) 0)
+#define FIBER_PARK_PENDING ((unsigned char) 1)
+#define FIBER_PARK_PARKED  ((unsigned char) 2)
 
 /* Lifecycle */
 struct sb_fiber *sb_fiber_create(size_t stack_size,
@@ -128,6 +142,36 @@ void sb_fiber_pool_drain(struct thread *th);
  * directly to exit PA at the top of a new fiber. */
 void sb_fiber_switch_prep(struct sb_fiber *from, struct sb_fiber *to);
 void sb_fiber_exit_pa    (struct thread *th);
+
+/* Park / unpark.  Primitive-level wakeup token; does not itself
+ * switch or enqueue.
+ *
+ *   sb_fiber_park_begin(f)  returns 1 if the caller should now
+ *       switch away from f (park_state transitioned READY->PARKED),
+ *       0 if a prior unpark had credited PENDING (now consumed,
+ *       state is READY and the caller should continue without
+ *       switching).  Callable only from f's owner thread (f is
+ *       almost always the current fiber).
+ *
+ *   sb_fiber_unpark(f)      returns 1 if the caller should add f
+ *       back to a scheduler runqueue (park_state transitioned
+ *       PARKED->READY), 0 if f wasn't parked and a PENDING credit
+ *       was stashed for its next park.  Safe to call from signal
+ *       handlers and other threads. */
+int sb_fiber_park_begin(struct sb_fiber *f);
+int sb_fiber_unpark    (struct sb_fiber *f);
+
+/* Stack usage introspection.  Reports the snapshot as of the most
+ * recent switch-out (or initial creation) for suspended fibers.  For
+ * a RUNNING fiber the binding-stack number is stale; the live value
+ * is in the owning thread's binding_stack_pointer and can be obtained
+ * via SB-KERNEL:BINDING-STACK-USAGE from within the fiber.  Sizes are
+ * the usable capacity, excluding guard pages.  Returns 0 for fields
+ * that don't apply to a main fiber (which doesn't own its stacks). */
+size_t sb_fiber_binding_stack_usage(const struct sb_fiber *f);
+size_t sb_fiber_binding_stack_size (const struct sb_fiber *f);
+size_t sb_fiber_control_stack_usage(const struct sb_fiber *f);
+size_t sb_fiber_control_stack_size (const struct sb_fiber *f);
 
 /* Byte offsets of struct sb_fiber fields that the Lisp-side switch
  * shim reads and writes via SAP-REF.  Indices are the SB_FIBER_FIELD_*

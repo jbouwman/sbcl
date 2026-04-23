@@ -333,3 +333,78 @@
     (destroy-fiber child)
     (destroy-fiber main)))
 
+;;; --- Stack-usage introspection ---
+;;;
+;;; Sanity checks on the reported sizes/usages.  Precise numbers are
+;;; arch- and GC-dependent; these tests only assert invariants that
+;;; must hold for any correct implementation.
+
+(with-test (:name (:fiber :binding-stack-size-reflects-request))
+  (let ((f (make-fiber (lambda ()) :binding-stack-size 16384)))
+    ;; Usable capacity is the requested size aligned up to a page.
+    ;; It must be >= the request and smaller than request + 2 pages
+    ;; (one for page alignment, no guard -- guard is excluded).
+    (let ((size (fiber-binding-stack-size f)))
+      (assert (>= size 16384) () "reported size ~D < requested 16384" size)
+      (assert (< size (+ 16384 (* 2 65536))) () "size ~D suspiciously large" size))
+    (destroy-fiber f)))
+
+(with-test (:name (:fiber :control-stack-size-reflects-request))
+  (let ((f (make-fiber (lambda ()) :stack-size 131072)))
+    (let ((size (fiber-control-stack-size f)))
+      (assert (>= size 131072) () "reported size ~D < requested 131072" size)
+      (assert (< size (+ 131072 (* 2 65536))) () "size ~D suspiciously large" size))
+    (destroy-fiber f)))
+
+(with-test (:name (:fiber :usage-leq-size))
+  ;; Most fundamental invariant: usage never exceeds size.  Check for
+  ;; NEW, RUNNABLE (after one switch), and across a few switches.
+  (let* ((main (make-main-fiber))
+         (child (make-fiber
+                 (lambda ()
+                   (let ((*gensym-counter* *gensym-counter*))
+                     (loop repeat 5 do
+                       (fiber-switch sb-fiber::*current-fiber* main)))))))
+    (flet ((check (tag)
+             (assert (<= (fiber-binding-stack-usage child)
+                         (fiber-binding-stack-size child))
+                     () "~A: binding usage > size" tag)
+             (assert (<= (fiber-control-stack-usage child)
+                         (fiber-control-stack-size child))
+                     () "~A: control usage > size" tag)))
+      (check :new)
+      (fiber-switch main child) (check :after-1)
+      (fiber-switch main child) (check :after-2)
+      (fiber-switch main child) (check :after-3))
+    (destroy-fiber child)
+    (destroy-fiber main)))
+
+(with-test (:name (:fiber :binding-stack-usage-tracks-bindings))
+  ;; A fiber that establishes extra special bindings before yielding
+  ;; should report more binding-stack usage than one that doesn't.
+  (let* ((main (make-main-fiber))
+         (shallow (make-fiber
+                   (lambda ()
+                     (fiber-switch sb-fiber::*current-fiber* main))))
+         (deep (make-fiber
+                (lambda ()
+                  (let ((*print-base* 10) (*print-radix* nil)
+                        (*print-case* :upcase) (*print-circle* nil)
+                        (*print-escape* t) (*print-gensym* t)
+                        (*print-length* nil) (*print-level* nil)
+                        (*print-lines* nil) (*print-miser-width* nil)
+                        (*print-pprint-dispatch* *print-pprint-dispatch*)
+                        (*print-pretty* nil) (*print-readably* nil)
+                        (*print-right-margin* nil))
+                    (fiber-switch sb-fiber::*current-fiber* main))))))
+    (fiber-switch main shallow)
+    (fiber-switch main deep)
+    (let ((shallow-usage (fiber-binding-stack-usage shallow))
+          (deep-usage    (fiber-binding-stack-usage deep)))
+      (assert (> deep-usage shallow-usage) ()
+              "deep fiber usage ~D not greater than shallow ~D"
+              deep-usage shallow-usage))
+    (destroy-fiber shallow)
+    (destroy-fiber deep)
+    (destroy-fiber main)))
+

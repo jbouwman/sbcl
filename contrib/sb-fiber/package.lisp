@@ -9,8 +9,14 @@
    #:make-fiber
    #:make-main-fiber
    #:fiber-switch
+   #:fiber-park
+   #:fiber-unpark
    #:fiber-alive-p
    #:fiber-state
+   #:fiber-binding-stack-usage
+   #:fiber-binding-stack-size
+   #:fiber-control-stack-usage
+   #:fiber-control-stack-size
    #:destroy-fiber
    #:current-fiber
    #:with-fiber

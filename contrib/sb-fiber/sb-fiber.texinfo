@@ -165,6 +165,44 @@ no main fiber has been established.  Equivalent to the
 for use in contexts where a defvar reference would be awkward.
 @end deffn
 
+@subsubsection Park / unpark
+
+@code{fiber-park} and @code{fiber-unpark} are a cooperative
+wakeup-token pair intended as the substrate for a scheduler.  They
+are not themselves a scheduler: @code{fiber-unpark} only flips a
+state bit, leaving the caller responsible for putting the fiber back
+on whatever runqueue the scheduler maintains.
+
+The primitive exists because a naive ``set a flag then
+fiber-switch'' implementation has a lost-wakeup race: an unpark
+landing between the flag-set and the switch would leave the fiber
+suspended forever.  The wakeup token's @code{:pending} state absorbs
+an unpark that arrives before the matching park.
+
+@deffn Function fiber-park target
+Suspend the current fiber and @code{fiber-switch} to @var{target}
+(typically a scheduler fiber).  Returns when execution switches back
+here -- usually because some caller has invoked @code{fiber-unpark}
+on us and the scheduler has picked us up again.
+
+If @code{fiber-unpark} was called on the current fiber before this
+@code{fiber-park}, the pending-wakeup credit is consumed and
+@code{fiber-park} returns immediately without switching.  Multiple
+pre-credited unparks collapse into one credit.
+@end deffn
+
+@deffn Function fiber-unpark fiber
+Mark @var{fiber} as runnable and return @code{t} if the caller should
+now add @var{fiber} back to a scheduler runqueue (@var{fiber} was
+parked).  Return @code{nil} if @var{fiber} was not parked; in that
+case a wakeup credit is stashed, and a subsequent @code{fiber-park}
+on @var{fiber} will consume it without suspending.
+
+Idempotent, signal-handler safe.  Does not switch or enqueue: the
+scheduler layered on top of @code{fiber-park} / @code{fiber-unpark}
+owns that half of the contract.
+@end deffn
+
 @subsubsection Introspection
 
 @deffn Function fiber-alive-p fiber
@@ -179,6 +217,26 @@ Return the integer state of @var{fiber}, one of the constants
 @code{+fiber-new+} (0), @code{+fiber-runnable+} (1),
 @code{+fiber-running+} (2), @code{+fiber-dead+} (3).  Returns
 @code{+fiber-dead+} for a destroyed fiber.
+@end deffn
+
+@deffn Function fiber-binding-stack-usage fiber
+@deffnx Function fiber-binding-stack-size fiber
+@deffnx Function fiber-control-stack-usage fiber
+@deffnx Function fiber-control-stack-size fiber
+Report stack utilization of @var{fiber} in bytes.  @code{-usage}
+returns the bytes consumed as of @var{fiber}'s last switch-out (or
+zero for a @code{:new} fiber); @code{-size} returns the usable
+capacity excluding guard pages.  The invariant @code{(<= usage size)}
+holds for correctly-bounded fibers.
+
+For a @code{:running} fiber the @code{-usage} numbers are stale --
+they reflect the last switch-out, not the live register/pointer
+values.  Live binding-stack usage is available from within a running
+fiber via @code{sb-kernel:binding-stack-usage}.
+
+For a main fiber the @code{-usage} accessors return zero (main fibers
+do not own their stacks); @code{-size} returns the visible native
+range captured at @code{make-main-fiber} time.
 @end deffn
 
 @subsection A minimal example
@@ -268,12 +326,21 @@ If you need to propagate errors out of a fiber, let them escape
 normally -- they'll be re-signaled in the caller's context on the next
 @code{fiber-switch}.
 
-@item @strong{Binding-stack overflow is unprotected.}  Control-stack
-overflow is detected and raised as a @code{storage-condition}.
-Binding-stack overflow writes past the mmap'd region and is undefined
-behavior.  The binding-stack macros in @code{validate.h} assume a
-hardcoded 1 MiB size incompatible with fibers' 8 KiB default.  Budget
-binding depth accordingly.
+@item @strong{Binding-stack overflow is fatal, not recoverable.}
+Control-stack overflow is detected and raised as a
+@code{storage-condition} thanks to the HARD/SOFT/RETURN three-guard
+layout.  Binding-stack overflow instead faults on a hard
+@code{PROT_NONE} guard page at the top of the fiber's binding
+stack, so a runaway @code{progv} or deep special-rebinding hits
+@code{SIGSEGV} and the process terminates with a memory-fault
+diagnostic.  The overflow is not recovered into a condition: the
+main-thread
+@code{BINDING_STACK_@{HARD,SOFT,RETURN@}_GUARD_PAGE} macros in
+@code{validate.h} derive guard addresses from a compile-time 1 MiB
+size and don't recognize a fiber's 8 KiB guard, so the fault falls
+through to SBCL's generic @code{"Memory fault"} handler rather than
+raising @code{BINDING-STACK-EXHAUSTED-ERROR}.  Size the binding
+stack with headroom accordingly.
 
 @item @strong{VA footprint.}  ~160 KiB virtual address space per
 fiber on builds where @code{BACKEND_PAGE_BYTES = 32 KiB} (three

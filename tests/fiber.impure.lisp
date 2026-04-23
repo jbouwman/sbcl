@@ -623,3 +623,89 @@
     (assert (>= fired 1) () "timer never fired")
     (destroy-fiber child)
     (destroy-fiber main)))
+
+;;; --- Park / unpark -------------------------------------------------
+
+(with-test (:name (:fiber :park-unpark-basic))
+  ;; Round-trip: child parks, main observes "parked", unparks, child
+  ;; resumes from fiber-park and finishes.
+  (let* ((main (make-main-fiber))
+         (resumed 0)
+         (child (make-fiber
+                 (lambda ()
+                   (fiber-park main)
+                   (incf resumed)))))
+    (fiber-switch main child)                         ; child runs, parks
+    (assert (eq t (fiber-unpark child)))              ; was parked: T
+    (assert (zerop resumed))
+    (fiber-switch main child)                         ; resume past park
+    (assert (= resumed 1))
+    (destroy-fiber child)
+    (destroy-fiber main)))
+
+(with-test (:name (:fiber :unpark-before-park-credits))
+  ;; Unpark a fiber that hasn't parked yet.  fiber-unpark returns NIL
+  ;; (credit stashed, not parked).  The first fiber-park inside the
+  ;; child then consumes the credit and returns WITHOUT switching; the
+  ;; child proceeds and finishes normally.
+  (let* ((main (make-main-fiber))
+         (resumed 0)
+         (child (make-fiber
+                 (lambda ()
+                   (fiber-park main)                   ; consumes credit
+                   (incf resumed)))))
+    (assert (null (fiber-unpark child)))              ; credit, not parked
+    (fiber-switch main child)                         ; child runs to exit
+    (assert (= resumed 1))
+    (destroy-fiber child)
+    (destroy-fiber main)))
+
+(with-test (:name (:fiber :multiple-unparks-coalesce)
+                  :skipped-on :win32)
+  ;; Two unparks before any park: idempotent.  First park consumes the
+  ;; single credit, second park actually suspends.
+  (let* ((main (make-main-fiber))
+         (parks 0)
+         (child (make-fiber
+                 (lambda ()
+                   (fiber-park main) (incf parks)      ; consumes credit
+                   (fiber-park main) (incf parks)))))  ; suspends
+    (assert (null (fiber-unpark child)))
+    (assert (null (fiber-unpark child)))              ; coalesces
+    (fiber-switch main child)                         ; child runs, hits
+                                                      ; second park, suspends
+    (assert (= parks 1))                              ; first park no-op'd
+    (assert (eq t (fiber-unpark child)))              ; now parked
+    (fiber-switch main child)                         ; resume
+    (assert (= parks 2))
+    (destroy-fiber child)
+    (destroy-fiber main)))
+
+(with-test (:name (:fiber :unpark-signal-handler))
+  ;; A signal handler on the same thread calls fiber-unpark on the
+  ;; currently-parked fiber.  This is the race the PENDING state exists
+  ;; to solve: if a timer fires between fiber-park's state flip and the
+  ;; actual fiber-switch, the PARKED->READY transition in the handler
+  ;; must be safe and the subsequent switch must not re-park.
+  (let* ((main (make-main-fiber))
+         (woken 0)
+         (child (make-fiber
+                 (lambda ()
+                   (dotimes (i 100)
+                     (fiber-park main)
+                     (incf woken))))))
+    (let* ((tick (lambda () (fiber-unpark child)))
+           (timer (sb-ext:make-timer
+                   tick :thread sb-thread:*current-thread*)))
+      (sb-ext:schedule-timer timer 0.001 :repeat-interval 0.001)
+      (unwind-protect
+           (dotimes (i 100)
+             ;; If child is already runnable (timer-unpark landed),
+             ;; switch; otherwise fiber-unpark will wake it and the
+             ;; next iteration will pick it up.
+             (fiber-unpark child)
+             (fiber-switch main child))
+        (sb-ext:unschedule-timer timer)))
+    (assert (= woken 100))
+    (destroy-fiber child)
+    (destroy-fiber main)))

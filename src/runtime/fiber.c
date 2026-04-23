@@ -45,7 +45,7 @@ static int fiber_is_default_sized(const struct sb_fiber *f)
         size_t ps = os_reported_page_size;
         /* Match the formulas in sb_fiber_create / sb_fiber_lisp_stack_alloc. */
         dflt_stack = 3*STACK_GUARD_SIZE + align_up(FIBER_DEFAULT_STACK_SIZE, ps);
-        dflt_bind  = align_up(FIBER_DEFAULT_BINDING_STACK_SIZE, ps);
+        dflt_bind  = align_up(FIBER_DEFAULT_BINDING_STACK_SIZE, ps) + ps;
         dflt_arm64_lisp_stack =
             align_up(FIBER_DEFAULT_STACK_SIZE, ps) + 3*STACK_GUARD_SIZE;
     }
@@ -76,6 +76,7 @@ static void fiber_pool_reset_for_put(struct sb_fiber *f)
     f->entry_fn = NULL;
     f->entry_arg = NULL;
     f->return_fiber = NULL;
+    f->park_state = FIBER_PARK_READY;
 #ifdef LISP_FEATURE_ARM64
     f->control_stack_pointer = f->control_stack_base;
     f->control_frame_pointer = f->control_stack_base;
@@ -200,11 +201,26 @@ struct sb_fiber *sb_fiber_create(size_t stack_size,
     f->stack_end   = (char *)f->stack_base + f->stack_alloc_size;
     f->cs_guard_protected = 1;
 
-    /* Binding stack */
+    /* Binding stack.  Layout (grows upward):
+     *
+     *   [binding_stack_base ... + N)                usable region
+     *   [binding_stack_end  ... + ps)               PROT_NONE guard
+     *
+     * N = requested (defaulted to 8 KiB) binding-stack size, aligned
+     * to ps (os_reported_page_size).  A fiber that rebinds past the
+     * usable end writes into the guard page and takes SIGSEGV instead
+     * of silently corrupting the next mmap region.  No SOFT/RETURN
+     * recovery: the main-thread BINDING_STACK_{HARD,SOFT,RETURN}_
+     * GUARD_PAGE macros in validate.h use a compile-time
+     * BINDING_STACK_SIZE (1 MiB), so they won't recognize a fiber's
+     * 8 KiB guard address; the fault falls through to SBCL's generic
+     * "Memory fault" handler.  That's a strict improvement over
+     * silent overwrite; proper recoverable integration would require
+     * a fiber-aware guard-range check in interrupt.c. */
     binding_stack_size = align_up(
         binding_stack_size ? binding_stack_size : 8192, ps);
-    f->binding_stack_alloc_size = binding_stack_size;
-    f->binding_stack_base = mmap(NULL, binding_stack_size,
+    f->binding_stack_alloc_size = binding_stack_size + ps;
+    f->binding_stack_base = mmap(NULL, f->binding_stack_alloc_size,
                                  PROT_READ | PROT_WRITE,
                                  MAP_PRIVATE | MAP_ANONYMOUS,
                                  -1, 0);
@@ -215,6 +231,12 @@ struct sb_fiber *sb_fiber_create(size_t stack_size,
     }
     f->binding_stack_end = (lispobj *)((char *)f->binding_stack_base
                                        + binding_stack_size);
+    if (mprotect(f->binding_stack_end, ps, PROT_NONE) != 0) {
+        munmap(f->binding_stack_base, f->binding_stack_alloc_size);
+        munmap(f->stack_base, f->stack_alloc_size);
+        free(f);
+        return NULL;
+    }
     f->binding_stack_pointer = f->binding_stack_base;
     /* For child fibers, the value published in
      * thread->binding_stack_start while we run is just our own mmap'd
@@ -670,4 +692,128 @@ int sb_fiber_struct_offset(int field)
     default:
         return -1;
     }
+}
+
+/* --- Park / unpark -----------------------------------------------
+ *
+ * Wakeup-token primitive for cooperative schedulers.  See fiber.h for
+ * contract.  State transitions:
+ *
+ *   park_begin: READY   -> PARKED   (return 1, caller switches)
+ *               PENDING -> READY    (return 0, credit consumed)
+ *               PARKED  -> PARKED   (return 0, self-park nesting)
+ *
+ *   unpark:     PARKED  -> READY    (return 1, schedule me)
+ *               READY   -> PENDING  (return 0, credit stashed)
+ *               PENDING -> PENDING  (return 0, idempotent)
+ *
+ * PENDING -> PARKED is impossible: park_begin consumes PENDING before
+ * it could transition through READY, and unpark never sets PARKED.
+ * unpark is signal-handler safe (single CAS per call) and safe from
+ * any thread; park_begin is expected to be called from f's owner
+ * thread (typically f == current fiber).
+ *
+ * Memory ordering: ACQ_REL for success so a park observes every
+ * publication before a matching unpark, and conversely; RELAXED on
+ * the expected-reload is fine because the CAS retry happens at the
+ * Lisp level (park_begin then separately checks the other
+ * transition).  Using ACQ_REL on both pairs the atomic with fiber-
+ * switch's release-on-save / acquire-on-resume so data written
+ * before park becomes visible after unpark.
+ */
+int sb_fiber_park_begin(struct sb_fiber *f)
+{
+    unsigned char expected = FIBER_PARK_PENDING;
+    if (__atomic_compare_exchange_n(&f->park_state, &expected,
+                                    FIBER_PARK_READY,
+                                    0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return 0;
+    expected = FIBER_PARK_READY;
+    if (__atomic_compare_exchange_n(&f->park_state, &expected,
+                                    FIBER_PARK_PARKED,
+                                    0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return 1;
+    /* Already PARKED (self-park attempted from the same fiber).  Treat
+     * as a no-op so the caller does not double-switch. */
+    return 0;
+}
+
+int sb_fiber_unpark(struct sb_fiber *f)
+{
+    unsigned char expected = FIBER_PARK_PARKED;
+    if (__atomic_compare_exchange_n(&f->park_state, &expected,
+                                    FIBER_PARK_READY,
+                                    0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return 1;
+    expected = FIBER_PARK_READY;
+    if (__atomic_compare_exchange_n(&f->park_state, &expected,
+                                    FIBER_PARK_PENDING,
+                                    0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return 0;
+    /* Already PENDING; idempotent. */
+    return 0;
+}
+
+/* --- Stack-usage introspection ----------------------------------- */
+
+size_t sb_fiber_binding_stack_usage(const struct sb_fiber *f)
+{
+    if (!f->binding_stack_base || !f->binding_stack_pointer) return 0;
+    return (char *)f->binding_stack_pointer
+         - (char *)f->binding_stack_base;
+}
+
+size_t sb_fiber_binding_stack_size(const struct sb_fiber *f)
+{
+    if (!f->binding_stack_base || !f->binding_stack_end) return 0;
+    /* binding_stack_end excludes the PROT_NONE guard page, so this is
+     * the usable capacity directly. */
+    return (char *)f->binding_stack_end
+         - (char *)f->binding_stack_base;
+}
+
+size_t sb_fiber_control_stack_usage(const struct sb_fiber *f)
+{
+#ifdef LISP_FEATURE_ARM64
+    /* Lisp control stack is separate from the native C stack and grows
+     * upward.  Saved SP lives in control_stack_pointer. */
+    if (!f->control_stack_base || !f->control_stack_pointer) return 0;
+    return (char *)f->control_stack_pointer
+         - (char *)f->control_stack_base;
+#else
+    /* On x86-64 Lisp frames live on the native C stack, which grows
+     * downward.  The saved SP is in ctx. */
+    if (!f->stack_end) return 0;
+    const void *sp = sb_fiber_ctx_sp(f);
+    if (!sp) return 0;
+    /* sp outside the stack means the fiber hasn't run yet (NEW) or
+     * was a main fiber with no owned stack -- either way, no usage. */
+    if ((const char *)sp < (const char *)f->stack_start
+        || (const char *)sp > (const char *)f->stack_end) return 0;
+    return (char *)f->stack_end - (char *)sp;
+#endif
+}
+
+size_t sb_fiber_control_stack_size(const struct sb_fiber *f)
+{
+#ifdef LISP_FEATURE_ARM64
+    if (!f->control_stack_base || !f->control_stack_end) return 0;
+    if (f->control_stack_alloc_size) {
+        /* Child fiber owns the mmap: three guard pages at the high
+         * end, the rest is usable. */
+        return f->control_stack_alloc_size - 3*STACK_GUARD_SIZE;
+    }
+    /* Main fiber borrows the thread's Lisp stack bounds; report the
+     * raw range without trying to factor out the thread's guards. */
+    return (char *)f->control_stack_end - (char *)f->control_stack_base;
+#else
+    if (!f->stack_start || !f->stack_end) {
+        /* Main fiber on x86-64: stack bounds copied from thread, not
+         * owned; report the visible range. */
+        if (!f->control_stack_base || !f->control_stack_end) return 0;
+        return (char *)f->control_stack_end
+             - (char *)f->control_stack_base;
+    }
+    return (char *)f->stack_end - (char *)f->stack_start;
+#endif
 }

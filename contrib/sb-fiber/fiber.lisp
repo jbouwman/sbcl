@@ -54,6 +54,30 @@
   (fn system-area-pointer)
   (arg system-area-pointer))
 
+(define-alien-routine ("sb_fiber_park_begin" %fiber-park-begin)
+    int
+  (fiber system-area-pointer))
+
+(define-alien-routine ("sb_fiber_unpark" %fiber-unpark)
+    int
+  (fiber system-area-pointer))
+
+(define-alien-routine ("sb_fiber_binding_stack_usage" %fiber-binding-stack-usage)
+    unsigned-long
+  (fiber system-area-pointer))
+
+(define-alien-routine ("sb_fiber_binding_stack_size" %fiber-binding-stack-size)
+    unsigned-long
+  (fiber system-area-pointer))
+
+(define-alien-routine ("sb_fiber_control_stack_usage" %fiber-control-stack-usage)
+    unsigned-long
+  (fiber system-area-pointer))
+
+(define-alien-routine ("sb_fiber_control_stack_size" %fiber-control-stack-size)
+    unsigned-long
+  (fiber system-area-pointer))
+
 ;;; The prep alien call is wrapped as an inline Lisp function that
 ;;; sets ALIEN-FUNCALL-SAVES-FP-AND-PC to 0, suppressing
 ;;; INVOKE-WITH-SAVED-FP.  That wrap is incompatible with prep here:
@@ -421,6 +445,99 @@ in the caller's context."
       (setf (fiber-pending-condition to) nil)
       (error c)))
   (values))
+
+;;; --- Park / unpark -------------------------------------------------
+;;;
+;;; Primitive wakeup-token pair on top of FIBER-SWITCH.  Intended for
+;;; a cooperative scheduler built in user code: FIBER-PARK suspends the
+;;; current fiber and yields to TARGET (usually a per-thread scheduler
+;;; fiber); FIBER-UNPARK marks a parked fiber as runnable (the scheduler
+;;; puts it back on the runqueue).  Wakeup-before-park is handled: an
+;;; UNPARK whose target is not yet parked credits a PENDING flag, and
+;;; the next PARK consumes the credit and returns without switching.
+;;;
+;;; Why both functions are needed at the primitive level: the CAS that
+;;; flips park_state atomically coordinates with UNPARK running from a
+;;; signal handler on the same thread (or, in principle, another thread
+;;; that holds a reference to the fiber).  Without the PENDING credit a
+;;; lost wakeup is possible if UNPARK fires before PARK's state flip.
+;;;
+;;; FIBER-UNPARK does not itself switch or enqueue.  Schedulers are
+;;; responsible for acting on its T return by adding the fiber to a
+;;; runqueue.
+
+(declaim (inline fiber-park fiber-unpark))
+
+(defun fiber-park (target)
+  "Suspend the current fiber and switch to TARGET.  Returns when some
+caller invokes FIBER-UNPARK on us and a scheduler fiber-switches back
+here.
+
+If FIBER-UNPARK was already called before this FIBER-PARK (a wakeup
+credit is pending), consumes the credit and returns immediately
+without switching.  Multiple pre-credited unparks coalesce into one
+credit; a single FIBER-PARK will consume it."
+  (declare (type fiber target))
+  (let ((me *current-fiber*))
+    (unless (zerop (%fiber-park-begin (fiber-sap me)))
+      (fiber-switch me target)))
+  (values))
+
+(defun fiber-unpark (fiber)
+  "Mark FIBER as runnable, or credit a wakeup for its next FIBER-PARK.
+Returns T if FIBER was parked (the caller should now add it to a
+scheduler runqueue), NIL if the wakeup was only credited (FIBER was
+not parked; a future FIBER-PARK will consume the credit and not
+suspend).
+
+Idempotent: multiple FIBER-UNPARKs on an unparked fiber collapse into
+one credit.  Safe to call from a signal handler."
+  (declare (type fiber fiber))
+  (not (zerop (%fiber-unpark (fiber-sap fiber)))))
+
+;;; --- Stack-usage introspection -------------------------------------
+;;;
+;;; All four accessors read the snapshot in FIBER's C struct.  For a
+;;; suspended (NEW, RUNNABLE, or DEAD) fiber this is the saved value
+;;; at the last switch.  For a RUNNING fiber the binding-stack usage
+;;; is stale: the live value is in the thread's binding_stack_pointer
+;;; register/slot and can be obtained from within the running fiber
+;;; via SB-KERNEL:BINDING-STACK-USAGE.  The control-stack usage for a
+;;; running fiber is likewise stale; live SP can be read inside the
+;;; fiber via SB-SYS:%PRIMITIVE SB-C:CURRENT-STACK-POINTER or platform-
+;;; specific helpers.
+;;;
+;;; Sizes exclude guard pages, so (<= usage size) should always hold.
+
+(declaim (inline fiber-binding-stack-usage fiber-binding-stack-size
+                 fiber-control-stack-usage fiber-control-stack-size))
+
+(defun fiber-binding-stack-usage (fiber)
+  "Bytes of binding stack used by FIBER as of its last switch-out.
+Returns 0 for a main fiber (which borrows the thread's binding stack,
+not owned by the fiber)."
+  (declare (type fiber fiber))
+  (%fiber-binding-stack-usage (fiber-sap fiber)))
+
+(defun fiber-binding-stack-size (fiber)
+  "Usable binding-stack capacity of FIBER in bytes, excluding the guard
+page.  Returns 0 for a main fiber."
+  (declare (type fiber fiber))
+  (%fiber-binding-stack-size (fiber-sap fiber)))
+
+(defun fiber-control-stack-usage (fiber)
+  "Bytes of control stack used by FIBER as of its last switch-out.
+On x86-64 the control stack is the native C stack; on arm64 it is
+the separate Lisp control stack.  Returns 0 for a main fiber."
+  (declare (type fiber fiber))
+  (%fiber-control-stack-usage (fiber-sap fiber)))
+
+(defun fiber-control-stack-size (fiber)
+  "Usable control-stack capacity of FIBER in bytes, excluding guard
+pages.  For a main fiber this returns the visible native stack range
+as captured at MAKE-MAIN-FIBER time."
+  (declare (type fiber fiber))
+  (%fiber-control-stack-size (fiber-sap fiber)))
 
 (defmacro with-fiber ((var function &rest make-args) &body body)
   "Create a fiber, bind it to VAR, execute BODY, destroy on exit."
