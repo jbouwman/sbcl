@@ -22,7 +22,7 @@ ifdef LISP_FEATURE_INODE64
 CFLAGS += -D_DARWIN_USE_64_BIT_INODE
 endif
 
-OS_SRC = bsd-os.c x86-64-bsd-os.c darwin-os.c darwin-mman.c x86-64-darwin-os.c
+OS_SRC = bsd-os.c x86-64-bsd-os.c darwin-os.c darwin-mman.c x86-64-darwin-os.c fiber.c fiber-x86-64.c
 
 OS_LIBS = -lSystem -lc -ldl
 ifdef LISP_FEATURE_SB_THREAD
@@ -36,7 +36,7 @@ ifdef LISP_FEATURE_SB_LINKABLE_RUNTIME
   USE_LIBSBCL = -Wl,-force_load libsbcl.a
 endif
 
-ASSEM_SRC = x86-64-assem.S
+ASSEM_SRC = x86-64-assem.S fiber_switch_amd64.S
 ARCH_SRC = x86-64-arch.c
 
 LINKFLAGS += -arch x86_64 -dynamic -twolevel_namespace -bind_at_load -pagezero_size 0x100000

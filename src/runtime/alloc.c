@@ -22,6 +22,11 @@
 #include "arch.h" // why is this where funcall2 is declared???
 #include "genesis/symbol.h"
 #include "code.h"
+#if (defined(LISP_FEATURE_X86_64) || defined(LISP_FEATURE_ARM64)) \
+    && !defined(LISP_FEATURE_WIN32)
+#define HAVE_SB_FIBER 1
+#include "fiber.h"
+#endif
 
 lispobj* atomic_bump_static_space_free_ptr(int nbytes)
 {
@@ -811,6 +816,9 @@ alloc_thread_struct(void* spaces) {
 void free_thread_struct(struct thread *th)
 {
     struct extra_thread_data *extra_data = thread_extra_data(th);
+#ifdef HAVE_SB_FIBER
+    sb_fiber_pool_drain(th);
+#endif
     if (extra_data->arena_savearea) free(extra_data->arena_savearea);
     os_deallocate((os_vm_address_t) th->os_address, THREAD_STRUCT_SIZE);
 }

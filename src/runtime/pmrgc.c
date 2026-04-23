@@ -27,6 +27,11 @@
 #include "genesis/gc-tables.h"
 #include "genesis/split-ordered-list.h"
 #include "thread.h"
+#if (defined(LISP_FEATURE_X86_64) || defined(LISP_FEATURE_ARM64)) \
+    && !defined(LISP_FEATURE_WIN32)
+#define HAVE_SB_FIBER 1
+#include "fiber.h"
+#endif
 #include "sys_mmap.inc"
 
 /* forward declarations */
@@ -421,7 +426,7 @@ static void impart_mark_stickiness(lispobj word)
     }
 }
 
-#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC
+#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC || defined LISP_FEATURE_ARM64
 static void preserve_pointer(os_context_register_t object,
                              __attribute__((unused)) void* arg) {
     /* The mark-region GC never filters based on type tags,
@@ -616,6 +621,59 @@ static void pin_call_chain_and_boxed_registers(struct thread* th) {
     }
 }
 #endif
+
+#ifdef HAVE_SB_FIBER
+static void preserve_ctx_reg_cb(lispobj word, void *unused)
+{
+    (void)unused;
+    preserve_pointer(word, 0);
+}
+
+/* Conservatively scan suspended fiber control stacks and
+ * callee-saved registers for GC roots.  On architectures with a
+ * separate Lisp control stack, also conservatively scan that region. */
+static void scan_fiber_stacks(struct thread *th)
+{
+    struct sb_fiber *f = thread_extra_data(th)->fiber_list;
+    while (f) {
+        if (f->state == FIBER_RUNNABLE || f->state == FIBER_NEW) {
+            /* See gencgc.c:scan_fiber_stacks for why x86-64 falls
+             * back to control_stack_end when stack_end is NULL. */
+            lispobj *hi = (lispobj *)f->stack_end;
+#ifdef LISP_FEATURE_X86_64
+            if (!hi) hi = f->control_stack_end;
+#endif
+            if (hi) {
+                lispobj *lo = (lispobj *)sb_fiber_ctx_sp(f);
+                for (lispobj *ptr = lo; ptr < hi; ptr++) {
+                    preserve_pointer(*ptr, 0);
+                }
+            }
+            sb_fiber_ctx_foreach_gc_reg(f, preserve_ctx_reg_cb, NULL);
+            sb_fiber_foreach_lisp_stack_word(f, preserve_ctx_reg_cb, NULL);
+        }
+        f = f->next;
+    }
+}
+
+/* Scavenge binding stacks of suspended fibers.  Main fibers have
+ * binding_stack_base == NULL (they don't own a binding stack; the
+ * thread's own is the ground truth), so skip them. */
+static void scav_fiber_binding_stacks(struct thread *th)
+{
+    struct sb_fiber *f = thread_extra_data(th)->fiber_list;
+    while (f) {
+        if ((f->state == FIBER_RUNNABLE || f->state == FIBER_NEW)
+            && f->binding_stack_base) {
+            scav_binding_stack(
+                f->binding_stack_base,
+                f->binding_stack_pointer,
+                mr_preserve_object);
+        }
+        f = f->next;
+    }
+}
+#endif /* HAVE_SB_FIBER */
 
 #if !GENCGC_IS_PRECISE
 extern void visit_context_registers(void (*proc)(os_context_register_t, void*),
@@ -883,6 +941,9 @@ garbage_collect_generation(generation_index_t generation, int raise,
 #elif defined reg_LINK_RETURN
             pin_call_chain_and_boxed_registers(th);
 #endif
+#ifdef HAVE_SB_FIBER
+            scan_fiber_stacks(th);
+#endif
         }
     }
 
@@ -978,6 +1039,9 @@ garbage_collect_generation(generation_index_t generation, int raise,
             scav_binding_stack((lispobj*)th->binding_stack_start,
                                (lispobj*)get_binding_stack_pointer(th),
                                mr_preserve_object);
+#ifdef HAVE_SB_FIBER
+            scav_fiber_binding_stacks(th);
+#endif
             /* do the tls as well */
             lispobj* from = &th->lisp_thread;
             lispobj* to = (lispobj*)(SymbolValue(FREE_TLS_INDEX,0) + (char*)th);
