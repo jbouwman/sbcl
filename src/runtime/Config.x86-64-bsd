@@ -10,10 +10,10 @@
 # provided with absolutely no warranty. See the COPYING and CREDITS
 # files for more information.
 
-ASSEM_SRC = x86-64-assem.S
+ASSEM_SRC = x86-64-assem.S fiber_switch_amd64.S
 ARCH_SRC = x86-64-arch.c
 
-OS_SRC = bsd-os.c x86-64-bsd-os.c
+OS_SRC = bsd-os.c x86-64-bsd-os.c fiber.c fiber-x86-64.c
 OS_LIBS = # -ldl
 ifdef LISP_FEATURE_SB_CORE_COMPRESSION
   OS_LIBS += -lzstd

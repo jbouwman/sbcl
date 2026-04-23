@@ -11,7 +11,7 @@
 
 CFLAGS += -g -Wall -fdollars-in-identifiers -arch arm64
 
-OS_SRC = bsd-os.c arm64-bsd-os.c darwin-os.c arm64-darwin-os.c
+OS_SRC = bsd-os.c arm64-bsd-os.c darwin-os.c arm64-darwin-os.c fiber.c fiber-arm64.c
 
 OS_LIBS = -lc -ldl
 ifdef LISP_FEATURE_SB_THREAD
@@ -33,7 +33,7 @@ ifdef LISP_FEATURE_SB_LINKABLE_RUNTIME
   USE_LIBSBCL = -Wl,-force_load libsbcl.a
 endif
 
-ASSEM_SRC = arm64-assem.S
+ASSEM_SRC = arm64-assem.S fiber_switch_arm64.S
 ARCH_SRC = arm64-arch.c
 
 LINKFLAGS += -dynamic -twolevel_namespace -arch arm64

@@ -9,9 +9,9 @@
 # provided with absolutely no warranty. See the COPYING and CREDITS
 # files for more information.
 
-ASSEM_SRC = x86-64-assem.S
+ASSEM_SRC = x86-64-assem.S fiber_switch_amd64.S
 ARCH_SRC = x86-64-arch.c
-OS_SRC = haiku-os.c x86-64-haiku-os.c
+OS_SRC = haiku-os.c x86-64-haiku-os.c fiber.c fiber-x86-64.c
 
 CFLAGS += -I/boot/system/develop/headers/private/system/arch/x86_64
 LINKFLAGS += -Wl,--export-dynamic

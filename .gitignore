@@ -33,6 +33,7 @@ src/runtime/target-arch.h
 src/runtime/target-lispregs.h
 src/runtime/target-os.h
 src/runtime/embedcore-sbcl
+tests/fiber-c-test
 tests/test-status.lisp-expr
 tests/test.log
 tests/*.so

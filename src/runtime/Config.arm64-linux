@@ -9,10 +9,10 @@
 # provided with absolutely no warranty. See the COPYING and CREDITS
 # files for more information.
 
-ASSEM_SRC = arm64-assem.S
+ASSEM_SRC = arm64-assem.S fiber_switch_arm64.S
 ARCH_SRC = arm64-arch.c
 
-OS_SRC = linux-os.c linux-mman.c arm64-linux-os.c
+OS_SRC = linux-os.c linux-mman.c arm64-linux-os.c fiber.c fiber-arm64.c
 OS_LIBS = -ldl -Wl,-no-as-needed
 
 ifdef LISP_FEATURE_IMMOBILE_SPACE
