@@ -1,16 +1,14 @@
 @node sb-fiber
 @section sb-fiber
 @cindex Fiber
-@cindex Coroutine
-@cindex Stackful coroutine
 @cindex Sb-fiber
 
-@code{sb-fiber} provides @dfn{stackful coroutines} (fibers): user-space
-execution contexts with their own control stack and binding stack that
-survive suspension.  Fibers are cooperatively scheduled and confined to
-a single OS thread (no cross-thread migration).  A typical fiber switch
-costs ~100 ns on x86-64; suspended fibers cost ~160 KiB of virtual
-address space each (of which only the active stack tip is populated).
+@code{sb-fiber} provides user-space execution contexts with their own
+control stack and binding stack that survive suspension.  Fibers are
+cooperatively scheduled and confined to a single OS thread (no
+cross-thread migration).  A typical fiber switch costs ~100 ns on
+x86-64; suspended fibers cost ~160 KiB of virtual address space each
+(of which only the active stack tip is populated).
 
 The contrib is a @emph{primitive} -- @code{fiber-switch} is the only
 control-transfer operation -- not a framework.  Schedulers, I/O
