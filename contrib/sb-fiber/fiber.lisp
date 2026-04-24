@@ -1,24 +1,19 @@
 ;;;; -*-  Lisp -*-
 ;;;;
-;;;; Fiber (stackful coroutine) support for SBCL.
-;;;; Wraps the C runtime fiber primitives (fiber.c and the per-arch
-;;;; assembly in fiber_switch_<arch>.S).  Currently implemented on
-;;;; x86-64 and arm64.
+;;;; Fiber support for SBCL.  Wraps the C runtime fiber primitives
+;;;; (fiber.c and the per-arch assembly in fiber_switch_<arch>.S).
+;;;; Currently implemented on x86-64 and arm64.
 
 (in-package :sb-fiber)
 
-;;; --- Platform guard ---
-;;;
 ;;; The C runtime is wired into x86-64 and arm64 non-Windows Config
 ;;; files only, and sb-fiber's signal-handling and mmap tricks
-;;; assume POSIX.  On unsupported platforms the reader skips the
-;;; whole body below: compile-file never tries to intern arch-
-;;; specific SB-VM symbols, and load succeeds silently so that
-;;; (require :sb-fiber) during a cross-platform contrib build
-;;; doesn't error.  The exported symbols remain interned (via
-;;; package.lisp) but unbound, so any actual fiber call on an
-;;; unsupported platform signals an informative undefined-function
-;;; error rather than a cryptic alien-lookup failure.
+;;; assume POSIX.
+;;;
+;;; On unsupported platforms the reader skips the whole body below:
+;;; compile-file never tries to intern arch- specific SB-VM symbols,
+;;; and load succeeds silently so that (require :sb-fiber) during a
+;;; cross-platform contrib build doesn't error.
 
 #+(and (or x86-64 arm64) (not win32))
 (progn
@@ -123,7 +118,7 @@
 ;;; --- Lisp fiber object ---
 
 (defstruct (fiber (:constructor %make-fiber))
-  "A stackful coroutine with its own control and binding stacks."
+  "A coroutine with its own control and binding stacks."
   (sap (sb-sys:int-sap 0) :type sb-sys:system-area-pointer)
   (function nil :type (or null function))
   ;; If the fiber's entry function escapes via an unhandled condition,

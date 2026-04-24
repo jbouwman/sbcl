@@ -1,5 +1,3 @@
-;;;; VOP replacement for fiber_swap_context (arm64).
-;;;;
 ;;;; Counterpart to fiber-vops-x86-64.lisp; see that file's header
 ;;;; comment for the overall shape.  AArch64 does not save return
 ;;;; addresses on the stack, so instead of pushing a RESUME label

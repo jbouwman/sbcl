@@ -1,6 +1,6 @@
 ;;;; -*-  Lisp -*-
 ;;;;
-;;;; Fiber (stackful coroutine) support for SBCL.
+;;;; Fiber support for SBCL.
 
 (defpackage :sb-fiber
   (:use :cl :sb-alien :sb-ext)
@@ -18,5 +18,6 @@
    #:+fiber-runnable+
    #:+fiber-running+
    #:+fiber-dead+))
+
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (setf (sb-int:system-package-p (find-package "SB-FIBER")) t))
