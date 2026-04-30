@@ -172,6 +172,33 @@ void sb_fiber_lisp_stack_suspend(struct sb_fiber *f, struct thread *th)
      * whose stack it describes; save it so a later resume restores
      * the right bit. */
     f->cs_guard_protected    = th->state_word.control_stack_guard_page_protected;
+    /* Scrub stale data above the saved CSP.  GC's
+     * sig_stop_for_gc_handler -> scrub_control_stack zeros only the
+     * unused span of the thread's currently-installed control stack;
+     * a suspended fiber's stack (whether per-fiber mmap or this thread
+     * stack while a different fiber runs) is invisible to that scrub.
+     * When this fiber later resumes and CSP advances back over
+     * [csp_saved, prev_high_water), a function prologue's
+     * `add CSP, CSP, #frame_size` reserves room without initializing
+     * the slots, which can leave them holding tagged-pointer-shaped
+     * residue from a prior tenant of those cells.
+     * scavenge_control_stack treats every is_lisp_pointer-shaped word
+     * as a precise root and would follow the stale pointer into
+     * garbage.  Zeroing on suspend guarantees resumes find
+     * immediates (0) in the previously-dead span.
+     *
+     * arm64 stacks grow upward.  Both per-fiber mmap stacks and the
+     * thread's own stack reserve the top 3*STACK_GUARD_SIZE bytes as
+     * RETURN/SOFT/HARD guards; SOFT and HARD are PROT_NONE, so memset
+     * must stop before them. */
+    if (f->control_stack_pointer && f->control_stack_end) {
+        char *usable_end = (char*)f->control_stack_end
+                           - 3 * STACK_GUARD_SIZE;
+        if ((char*)f->control_stack_pointer < usable_end) {
+            size_t bytes = usable_end - (char*)f->control_stack_pointer;
+            memset(f->control_stack_pointer, 0, bytes);
+        }
+    }
 }
 
 void sb_fiber_lisp_stack_resume(struct sb_fiber *f, struct thread *th)
