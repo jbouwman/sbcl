@@ -9,11 +9,10 @@
 #define MAP_STACK 0
 #endif
 
-/* Prepare a new fiber for first switch.  The AArch64 asm does not
- * use CALL/RET with a saved return address on the stack; instead
- * fiber_swap_context restores x30 (LR) directly and the final RET
- * branches to it.  So we point LR at fiber_trampoline_asm and stash
- * the fiber pointer in x19 (callee-saved) for the stub to read. */
+/* Prepare a new fiber for first switch. fiber_swap_context restores
+ * x30 (LR) directly and the final RET branches to it.  So we point LR
+ * at fiber_trampoline_asm and stash the fiber pointer in x19
+ * (callee-saved) for the stub to read. */
 void sb_fiber_prepare(struct sb_fiber *f,
                       void (*fn)(void *), void *arg)
 {
@@ -123,9 +122,16 @@ int sb_fiber_lisp_stack_alloc(struct sb_fiber *f, size_t size)
     f->control_stack_end        = (lispobj *)((char *)p + total);
     /* arm64's Lisp control stack grows upward from base.  The first
      * use (by call_into_lisp) starts writing at control_stack_pointer
-     * and advances. */
+     * and advances.  control_frame_pointer must be 0 on the first
+     * entry so that the bottom-most Lisp frame's saved OCFP slot
+     * (frame[0]) is written as 0, terminating the GC frame-chain
+     * walker in pin_call_chain_and_boxed_registers.  Initializing it
+     * to (lispobj *)p instead would make call_into_lisp store p into
+     * *p, producing a self-referential frame[0] = &frame[0] and an
+     * infinite walker loop the first time a GC fires inside the
+     * fiber.  Mirror what alloc.c:782 does for a fresh thread. */
     f->control_stack_pointer    = (lispobj *)p;
-    f->control_frame_pointer    = (lispobj *)p;
+    f->control_frame_pointer    = NULL;
     f->control_stack_alloc_size = total;
     f->cs_guard_protected       = 1;
     return 0;

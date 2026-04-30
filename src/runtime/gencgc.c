@@ -3114,7 +3114,15 @@ static void pin_call_chain_and_boxed_registers(struct thread* th) {
     lispobj *cfp = access_control_frame_pointer(th);
 
     if (cfp) {
-        while (1) {
+        /* Defensive cap: a malformed frame chain (cycle, off-stack
+         * pointer, missing terminator) would otherwise spin GC
+         * forever with the world stopped.  1 << 20 frames is far in
+         * excess of any plausible Lisp call depth; if we see more,
+         * something is corrupt and we want a panic with addresses
+         * over a silent hang. */
+        lispobj * const cfp0 = cfp;
+        unsigned long frames = 0;
+        while (frames++ < (1UL << 20)) {
             lispobj* ocfp = (lispobj *) cfp[0];
             lispobj lr = cfp[1];
             if (ocfp == 0)
@@ -3122,6 +3130,10 @@ static void pin_call_chain_and_boxed_registers(struct thread* th) {
             maybe_pin_code(lr);
             cfp = ocfp;
         }
+        if (frames >= (1UL << 20))
+            lose("control frame chain at %p (start %p) did not terminate "
+                 "within %lu frames",
+                 (void*)cfp, (void*)cfp0, frames);
     }
 #endif
 

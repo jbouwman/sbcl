@@ -77,8 +77,32 @@ static void fiber_pool_reset_for_put(struct sb_fiber *f)
     f->entry_arg = NULL;
     f->return_fiber = NULL;
 #ifdef LISP_FEATURE_ARM64
+    /* Reset to the empty-stack state.  control_frame_pointer is 0
+     * (not control_stack_base) so the bottom-most frame written by
+     * the next call_into_lisp records frame[0] = 0, terminating the
+     * GC walker.  See sb_fiber_lisp_stack_alloc in fiber-arm64.c.
+     *
+     * Also scrub the usable region of the Lisp control stack.  arm64
+     * GC's scavenge_control_stack walks every word from
+     * control_stack_start up to control_stack_pointer conservatively
+     * -- any Lisp-pointer-shaped word is followed as a root.  A new
+     * Lisp prologue's `add CSP, CSP, #frame_size` reserves local
+     * slots without initializing them, so if those slots happen to
+     * hold pointer-shaped junk left over from the prior fiber's use
+     * of this mmap region, GC follows them into garbage.  Zeroing on
+     * recycle costs one memset of the active size (default 64 KiB,
+     * a few microseconds) and is paid only on the pooled-reuse path
+     * (fresh mmap regions are already zero from MAP_ANONYMOUS). */
+    if (f->control_stack_base && f->control_stack_end
+        && f->control_stack_alloc_size) {
+        /* Usable region is the mmap minus the three trailing guards.
+         * STACK_GUARD_SIZE = os_vm_page_size on this build. */
+        size_t guard = STACK_GUARD_SIZE;
+        size_t usable = f->control_stack_alloc_size - 3*guard;
+        memset(f->control_stack_base, 0, usable);
+    }
     f->control_stack_pointer = f->control_stack_base;
-    f->control_frame_pointer = f->control_stack_base;
+    f->control_frame_pointer = NULL;
 #endif
     /* Restore the overflow guards to the default state: SOFT
      * PROT_NONE, RETURN R+W, cs_guard_protected = 1.  A pooled
