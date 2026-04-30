@@ -94,6 +94,32 @@
     (destroy-fiber child)
     (destroy-fiber main)))
 
+(with-test (:name (:fiber :gc-triggered-by-fiber-allocation))
+  ;; Regression: on arm64 sb_fiber_lisp_stack_alloc previously
+  ;; initialized control_frame_pointer to the same value as
+  ;; control_stack_pointer.  call_into_lisp's prologue uses
+  ;; thread->control_frame_pointer as the OCFP it stores into the
+  ;; bottom-most frame's frame[0]; that produced a self-referential
+  ;; frame[0] = &frame[0], looping the GC chain walker
+  ;; (pin_call_chain_and_boxed_registers) the first time GC fired
+  ;; while the fiber was still inside its first call_into_lisp.
+  ;; Each fiber here allocates ~6 MB of conses in one call -- enough
+  ;; to trip the default GC threshold mid-allocation -- and we run
+  ;; many of them so a freshly mmap'd fiber stack and a recycled one
+  ;; both get exercised.
+  (flet ((heavy ()
+           (let ((acc nil))
+             (dotimes (i 100000)
+               (setf acc (cons (cons i (cons i nil)) acc)))
+             (length acc))))
+    (dotimes (i 50)
+      (let ((main  (make-main-fiber))
+            (child (make-fiber #'heavy)))
+        (fiber-switch main child)
+        (destroy-fiber child)
+        (destroy-fiber main)))
+    (assert t)))
+
 ;;; --- Mass creation/destruction ---
 
 (with-test (:name (:fiber :mass-create-destroy))
