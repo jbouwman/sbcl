@@ -649,3 +649,46 @@
     (assert (>= fired 1) () "timer never fired")
     (destroy-fiber child)
     (destroy-fiber main)))
+
+;;; Regression for the register-before-prepare race.  MAKE-FIBER used
+;;; to call %fiber-register before %fiber-prepare, so a freshly-created
+;;; (or freelist-revived) fiber was published on the thread's
+;;; fiber_list with state FIBER_NEW and ctx.rsp == 0.  scan_fiber_stacks
+;;; conservatively scans [ctx.rsp .. stack_end) for FIBER_NEW fibers --
+;;; with rsp = 0 the loop dereferences the null page on its first
+;;; iteration and SEGVs inside garbage_collect_generation.
+;;;
+;;; Trigger: a sibling thread requesting STW while this thread is
+;;; between %fiber-register and %fiber-prepare.  We force the issue
+;;; with a thread that does (sb-ext:gc) in a tight loop -- explicit
+;;; STW requests are deterministic, where allocation-pressure GCs
+;;; aren't.  The driver does enough make/destroy iterations that
+;;; nearly every GC catches at least one driver inside the window.
+;;; Buggy build SEGVs in garbage_collect_generation; the fixed build
+;;; runs to completion.
+#+sb-thread
+(with-test (:name (:fiber :register-prepare-gc-race))
+  (let ((stop nil)
+        (drivers 4)
+        (iters 50)
+        (batch 16))
+    (let ((gc-thread
+            (sb-thread:make-thread
+             (lambda ()
+               (loop until stop do (sb-ext:gc) (sleep 0.0005)))
+             :name "rp-gc"))
+          (driver-threads
+            (loop for d below drivers
+                  collect (sb-thread:make-thread
+                           (lambda ()
+                             (make-main-fiber)
+                             (dotimes (_ iters)
+                               (let ((fs '()))
+                                 (dotimes (_ batch)
+                                   (push (make-fiber (lambda () nil)) fs))
+                                 (dolist (f fs) (destroy-fiber f)))))
+                           :name (format nil "rp-drive-~a" d)))))
+      (dolist (th driver-threads) (sb-thread:join-thread th))
+      (setf stop t)
+      (sb-thread:join-thread gc-thread))
+    (assert t)))

@@ -313,12 +313,25 @@ control switches back to the fiber that most recently switched to it."
     (when (sb-sys:sap= sap (sb-sys:int-sap 0))
       (error "Failed to allocate fiber"))
     (let ((f (%make-fiber :sap sap :function function)))
-      (%fiber-register (sb-thread:current-thread-sap) sap)
-      (%fiber-registry-put f)
+      ;; Order matters: prepare BEFORE register.  %fiber-register
+      ;; publishes the fiber on the thread's fiber_list, where
+      ;; gencgc's scan_fiber_stacks treats a FIBER_NEW fiber as a GC
+      ;; root and conservatively scans [ctx.rsp .. stack_end).  A
+      ;; fresh fiber from sb_fiber_create has ctx zeroed by calloc,
+      ;; and a freelist-revived one has ctx zeroed by
+      ;; fiber_pool_reset_for_put -- ctx.rsp = 0 either way until
+      ;; %fiber-prepare writes the trampoline frame.  Registering
+      ;; first opens a window in which a sibling thread (or
+      ;; %fiber-registry-put's own hash-table allocation below) can
+      ;; trigger GC and have scan_fiber_stacks dereference the null
+      ;; page.
+      ;;
       ;; Entry argument is the C SAP itself.  Crucial that this is
       ;; the stable mmap address, not the Lisp wrapper's address --
       ;; see the registry comment on why.
       (%fiber-prepare sap (ensure-lisp-entry-sap) sap)
+      (%fiber-register (sb-thread:current-thread-sap) sap)
+      (%fiber-registry-put f)
       f)))
 
 (defun destroy-fiber (fiber)
