@@ -309,19 +309,3 @@ the way to handle this.
 the idiomatic M:N shape.  Create N threads, each with its own main
 fiber and scheduler; balance work at admission.
 @end itemize
-
-@subsection Files and layout
-
-@itemize
-@item @code{contrib/sb-fiber/fiber.lisp} -- Lisp API and alien bindings.
-@item @code{contrib/sb-fiber/fiber-vops-x86-64.lisp} -- register-swap VOP.
-@item @code{contrib/sb-fiber/fiber-vops-arm64.lisp} -- register-swap VOP.
-@item @code{contrib/sb-fiber/examples/echo.lisp} -- example scheduler.
-@item @code{src/runtime/fiber.@{h,c@}} -- portable C runtime.
-@item @code{src/runtime/fiber-x86-64.@{h,c@}}, @code{fiber_switch_amd64.S} -- x86-64 backend.
-@item @code{src/runtime/fiber-arm64.@{h,c@}}, @code{fiber_switch_arm64.S} -- arm64 backend.
-@item @code{src/runtime/gencgc.c}, @code{pmrgc.c} -- GC hooks.
-@item @code{src/runtime/thread.h} -- per-thread @code{fiber_list} and pool.
-@item @code{tests/fiber.pure.lisp} -- 19 unit tests.
-@item @code{tests/fiber.impure.lisp} -- 22 GC / concurrency / perf / regression tests.
-@end itemize

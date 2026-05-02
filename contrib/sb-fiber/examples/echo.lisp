@@ -117,6 +117,10 @@
          (when (plusp n) (nb-write-all fd (subseq buf 0 n))))
     (sb-posix:close fd)))
 
+(defun accept-loop (lfd)
+  (loop (let ((fd (nb-accept lfd)))
+          (spawn (lambda () (handle fd))))))
+
 ;;; sb-bsd-sockets finalizer would close the fd if we let the wrapper
 ;;; get GC'd; pin it for the life of the process.
 (defvar *listener-socket* nil)
@@ -137,7 +141,5 @@
   (let ((lfd (make-listener port)))
     (format *error-output* "~&listening on :~D~%" port)
     (let ((*scheduler* (make-main-fiber)) (*runnable* '()) (*waiters* '()))
-      (spawn (lambda ()
-               (loop (let ((fd (nb-accept lfd)))
-                       (spawn (lambda () (handle fd)))))))
+      (spawn (lambda () (accept-loop lfd)))
       (scheduler-loop))))
