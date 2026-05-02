@@ -14,10 +14,8 @@ The contrib is a @emph{primitive} -- @code{fiber-switch} is the only
 control-transfer operation -- not a framework.  Schedulers, I/O
 integration, fiber-aware synchronization, and other machinery built
 on top of @code{fiber-switch} live in user code.  See
-@code{contrib/sb-fiber/examples/banner-server.lisp} for a ~280-line
-example that layers a @code{poll}-based userspace scheduler on top of
-the primitive and serves ~11,000 HTTP requests per second from a
-single OS thread.
+@code{contrib/sb-fiber/examples/echo.lisp} for a small
+@code{poll(2)}-based userspace scheduler built on the primitive.
 
 @subsection When to use fibers
 
@@ -239,8 +237,7 @@ fibers round-robin through their three @code{yield}s.
 A realistic scheduler layers non-blocking I/O on top -- when a fiber
 would block reading from an fd, it registers the fd with
 @code{poll}/@code{epoll}/@code{kqueue} and yields; the scheduler's
-poll loop wakes it when ready.  See the @code{banner-server.lisp}
-example.
+poll loop wakes it when ready.  See the @code{echo.lisp} example.
 
 @subsection Caveats
 
@@ -319,7 +316,7 @@ fiber and scheduler; balance work at admission.
 @item @code{contrib/sb-fiber/fiber.lisp} -- Lisp API and alien bindings.
 @item @code{contrib/sb-fiber/fiber-vops-x86-64.lisp} -- register-swap VOP.
 @item @code{contrib/sb-fiber/fiber-vops-arm64.lisp} -- register-swap VOP.
-@item @code{contrib/sb-fiber/examples/banner-server.lisp} -- demo HTTP server.
+@item @code{contrib/sb-fiber/examples/echo.lisp} -- example scheduler.
 @item @code{src/runtime/fiber.@{h,c@}} -- portable C runtime.
 @item @code{src/runtime/fiber-x86-64.@{h,c@}}, @code{fiber_switch_amd64.S} -- x86-64 backend.
 @item @code{src/runtime/fiber-arm64.@{h,c@}}, @code{fiber_switch_arm64.S} -- arm64 backend.

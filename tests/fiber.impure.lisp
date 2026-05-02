@@ -561,8 +561,8 @@
 ;;; wrapper in the C struct's entry_arg field, which is a raw void*
 ;;; invisible to GC.  Under load, a copying GC moved the wrapper;
 ;;; the next fiber's trampoline dereferenced the stale address.
-;;; Surfaced in contrib/sb-fiber/examples/banner-server.lisp around
-;;; request 1300.  Fixed by keying the Lisp wrapper through
+;;; Surfaced in an early version of contrib/sb-fiber/examples/echo.lisp
+;;; around request 1300.  Fixed by keying the Lisp wrapper through
 ;;; *FIBER-REGISTRY* on the C SAP (which doesn't move).  This test
 ;;; runs through the create/first-switch/exit/destroy cycle many
 ;;; times with aggressive GCs interleaved, so if the wrapper's
