@@ -42,6 +42,11 @@
 
 #include "genesis/sbcl.h"
 
+#if defined(LISP_FEATURE_SB_FIBER) && defined(LISP_FEATURE_X86_64) && !defined(LISP_FEATURE_WIN32)
+# define HAVE_SB_FIBER 1
+# include "fiber.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1719,7 +1724,31 @@ bool handle_guard_page_triggered(os_context_t *context,os_vm_address_t addr)
             (context, StaticSymbolFunction(UNDEFINED_ALIEN_VARIABLE_ERROR));
         return 1;
     }
-    else return 0;
+#ifdef HAVE_SB_FIBER
+    {
+        struct sb_fiber *f = NULL;
+        int kind = sb_fiber_classify_bs_fault(th, addr, &f);
+        if (kind == 1) {                       /* HARD */
+            fake_foreign_function_call(context);
+            lose("Fiber binding stack exhausted, fault: %p, PC: %p",
+                 addr, (void*)os_context_pc(context));
+        } else if (kind == 2) {                /* SOFT */
+            sb_fiber_lower_bs_guard(f);
+            if (lose_on_corruption_p) {
+                fake_foreign_function_call(context);
+                lose("Fiber binding stack exhausted (lose-on-corruption)");
+            }
+            unblock_signals_in_context_and_maybe_warn(context);
+            arrange_return_to_lisp_function
+                (context, StaticSymbolFunction(BINDING_STACK_EXHAUSTED_ERROR));
+            return 1;
+        } else if (kind == 3) {                /* RETURN -- re-arm */
+            sb_fiber_reset_bs_guard(f);
+            return 1;
+        }
+    }
+#endif
+    return 0;
 }
 
 #ifndef LISP_FEATURE_WIN32

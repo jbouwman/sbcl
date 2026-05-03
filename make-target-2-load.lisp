@@ -87,7 +87,7 @@
            ;; though I don't think they should all be public.
            :MSAN :UBSAN
            :SB-SAFEPOINT
-           :SB-THREAD :SB-UNICODE
+           :SB-THREAD :SB-UNICODE :SB-FIBER
            ;; Things which (I think) at least one person has requested be kept around
            :SB-LDB
            ;; We keep the :SB-PACKAGE-LOCKS feature despite it no longer

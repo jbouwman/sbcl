@@ -183,6 +183,13 @@
  ;; x86oid Darwin, FreeBSD, and Solaris.
  ; :sb-thread
 
+ ;; Stackful coroutines (the contrib/sb-fiber primitive).  Off by
+ ;; default: enabling the feature compiles the fiber GC walk and
+ ;; freelist drain into the runtime and lets the contrib build a
+ ;; non-empty fasl.  When absent, all fiber-related code in the
+ ;; runtime and the contrib is gated out.
+ ; :sb-fiber
+
  ;; futex support
  ;;
  ;; While on linux we are able to use futexes for our locking

@@ -12,6 +12,11 @@ ASSEM_SRC = x86-64-assem.S
 ARCH_SRC = x86-64-arch.c
 
 OS_SRC = sunos-os.c x86-64-sunos-os.c
+
+ifdef LISP_FEATURE_SB_FIBER
+  ASSEM_SRC += x86-64-fiber.S
+  OS_SRC += fiber.c x86-64-fiber-glue.c
+endif
 OS_LIBS= -ldl -lsocket -lnsl -lrt
 ifdef LISP_FEATURE_SB_CORE_COMPRESSION
   OS_LIBS += -lzstd

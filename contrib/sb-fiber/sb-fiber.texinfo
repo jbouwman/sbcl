@@ -1,0 +1,287 @@
+@node sb-fiber
+@section sb-fiber
+@cindex Fiber
+@cindex Sb-fiber
+
+@code{sb-fiber} provides user-space execution contexts with control
+and binding stacks.  Fibers are cooperatively scheduled and confined
+to a single OS thread.  A typical fiber switch costs ~100 ns on
+x86-64; suspended fibers cost ~160 KiB of virtual address space each
+(of which only the active stack tip is populated).
+
+@code{fiber-switch} is the only control-transfer operation:
+schedulers, I/O integration, fiber-aware synchronization, and other
+machinery live in user code.  See
+@code{contrib/sb-fiber/examples/echo.lisp} for a small
+@code{poll(2)}-based userspace scheduler built on the primitive.
+
+@subsection Glossary
+
+@table @asis
+@item Fiber
+A coroutine, represented by an @code{sb-fiber:fiber} object.  Owns a
+mmap'd native stack and binding stack, plus saved register state.
+
+@item Main fiber
+A fiber object representing the OS thread's own stack.  Created by
+@code{make-main-fiber}; used as the @code{from} or @code{to} of
+@code{fiber-switch} when yielding from or resuming to the thread's
+primordial context.  Must be created once per thread that uses fibers.
+
+@item Return fiber
+The fiber that will receive control when the current fiber's entry
+function returns naturally.  Set implicitly on each @code{fiber-switch}
+to the switcher.
+@end table
+
+@subsection API
+
+@subsubsection Lifecycle
+
+@deffn Function make-fiber function &key (stack-size 65536) (binding-stack-size 8192)
+Create a new fiber that will execute @var{function} (a zero- argument
+closure) when first switched to.  @var{stack-size} is the usable
+control-stack size in bytes.  @var{binding-stack-size} is the usable
+binding-stack size.  Returns a @code{fiber} object.  Must be destroyed
+with @code{destroy-fiber} when no longer needed.
+
+When the entry function returns normally, the fiber is marked
+@code{:dead} and control auto-switches to the fiber that most recently
+switched to it.
+
+When the entry function exits via an unhandled condition, the
+condition is stashed on the fiber; the next @code{fiber-switch} out of
+this fiber (via the auto-return path) re-signals it in the caller's
+context.  The fiber itself never propagates a condition across its
+boundary.
+@end deffn
+
+@deffn Function make-main-fiber
+Create a fiber object representing the current thread's own stack.
+Binds @code{*current-fiber*} on the calling thread as a side effect.
+Must be destroyed after all fiber switching on this thread is done.
+@end deffn
+
+@deffn Function destroy-fiber fiber
+Release @var{fiber}'s stacks.  @var{fiber} must not be currently
+running.  For default-sized fibers owned by the current thread, the
+implementation pools the fiber instead of @code{munmap}ing; subsequent
+@code{make-fiber} calls with default sizes draw from the pool.  The
+pool is per-thread and bounded (see @code{FIBER_POOL_MAX} in
+@code{fiber.h}); fibers beyond the cap are released to the kernel.
+@end deffn
+
+@deffn Macro with-fiber (var function &rest make-args) &body body
+Create a fiber bound to @var{var}, execute @var{body}, destroy on exit
+(including non-local exit).  @var{make-args} are forwarded to
+@code{make-fiber}.
+@end deffn
+
+@subsubsection Control transfer
+
+@deffn Function fiber-switch from to
+Suspend @var{from} and resume @var{to}.  Both must be registered to
+the current thread, @var{from} must be @code{:running}, and @var{to}
+must be @code{:runnable} or @code{:new}.  Returns when another
+fiber switches back to @var{from}, or when @var{to}'s entry function
+returns (which auto-switches back).
+
+Preserves across the switch: @var{to}'s control stack, binding stack,
+@code{*handler-clusters*}, @code{*restart-clusters*}, current catch
+block, current unwind-protect block, callee-saved registers.  Also
+flips @code{*current-fiber*} (per-thread) to track @var{to} while it
+runs.
+
+If @var{to}'s entry function previously escaped via an unhandled
+condition, that condition is re-signaled in the caller's context
+here.
+@end deffn
+
+@deffn Function fiber-yield
+Suspend the current fiber and resume the fiber that most recently
+switched to it.  Equivalent to
+
+@lisp
+(fiber-switch *current-fiber* (fiber-return-fiber *current-fiber*))
+@end lisp
+
+This is an asymmetric-coroutine convenience for the common case for
+generators and for fibers under a scheduler.  Signals an error if
+the current fiber has no recorded return fiber (a freshly-made main
+fiber, or a fiber that has not yet been switched to).
+@end deffn
+
+@deffn Function current-fiber
+Return the fiber currently running on this thread, or @code{nil} if
+no main fiber has been established.  Equivalent to the
+@code{*current-fiber*} special variable, but exported as a function
+for use in contexts where a defvar reference would be awkward.
+@end deffn
+
+@subsubsection Pinning
+
+@deffn Macro with-fiber-pinned () &body body
+Mark the current fiber unsuspendable for the dynamic extent of
+@var{body}.  Any @code{fiber-switch} whose @code{from} is the current
+fiber signals an error while a pin is in effect.  Pins nest; the
+fiber becomes suspendable again only after the outermost pin exits.
+
+Intended for FFI: wrap any region in which foreign frames between
+this Lisp code and a corresponding callout/callback have not yet
+returned.  Yielding from inside such a region would leave foreign
+frames atop a stack that the scheduler might re-enter under
+different invariants (different binding stack, possibly a different
+@code{*current-fiber*}).
+
+@lisp
+(with-fiber-pinned ()
+  (sb-alien:alien-funcall some-c-fn ...))
+@end lisp
+
+Signals an error at entry if no main fiber has been established on
+this thread, so a stray @code{with-fiber-pinned} in non-fiber code
+does not silently no-op.
+@end deffn
+
+@deffn Function fiber-pinned-p fiber
+Return @code{t} if @var{fiber}'s pin count is nonzero -- i.e., it is
+inside one or more @code{with-fiber-pinned} extents and
+@code{fiber-switch} would refuse to suspend it.
+@end deffn
+
+@subsubsection Introspection
+
+@deffn Function fiber-alive-p fiber
+Return @code{t} if @var{fiber} has not yet had its entry function
+return and has not been destroyed.  Aliveness covers @code{:new},
+@code{:runnable}, @code{:running}, and fibers that exited via a
+pending condition (not yet re-signaled).
+@end deffn
+
+@deffn Function fiber-state fiber
+Return the integer state of @var{fiber}, one of the constants
+@code{+fiber-new+} (0), @code{+fiber-runnable+} (1),
+@code{+fiber-running+} (2), @code{+fiber-dead+} (3).
+@end deffn
+
+@subsection A minimal example
+
+@lisp
+(require :sb-fiber)
+(use-package :sb-fiber)
+
+(let* ((main  (make-main-fiber))
+       (child (make-fiber
+               (lambda ()
+                 (format t "hello from ~S~%" (current-fiber))
+                 (fiber-switch (current-fiber) main)
+                 (format t "back again~%")))))
+  (fiber-switch main child)
+  (format t "main resumed~%")
+  (fiber-switch main child)
+  (destroy-fiber child)
+  (destroy-fiber main))
+@end lisp
+
+Prints:
+@example
+hello from #<FIBER @dots{}>
+main resumed
+back again
+@end example
+
+@subsection A cooperative scheduler
+
+The pattern:
+
+@lisp
+(defvar *scheduler*)          ; the main fiber
+(defvar *runnable*)           ; fifo of ready fibers
+
+(defun yield ()
+  (push (current-fiber) *runnable*)  ; or other discipline
+  (fiber-yield))                     ; goes to *scheduler* (last switcher-in)
+
+(defun spawn (fn)
+  (push (make-fiber fn) *runnable*))
+
+(defun run-scheduler ()
+  (loop while *runnable*
+        do (let ((f (pop *runnable*)))
+             (fiber-switch *scheduler* f))))
+
+(defun main ()
+  (let ((*scheduler* (make-main-fiber))
+        (*runnable* '()))
+    (spawn (lambda () (dotimes (i 3) (print i) (yield))))
+    (spawn (lambda () (dotimes (i 3) (print (* 10 i)) (yield))))
+    (run-scheduler)))
+@end lisp
+
+Running @code{(main)} prints @code{0, 0, 1, 10, 2, 20}: the two
+fibers round-robin through their three @code{yield}s.
+
+A realistic scheduler layers non-blocking I/O on top -- when a fiber
+would block reading from an fd, it registers the fd with
+@code{poll}/@code{epoll}/@code{kqueue} and yields; the scheduler's
+poll loop wakes it when ready.  See @code{echo.lisp} example.
+
+@subsection Caveats
+
+@itemize
+@item @strong{Platforms.}  x86-64 only.  Windows is not supported.
+
+@item @strong{No migration.}  A fiber created on thread A cannot run
+on thread B.  @code{fiber-switch} enforces this.
+
+@item @strong{No preemption.}  A fiber yields only by calling
+@code{fiber-switch} (or by letting its entry function return).  Tight
+compute loops starve the scheduler.
+
+@item @strong{Handler-chain isolation.}  A fiber's user code runs with
+a fresh @code{*handler-clusters*} / @code{*restart-clusters*}.
+Conditions signaled inside the fiber do not see handlers established
+on the stack that called @code{fiber-switch}.  If you
+need to propagate errors out of a fiber, let them escape normally --
+they'll be re-signaled in the caller's context on the next
+@code{fiber-switch}.
+
+@item @strong{VA footprint.}  ~160 KiB virtual address space per
+fiber on builds where @code{BACKEND_PAGE_BYTES = 32 KiB} (three
+32 KiB guard regions plus a 64 KiB stack plus a small binding stack).
+On builds with smaller page size, proportionally less.  RSS is
+dominated by the active stack tip, typically single-digit KiB.
+
+@item @strong{@code{sb-sprof} behavior.}  A sample taken while a
+fiber is running attributes the sample to the fiber's stack at that
+instant.  Samples taken while the fiber is suspended don't see it.
+Backtraces inside a fiber walk correctly.
+
+@item @strong{Debugger interactions.}  Backtraces are correct.
+Stepping across a @code{fiber-switch} has not been explicitly tested
+and may surprise you (the "next" instruction in source order is on a
+different stack).
+@end itemize
+
+@subsection Relationship to @code{sb-thread}
+
+@code{sb-thread} and @code{sb-fiber} are orthogonal:
+
+@itemize
+@item An OS thread is preemptively scheduled by the kernel; a fiber is
+cooperatively scheduled by user code.
+
+@item Threads can share data via locks and atomics; fibers on the same
+thread share data without locks (they never interleave without an
+explicit @code{fiber-switch}).
+
+@item A mutex held by one fiber is held by that fiber's OS thread;
+another fiber on the same thread cannot acquire it (at the
+@code{sb-thread:grab-mutex} level it looks held by "this thread").
+User-level fiber-aware locks built on top of @code{fiber-switch} are
+the way to handle this.
+
+@item @code{sb-thread:make-thread} plus multiple fibers per thread is
+the idiomatic M:N shape.  Create N threads, each with its own main
+fiber and scheduler; balance work at admission.
+@end itemize

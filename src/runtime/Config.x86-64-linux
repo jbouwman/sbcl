@@ -13,6 +13,11 @@ ASSEM_SRC = x86-64-assem.S
 ARCH_SRC = x86-64-arch.c
 OS_SRC = linux-os.c linux-mman.c x86-64-linux-os.c
 
+ifdef LISP_FEATURE_SB_FIBER
+  ASSEM_SRC += x86-64-fiber.S
+  OS_SRC += fiber.c x86-64-fiber-glue.c
+endif
+
 # The "--Wl,--export-dynamic" flags are here to help people
 # experimenting with callbacks from C to SBCL, by allowing linkage to
 # SBCL src/runtime/*.c symbols from C. Work on this is good, but it's
