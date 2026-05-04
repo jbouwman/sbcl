@@ -27,7 +27,9 @@
 #include "genesis/gc-tables.h"
 #include "genesis/split-ordered-list.h"
 #include "thread.h"
-#if defined(LISP_FEATURE_SB_FIBER) && defined(LISP_FEATURE_X86_64) && !defined(LISP_FEATURE_WIN32)
+#if defined(LISP_FEATURE_SB_FIBER) \
+    && (defined(LISP_FEATURE_X86_64) || defined(LISP_FEATURE_ARM64)) \
+    && !defined(LISP_FEATURE_WIN32)
 #define HAVE_SB_FIBER 1
 #include "fiber.h"
 #endif
@@ -425,7 +427,8 @@ static void impart_mark_stickiness(lispobj word)
     }
 }
 
-#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC
+#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC \
+    || (defined LISP_FEATURE_ARM64 && defined HAVE_SB_FIBER)
 static void preserve_pointer(os_context_register_t object,
                              __attribute__((unused)) void* arg) {
     /* The mark-region GC never filters based on type tags,
@@ -629,20 +632,27 @@ static void preserve_ctx_reg_cb(lispobj word, void *unused)
 }
 
 /* Conservatively scan suspended fiber control stacks and callee-
- * saved registers for GC roots.  See gencgc.c:scan_fiber_stacks. */
+ * saved registers for GC roots.  See gencgc.c:scan_fiber_stacks for
+ * the rationale on the x86-64-only control_stack_end fallback and
+ * the arm64-only Lisp-stack pass. */
 static void scan_fiber_stacks(struct thread *th)
 {
     struct sb_fiber *f = thread_extra_data(th)->fiber_list;
     while (f) {
         if (f->state == FIBER_RUNNABLE || f->state == FIBER_NEW) {
             lispobj *hi = (lispobj *)f->stack_end;
+#ifdef LISP_FEATURE_X86_64
             if (!hi) hi = f->control_stack_end;
+#endif
             if (hi) {
                 lispobj *lo = (lispobj *)sb_fiber_ctx_sp(f);
                 for (lispobj *ptr = lo; ptr < hi; ptr++)
                     preserve_pointer(*ptr, 0);
             }
             sb_fiber_ctx_foreach_gc_reg(f, preserve_ctx_reg_cb, NULL);
+#ifdef LISP_FEATURE_ARM64
+            sb_fiber_foreach_lisp_stack_word(f, preserve_ctx_reg_cb, NULL);
+#endif
         }
         f = f->next;
     }

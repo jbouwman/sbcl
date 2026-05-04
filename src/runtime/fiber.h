@@ -8,6 +8,8 @@
  * saved/restored by fiber_swap_context. */
 #if defined(LISP_FEATURE_X86_64)
 #  include "x86-64-fiber.h"
+#elif defined(LISP_FEATURE_ARM64)
+#  include "arm64-fiber.h"
 #else
 #  error "fiber support not implemented on this architecture"
 #endif
@@ -46,10 +48,20 @@ struct sb_fiber {
      * the main fiber, equals the thread's original. */
     lispobj *binding_stack_start_for_thread;
 
-    /* Native C stack range to install in thread->control_stack_*
-     * while this fiber runs (for *CONTROL-STACK-START/END*). */
+    /* Per-fiber Lisp control stack bounds, installed in
+     * thread->control_stack_* while this fiber runs (so
+     * *CONTROL-STACK-START/END* track the running fiber).  On x86-64
+     * these alias stack_start/stack_end (Lisp frames share the
+     * native C stack); on arm64 they describe a separate mmap'd
+     * region tracked by reg_CSP / reg_CFP, owned iff
+     * control_stack_alloc_size > 0. */
     lispobj *control_stack_base;
     lispobj *control_stack_end;
+#ifdef LISP_FEATURE_ARM64
+    lispobj *control_stack_pointer;
+    lispobj *control_frame_pointer;
+    size_t   control_stack_alloc_size;
+#endif
 
     /* Saved thread-struct fields (swapped on fiber_switch) */
     lispobj  current_catch_block;
@@ -117,19 +129,28 @@ void sb_fiber_exit_pa    (struct thread *th);
  * by the Lisp shim to query layout at load time. */
 int sb_fiber_struct_offset(int field);
 
-/* Arch-specific helpers (x86-64-fiber-glue.c). */
+/* Arch-specific helpers (<arch>-fiber-glue.c). */
 void  sb_fiber_prepare(struct sb_fiber *f, void (*fn)(void *), void *arg);
 void *sb_fiber_ctx_sp (const struct sb_fiber *f);
 void  sb_fiber_ctx_foreach_gc_reg(const struct sb_fiber *f,
                                   void (*cb)(lispobj word, void *arg),
                                   void *arg);
 
-/* Per-fiber Lisp control stack hooks (x86-64-fiber-glue.c). */
+/* Per-fiber Lisp control stack hooks (<arch>-fiber-glue.c). */
 int  sb_fiber_lisp_stack_alloc       (struct sb_fiber *f, size_t size);
 void sb_fiber_lisp_stack_free        (struct sb_fiber *f);
 void sb_fiber_lisp_stack_capture_main(struct sb_fiber *f, struct thread *th);
 void sb_fiber_lisp_stack_suspend     (struct sb_fiber *f, struct thread *th);
 void sb_fiber_lisp_stack_resume      (struct sb_fiber *f, struct thread *th);
+
+#ifdef LISP_FEATURE_ARM64
+/* Conservatively scan a suspended fiber's separate Lisp control
+ * stack.  No-op on x86-64 (Lisp frames share the native C stack
+ * already covered by [ctx.sp .. stack_end)). */
+void sb_fiber_foreach_lisp_stack_word(const struct sb_fiber *f,
+                                      void (*cb)(lispobj word, void *arg),
+                                      void *arg);
+#endif
 
 /* Asm fallback for register/SP swap (x86-64-fiber.S).  Used by
  * fiber_trampoline_c's auto-return path; Lisp switches use the VOP. */

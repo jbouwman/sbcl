@@ -27,14 +27,25 @@ static size_t align_up(size_t v, size_t align) {
 static int fiber_is_default_sized(const struct sb_fiber *f)
 {
     static size_t dflt_stack, dflt_bind;
+#ifdef LISP_FEATURE_ARM64
+    static size_t dflt_lisp_stack;
+#endif
     if (!dflt_stack) {
         size_t ps = os_reported_page_size;
         dflt_stack = 3*STACK_GUARD_SIZE + align_up(FIBER_DEFAULT_STACK_SIZE, ps);
         dflt_bind  = align_up(FIBER_DEFAULT_BINDING_STACK_SIZE, ps);
+#ifdef LISP_FEATURE_ARM64
+        dflt_lisp_stack =
+            align_up(FIBER_DEFAULT_STACK_SIZE, ps) + 3*STACK_GUARD_SIZE;
+#endif
     }
     if (!f->stack_base) return 0; /* main fiber -- stacks not owned */
     if (f->stack_alloc_size         != dflt_stack) return 0;
     if (f->binding_stack_alloc_size != dflt_bind)  return 0;
+#ifdef LISP_FEATURE_ARM64
+    /* arm64's separate Lisp control stack has its own 3-guard layout. */
+    if (f->control_stack_alloc_size != dflt_lisp_stack) return 0;
+#endif
     return 1;
 }
 
@@ -51,6 +62,32 @@ static void fiber_pool_reset_for_put(struct sb_fiber *f)
     f->entry_fn = NULL;
     f->entry_arg = NULL;
     f->return_fiber = NULL;
+#ifdef LISP_FEATURE_ARM64
+    /* arm64's Lisp control stack is a separate mmap; scrub its
+     * usable region so a future revive doesn't see pointer-shaped
+     * residue in slots a fresh prologue's `add CSP, ...` reserves
+     * uninited.  Fresh mmaps come zeroed from MAP_ANONYMOUS, so the
+     * cost is paid only on the pooled-reuse path.
+     * control_frame_pointer = NULL terminates the GC walker on the
+     * first call_into_lisp; see arm64-fiber-glue.c. */
+    if (f->control_stack_base && f->control_stack_alloc_size) {
+        size_t usable = f->control_stack_alloc_size - 3*STACK_GUARD_SIZE;
+        memset(f->control_stack_base, 0, usable);
+    }
+    f->control_stack_pointer = f->control_stack_base;
+    f->control_frame_pointer = NULL;
+    /* Re-arm Lisp-control-stack SOFT/RETURN guards (high end on
+     * arm64) if a prior overflow lowered them. */
+    if (!f->cs_guard_protected && f->control_stack_base
+        && f->control_stack_alloc_size) {
+        size_t guard = STACK_GUARD_SIZE;
+        char *base = (char *)f->control_stack_base;
+        size_t usable = f->control_stack_alloc_size - 3*guard;
+        mprotect(base + usable,         guard, PROT_READ | PROT_WRITE);
+        mprotect(base + usable + guard, guard, PROT_NONE);
+        f->cs_guard_protected = 1;
+    }
+#else
     /* Re-arm CS SOFT (PROT_NONE) and disarm CS RETURN (R+W) if a
      * prior overflow lowered the control-stack guards. */
     if (!f->cs_guard_protected && f->stack_base) {
@@ -59,6 +96,7 @@ static void fiber_pool_reset_for_put(struct sb_fiber *f)
         mprotect((char *)f->stack_base + 2*guard, guard, PROT_READ | PROT_WRITE);
         f->cs_guard_protected = 1;
     }
+#endif
     /* Same for binding-stack guards. */
     if (!f->bs_guard_protected && f->binding_stack_base) {
         sb_fiber_reset_bs_guard(f);
@@ -320,6 +358,15 @@ void fiber_trampoline_c(struct sb_fiber *self)
      * register swap transferred control mid-region); we exit on
      * their behalf. */
     sb_fiber_exit_pa(th);
+#ifdef LISP_FEATURE_ARM64
+    /* arm64's call_into_c postamble cleared th->control_stack_pointer
+     * on return from prep's alien call (its "back in Lisp" FFCA
+     * marker), but we've since swapped to a new fiber's Lisp stack;
+     * call_into_lisp will read this slot to initialize reg_CSP for
+     * the entry callback.  Restore from self's saved bounds. */
+    th->control_stack_pointer = self->control_stack_pointer;
+    th->control_frame_pointer = self->control_frame_pointer;
+#endif
     self->entry_fn(self->entry_arg);
     self->state = FIBER_DEAD;
 
@@ -418,7 +465,16 @@ static inline void swap_bindings_backward(struct thread *th,
 
 static inline void fiber_enter_pa(struct thread *th)
 {
+#if defined LISP_FEATURE_ARM64
+    /* arm64 PA: flag_PseudoAtomic in the low 32 bits, leaving the
+     * high half for the handler's PA_INTERRUPTED flag. */
+    ((volatile uint32_t *)&th->pseudo_atomic_bits)[0] = flag_PseudoAtomic;
+#else
+    /* x86-64 PA: whole word nonzero; bit 0 reserved for
+     * PA_INTERRUPTED.  Thread is aligned, so (uword_t)th has bit 0
+     * clear and matches the Lisp macro. */
     th->pseudo_atomic_bits = (uword_t)th;
+#endif
 }
 
 void sb_fiber_switch_prep(struct sb_fiber *from, struct sb_fiber *to)
@@ -450,9 +506,20 @@ void sb_fiber_switch_prep(struct sb_fiber *from, struct sb_fiber *to)
  * Lisp-initiated switches inline this in the VOP's RESUME tail. */
 void sb_fiber_exit_pa(struct thread *th)
 {
-    /* XOR pa_bits with the thread address.  If no interrupt arrived
-     * the result is 0 (PA_IN cleared cleanly); otherwise bit 0 remains
-     * set and UD2 traps to dispatch the handler. */
+#if defined LISP_FEATURE_ARM64
+    /* Clear PA_IN (low 32 bits) then inspect PA_INTERRUPTED (high
+     * 32 bits).  If set, clear it and BRK with trap_PendingInterrupt
+     * -- the SIGTRAP handler decodes that into do_pending_interrupt. */
+    volatile uint32_t *halves = (volatile uint32_t *)&th->pseudo_atomic_bits;
+    halves[0] = 0;
+    if (halves[1]) {
+        halves[1] = 0;
+        asm volatile("brk %0" : : "i"(trap_PendingInterrupt));
+    }
+#else
+    /* x86-64: XOR pa_bits with the thread address.  If no interrupt
+     * arrived the result is 0 (PA_IN cleared cleanly); otherwise bit
+     * 0 remains set and UD2 traps to dispatch the handler. */
     uword_t pa = __sync_xor_and_fetch(&th->pseudo_atomic_bits, (uword_t)th);
     if (pa) {
 #if defined LISP_FEATURE_UD2_BREAKPOINTS
@@ -461,6 +528,7 @@ void sb_fiber_exit_pa(struct thread *th)
         asm volatile("ud2");
 #endif
     }
+#endif
 }
 
 /* Byte offsets of struct sb_fiber fields that the Lisp-side

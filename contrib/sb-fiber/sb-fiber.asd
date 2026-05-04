@@ -7,4 +7,7 @@
                (:file "x86-64-vops"
                 :if-feature (:and :sb-fiber :x86-64)
                 :depends-on ("package"))
+               (:file "arm64-vops"
+                :if-feature (:and :sb-fiber :arm64)
+                :depends-on ("package"))
                (:file "fiber" :depends-on ("package"))))

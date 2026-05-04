@@ -13,7 +13,8 @@
 
 (unless (and (member :sb-thread *features*)
              (member :sb-fiber *features*)
-             (member :x86-64 *features*)
+             (or (member :x86-64 *features*)
+                 (member :arm64 *features*))
              (not (member :win32 *features*)))
   (invoke-restart 'run-tests::skip-file))
 

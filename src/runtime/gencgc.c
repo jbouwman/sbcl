@@ -51,7 +51,9 @@
 #include "genesis/brothertree.h"
 #include "genesis/split-ordered-list.h"
 #include "var-io.h"
-#if defined(LISP_FEATURE_SB_FIBER) && defined(LISP_FEATURE_X86_64) && !defined(LISP_FEATURE_WIN32)
+#if defined(LISP_FEATURE_SB_FIBER) \
+    && (defined(LISP_FEATURE_X86_64) || defined(LISP_FEATURE_ARM64)) \
+    && !defined(LISP_FEATURE_WIN32)
 #define HAVE_SB_FIBER 1
 #include "fiber.h"
 #endif
@@ -1455,14 +1457,17 @@ static lispobj conservative_root_p(lispobj addr, page_index_t addr_page_index)
         && plausible_tag_p(addr)) return AMBIGUOUS_POINTER;
     return 0;
 }
-#elif defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC
+#elif defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC \
+   || (defined LISP_FEATURE_ARM64 && defined HAVE_SB_FIBER)
 /* Consider interior pointers to code as roots.
  * But most other pointers are *unambiguous* conservative roots.
  * This is not "less conservative" per se, than the non-precise code,
  * because it's actually up to the user of this predicate to decide whehther
  * the control stack as a whole is scanned for objects to pin.
  * The so-called "precise" code should generally NOT scan the stack,
- * and not call this on stack words.
+ * and not call this on stack words.  ARM64 uses this only for fiber
+ * stack scanning, where the C control stack of suspended fibers has
+ * no precise root information.
  * Anyway, this code isn't as performance-critical as the x86 variant,
  * so it's not worth trying to optimize out the search for the object */
 static lispobj conservative_root_p(lispobj addr, page_index_t addr_page_index)
@@ -2011,7 +2016,8 @@ static void impart_mark_stickiness(lispobj word)
 }
 #endif
 
-#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC
+#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_PPC \
+    || (defined LISP_FEATURE_ARM64 && defined HAVE_SB_FIBER)
 /* Take a possible pointer to a Lisp object and mark its page in the
  * page_table so that it will not be relocated during a GC.
  *
@@ -3158,18 +3164,22 @@ static void preserve_ctx_reg_cb(lispobj word, void *unused)
 }
 
 /* Conservatively scan suspended fiber control stacks and callee-
- * saved registers for GC roots. */
+ * saved registers for GC roots.  On arm64 (separate Lisp control
+ * stack) also scan that region via sb_fiber_foreach_lisp_stack_word. */
 static void scan_fiber_stacks(struct thread *th)
 {
     struct sb_fiber *f = thread_extra_data(th)->fiber_list;
     while (f) {
         if (f->state == FIBER_RUNNABLE || f->state == FIBER_NEW) {
-            /* Child fibers own a native C stack via stack_end; the
-             * main fiber doesn't (stack_end == NULL) but its Lisp
-             * frames live on the thread's own C stack, captured at
-             * make-main-fiber time as control_stack_end. */
             lispobj *hi = (lispobj *)f->stack_end;
+#ifdef LISP_FEATURE_X86_64
+            /* Main fiber has stack_end == NULL but Lisp frames live
+             * on the thread's own C stack, captured as
+             * control_stack_end at make-main-fiber time.  Gated on
+             * x86-64 because elsewhere control_stack_end names a
+             * separate region (scanned below on arm64). */
             if (!hi) hi = f->control_stack_end;
+#endif
             if (hi) {
                 lispobj *lo = (lispobj *)sb_fiber_ctx_sp(f);
                 for (lispobj *ptr = lo; ptr < hi; ptr++) {
@@ -3179,6 +3189,9 @@ static void scan_fiber_stacks(struct thread *th)
                 }
             }
             sb_fiber_ctx_foreach_gc_reg(f, preserve_ctx_reg_cb, NULL);
+#ifdef LISP_FEATURE_ARM64
+            sb_fiber_foreach_lisp_stack_word(f, preserve_ctx_reg_cb, NULL);
+#endif
         }
         f = f->next;
     }

@@ -1,16 +1,16 @@
 ;;;; -*-  Lisp -*-
 ;;;;
-;;;; sb-fiber Lisp shim.  Wraps fiber.c and x86-64-fiber.S.
-;;;; x86-64 POSIX only.  See README.md for design notes.
+;;;; sb-fiber Lisp shim.  Wraps fiber.c and the per-arch assembly in
+;;;; <arch>-fiber.S.  Currently x86-64 and arm64, POSIX only.  See
+;;;; README.md for design notes.
 
 (in-package :sb-fiber)
 
 ;;; Body is gated on :sb-fiber (so non-fiber builds compile to an empty
 ;;; fasl; the C runtime symbols this shim binds to are only linked when
-;;; :sb-fiber is set) AND on x86-64 POSIX (the shim's only supported
-;;; target).
+;;; :sb-fiber is set) AND on a supported POSIX arch.
 
-#+(and sb-fiber x86-64 (not win32))
+#+(and sb-fiber (or x86-64 arm64) (not win32))
 (progn
 
 ;;; --- Alien declarations for C runtime functions ---
@@ -59,11 +59,10 @@
                    from to))
   (values))
 
-;;; %fiber-register-swap is translated by the VOP in
-;;; x86-64-vops.lisp via a DEFKNOWN ALWAYS-TRANSLATABLE +
-;;; :TRANSLATE clause.  This defun is only the uncompiled-call
-;;; fallback; not declaimed inline, since inlining would shadow the
-;;; VOP translation.
+;;; %fiber-register-swap is translated by the VOP in <arch>-vops.lisp
+;;; via a DEFKNOWN ALWAYS-TRANSLATABLE + :TRANSLATE clause.  This
+;;; defun is only the uncompiled-call fallback; not declaimed inline,
+;;; since inlining would shadow the VOP translation.
 (defun %fiber-register-swap (from to)
   (declare (type system-area-pointer from to)
            (ignore from to))
@@ -405,4 +404,4 @@ the manual for the rationale."
        (unwind-protect (progn ,@body)
          (decf (fiber-pin-count ,f))))))
 
-) ; #+(and sb-fiber x86-64 (not win32)) (progn ...
+) ; #+(and sb-fiber (or x86-64 arm64) (not win32)) (progn ...

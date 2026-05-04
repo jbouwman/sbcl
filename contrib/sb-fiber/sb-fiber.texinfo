@@ -229,7 +229,7 @@ poll loop wakes it when ready.  See @code{echo.lisp} example.
 @subsection Caveats
 
 @itemize
-@item @strong{Platforms.}  x86-64 only.  Windows is not supported.
+@item @strong{Platforms.}  x86-64 and arm64.  Windows is not supported.
 
 @item @strong{No migration.}  A fiber created on thread A cannot run
 on thread B.  @code{fiber-switch} enforces this.

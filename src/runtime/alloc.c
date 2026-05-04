@@ -22,7 +22,9 @@
 #include "arch.h" // why is this where funcall2 is declared???
 #include "genesis/symbol.h"
 #include "code.h"
-#if defined(LISP_FEATURE_SB_FIBER) && defined(LISP_FEATURE_X86_64) && !defined(LISP_FEATURE_WIN32)
+#if defined(LISP_FEATURE_SB_FIBER) \
+    && (defined(LISP_FEATURE_X86_64) || defined(LISP_FEATURE_ARM64)) \
+    && !defined(LISP_FEATURE_WIN32)
 #define HAVE_SB_FIBER 1
 #include "fiber.h"
 #endif
