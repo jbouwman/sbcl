@@ -343,7 +343,7 @@
 
 (defoptimizer (sign-extend derive-type) ((x size))
   (when (sb-c:constant-lvar-p size)
-    (specifier-type `(signed-byte ,(sb-c:lvar-value size)))))
+    (make-numeric-type 'signed-byte (sb-c:lvar-value size))))
 
 (define-vop (sign-extend)
   (:translate sign-extend)

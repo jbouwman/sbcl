@@ -466,3 +466,19 @@
 (compile 'try-dx-acons)
 (with-test (:name :compiled-acons)
   (assert (try-dx-acons 1 2 3 '((1 . 2) . 3))))
+
+(with-test (:name :sets-test-order)
+  (flet ((test-fun (a b)
+           (declare (integer a) (float b))
+           (= a b)))
+    (mapc (lambda (fun)
+            (funcall (opaque-identity fun)
+                     (list 1 2 3) (list 1.0 2.0 3.0 4.0)
+                     :test #'test-fun)
+            (funcall (opaque-identity fun)
+                     (list 1 2 3 4) (list 1.0 2.0 3.0)
+                     :test #'test-fun))
+          '(union nunion intersection nintersection
+            set-difference nset-difference
+            set-exclusive-or nset-exclusive-or
+            subsetp))))

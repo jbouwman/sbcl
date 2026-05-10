@@ -1547,10 +1547,13 @@
                                (lvar-dest lvar))))
         (when (and (combination-p combination)
                    (eq (combination-fun combination) lvar))
-          (loop for v in vars
-                for arg in (combination-args combination)
-                when (eq v var)
-                  return arg))))))
+          (let ((args (combination-args combination)))
+            (when (functional-kind-eq fun external toplevel-xep)
+              (pop vars)) ;; arg-count
+            (loop for v in vars
+                  for arg in args
+                  when (eq v var)
+                  return arg)))))))
 
 ;;; Return the Top Level Form number of PATH, i.e. the ordinal number
 ;;; of its original source's top level form in its compilation unit.
@@ -3612,6 +3615,18 @@ is :ANY, the function name is not checked."
                   for arg in (combination-args combination)
                   when (eq v lambda-var)
                   do (funcall function combination arg))))))))
+
+(defun map-callers (function lambda &key not-a-caller)
+  (declare (dynamic-extent function)
+           (dynamic-extent not-a-caller))
+  (loop for ref in (leaf-refs lambda)
+        for lvar = (node-lvar ref)
+        for dest = (and lvar (lvar-dest lvar))
+        do (cond ((and (combination-p dest)
+                       (eq (combination-fun dest) lvar))
+                  (funcall function dest))
+                 (not-a-caller
+                  (funcall not-a-caller)))))
 
 (declaim (ftype (sfunction (function t &key (:leaf-set t) (:multiple-uses t) (:cast t)) null) map-refs))
 (defun map-refs (function leaf/lvar &key leaf-set

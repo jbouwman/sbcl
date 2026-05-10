@@ -745,7 +745,7 @@
           do (setf (label-usedp
                     (setf (aref vector (- index min)) (block-label target)))
                    t))
-    (list vector (cond ((csubtypep (lvar-type index) (specifier-type `(integer ,min ,max)))
+    (list vector (cond ((csubtypep (lvar-type index) (make-numeric-type 'integer min max))
                         nil)
                        (otherwise))
           min max)))

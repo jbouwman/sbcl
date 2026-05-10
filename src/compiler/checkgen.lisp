@@ -61,8 +61,7 @@
                       (if (eq t low)
                           rest
                           (type-union rest
-                                      (specifier-type
-                                       `(integer ,(or low '*) ,(or high '*)))))))
+                                      (make-numeric-type 'integer low high)))))
                    (t
                     type))))
     (weaken-integer-type-part type 'integer)))

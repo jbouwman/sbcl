@@ -971,8 +971,8 @@
     (let ((bound (exclude (bound y))))
       (when bound
         (if greater
-            (make-numeric-type :low bound)
-            (make-numeric-type :high bound))))))
+            (make-numeric-union-type :low bound)
+            (make-numeric-union-type :high bound))))))
 
 (defun constrain-real (y greater or-equal)
   (let ((int (type-approximate-interval y)))
@@ -989,8 +989,8 @@
         (let ((bound (exclude (bound int))))
           (when bound
             (if greater
-                (make-numeric-type :low bound)
-                (make-numeric-type :high bound))))))))
+                (make-numeric-union-type :low bound)
+                (make-numeric-union-type :high bound))))))))
 
 ;;; Return true if LEAF is "visible" from NODE.
 (defun leaf-visible-from-node-p (leaf node)
@@ -1024,10 +1024,10 @@
                            (setf max value)))
                        xset)
              (when (= (- max min) (1- count))
-               (make-numeric-type :class 'integer :low min :high max)))))
+               (make-numeric-type 'integer min max)))))
         ;; It's useful to know when something is not zero
         ((xset-member-p 0 xset)
-         (make-numeric-type :class 'integer :low 0 :high 0))))
+         (specifier-type '(eql 0)))))
 
 ;;; Compute the tightest type possible for a variable given a set of
 ;;; CONSTRAINTS.
@@ -1157,11 +1157,11 @@
                (when (and c-lo
                           (= hi c-lo))
                  (type-intersection current-type
-                                    (make-numeric-type :low (1+ lo))))))
+                                    (make-numeric-union-type :low (1+ lo))))))
            (when (or lo hi)
              (type-intersection current-type
-                                (type-union (make-numeric-type :low lo
-                                                               :high hi)
+                                (type-union (make-numeric-union-type :low lo
+                                                                     :high hi)
                                             (specifier-type 'complex)))))))
     (t
      (multiple-value-bind (greater equal)

@@ -48,6 +48,11 @@ is a subtype of unsigned-byte or signed-byte."))
     (fundamental-output-stream fundamental-binary-stream) nil
   (:documentation "Superclass of all Gray output streams whose element-type
 is a subtype of unsigned-byte or signed-byte."))
+
+;;; Ensure that classes are finalized here so that our bootstrap does
+;;; not populate PCL method caches with layouts that are later
+;;; invalidated by lazy class finalization.
+(sb-pcl::map-all-classes #'sb-mop:finalize-inheritance (find-class 'fundamental-stream))
 
 ;;; This is not in the Gray stream proposal, so it is left here
 ;;; as example code.

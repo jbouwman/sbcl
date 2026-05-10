@@ -590,7 +590,7 @@
           sb-kernel:type=
           sb-kernel:type/=
           sb-kernel:find-classoid
-          sb-kernel:make-numeric-type
+          sb-kernel:make-numeric-union-type
           sb-kernel:types-equal-or-intersect
           sb-kernel:*empty-type*))
 
@@ -671,40 +671,40 @@
             (assert (eq (sb-int:info :type :kind s) :primitive))
             (assert (eq (sb-int:info :type :kind s) :instance)))))))
 
-(with-test (:name (make-numeric-type :smoke))
-  (assert (eq (make-numeric-type :class 'integer :low '(4) :high '(5))
+(with-test (:name (make-numeric-union-type :smoke))
+  (assert (eq (make-numeric-union-type :class 'integer :low '(4) :high '(5))
               *empty-type*)))
 
-(with-test (:name (make-numeric-type :union))
-  (assert (equal (type-specifier (make-numeric-type :low '(-79106810381456307)))
+(with-test (:name (make-numeric-union-type :union))
+  (assert (equal (type-specifier (make-numeric-union-type :low '(-79106810381456307)))
                  `(or (rational (-79106810381456307))
                       (single-float (-7.910681e16))
                       (double-float (-7.91068103814563d16))))))
 
-(with-test (:name (make-numeric-type :infinities))
+(with-test (:name (make-numeric-union-type :infinities))
   ;; Without class
   (assert (equal (type-specifier
-                  (make-numeric-type :low sb-ext:single-float-negative-infinity
-                                     :high sb-ext:single-float-negative-infinity))
+                  (make-numeric-union-type :low sb-ext:single-float-negative-infinity
+                                           :high sb-ext:single-float-negative-infinity))
                  `(or (single-float ,sb-ext:single-float-negative-infinity
                                     ,sb-ext:single-float-negative-infinity)
                       (double-float ,sb-ext:double-float-negative-infinity
                                     ,sb-ext:double-float-negative-infinity))))
   (assert (equal (type-specifier
-                  (make-numeric-type :low sb-ext:single-float-negative-infinity))
+                  (make-numeric-union-type :low sb-ext:single-float-negative-infinity))
                  'real))
   ;; With FLOAT class
   (assert (equal (type-specifier
-                  (make-numeric-type :class 'float
-                                     :low sb-ext:single-float-negative-infinity
-                                     :high sb-ext:single-float-negative-infinity))
+                  (make-numeric-union-type :class 'float
+                                           :low sb-ext:single-float-negative-infinity
+                                           :high sb-ext:single-float-negative-infinity))
                  `(or (single-float ,sb-ext:single-float-negative-infinity
                                     ,sb-ext:single-float-negative-infinity)
                       (double-float ,sb-ext:double-float-negative-infinity
                                     ,sb-ext:double-float-negative-infinity))))
   (assert (equal (type-specifier
-                  (make-numeric-type :class 'float
-                                     :low sb-ext:single-float-negative-infinity))
+                  (make-numeric-union-type :class 'float
+                                           :low sb-ext:single-float-negative-infinity))
                  `float)))
 
 (with-test (:name :prettier-union-types :skipped-on (not :sb-unicode))

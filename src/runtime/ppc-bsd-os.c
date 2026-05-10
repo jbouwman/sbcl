@@ -67,6 +67,34 @@ os_context_cr_addr(os_context_t *context)
 #endif
 }
 
+#ifdef LISP_FEATURE_FREEBSD
+os_context_register_t *
+os_context_float_register_addr(os_context_t *context, int offset)
+{
+    return (os_context_register_t *)&context->uc_mcontext.mc_fpreg[offset];
+}
+
+unsigned long
+os_context_fp_control(os_context_t *context)
+{
+    return context->uc_mcontext.mc_fpreg[32];
+}
+
+void
+os_restore_fp_control(os_context_t *context)
+{
+    unsigned long long control;
+    double d;
+    control = os_context_fp_control(context) &
+        (FLOAT_TRAPS_BYTE_MASK | FLOAT_ROUNDING_MODE_MASK);
+    /* Clear exception bits from the saved context so sigreturn doesn't
+     * restore OX=1 + OE=1 which would re-trigger SIGFPE. */
+    context->uc_mcontext.mc_fpreg[32] = control;
+    d = *((double *) &control);
+    asm volatile ("mtfsf 0xff,%0" : : "f" (d));
+}
+#endif
+
 /* FIXME: If this can be a no-op on BSD/x86, then it
  * deserves a more precise name.
  *

@@ -1718,6 +1718,12 @@
     (and (numberp low)
          (eql low high)
          low)))
+
+(defun interval-to-type (interval type &optional (normalize-zeros t))
+  (multiple-value-bind (low high) (and interval
+                                       (values (interval-low interval)
+                                               (interval-high interval)))
+    (make-numeric-type type low high normalize-zeros)))
 
 ;;;; numeric DERIVE-TYPE methods
 
@@ -1733,10 +1739,7 @@
            (eq (numeric-type-complexp x) :real)
            (eq (numeric-type-complexp y) :real))
       (multiple-value-bind (low high) (funcall fun x y)
-        (make-numeric-type :class 'integer
-                           :complexp :real
-                           :low low
-                           :high high))
+        (make-numeric-type 'integer low high))
       (numeric-contagion x y)))
 
 (defun derive-integer-type (x y fun)
@@ -1965,7 +1968,7 @@
                                (coerce-for-bound x (or (numeric-type-format result-type)
                                                        'float)))
                            result)))
-           (let ((numeric (make-numeric-type
+           (let ((numeric (make-numeric-union-type
                            :class (if (and (eq (numeric-type-class x) 'integer)
                                            (eq (numeric-type-class y) 'integer))
                                       ;; The sum of integers is always an integer.
@@ -2018,7 +2021,7 @@
                                                        'float)))
                            result)))
            (let ((numeric
-                   (make-numeric-type
+                   (make-numeric-union-type
                     :class (if (and (eq (numeric-type-class x) 'integer)
                                     (eq (numeric-type-class y) 'integer))
                                ;; The difference of integers is always an integer.
@@ -2065,7 +2068,7 @@
                                                        'float)))
                            result)))
            (let ((numeric
-                   (make-numeric-type
+                   (make-numeric-union-type
                     :class (if (and (eq (numeric-type-class x) 'integer)
                                     (eq (numeric-type-class y) 'integer))
                                ;; The product of integers is always an integer.
@@ -2122,10 +2125,9 @@
                                 (low (numeric-type-low type))
                                 (high (numeric-type-high type)))
                            (when (and low high)
-                             (make-numeric-type :class 'integer
-                                                :low
+                             (make-numeric-type 'integer
                                                 (ash low (- sb-vm:n-word-bits))
-                                                :high (ash high (- sb-vm:n-word-bits))))))))
+                                                (ash high (- sb-vm:n-word-bits))))))))
 
 (defoptimizer (%multiply-high derive-type) ((x y) node)
   (%signed-multiply-high-derive-type-optimizer node))
@@ -2158,16 +2160,16 @@
            (cond ((null result)
                   *empty-type*)
                  ((consp result)
-                     (type-union (make-numeric-type :class (numeric-type-class result-type)
-                                                    :format (numeric-type-format result-type)
-                                                    :low (interval-low (first result))
-                                                    :high (interval-high (first result))
-                                                    :normalize-zeros nil)
-                                 (make-numeric-type :class (numeric-type-class result-type)
-                                                    :format (numeric-type-format result-type)
-                                                    :low (interval-low (second result))
-                                                    :high (interval-high (second result))
-                                                    :normalize-zeros nil)))
+                  (type-union (make-numeric-union-type :class (numeric-type-class result-type)
+                                                       :format (numeric-type-format result-type)
+                                                       :low (interval-low (first result))
+                                                       :high (interval-high (first result))
+                                                       :normalize-zeros nil)
+                              (make-numeric-union-type :class (numeric-type-class result-type)
+                                                       :format (numeric-type-format result-type)
+                                                       :low (interval-low (second result))
+                                                       :high (interval-high (second result))
+                                                       :normalize-zeros nil)))
                  (t
                   ;; If the result type is a float, we need to be sure to coerce
                   ;; the bounds into the correct type.
@@ -2177,11 +2179,11 @@
                                       (coerce-for-bound x (or (numeric-type-format result-type)
                                                               'float)))
                                   result)))
-                  (let ((numeric (make-numeric-type :class (numeric-type-class result-type)
-                                                    :format (numeric-type-format result-type)
-                                                    :low (interval-low result)
-                                                    :high (interval-high result)
-                                                    :normalize-zeros nil)))
+                  (let ((numeric (make-numeric-union-type :class (numeric-type-class result-type)
+                                                          :format (numeric-type-format result-type)
+                                                          :low (interval-low result)
+                                                          :high (interval-high result)
+                                                          :normalize-zeros nil)))
                     (if (and y-integerp
                              (interval-ratio-p x-interval))
                         (type-intersection numeric (specifier-type 'ratio))
@@ -2218,15 +2220,15 @@
                    (s-low (numeric-type-low shift))
                    (s-high (numeric-type-high shift)))
                (flet ((make (n-low n-high s-low s-high)
-                        (make-numeric-type :class 'integer
-                                           :low (when n-low
-                                                  (if (minusp n-low)
-                                                      (ash-outer n-low s-high)
-                                                      (ash-inner n-low s-low)))
-                                           :high (when n-high
-                                                   (if (minusp n-high)
-                                                       (ash-inner n-high s-low)
-                                                       (ash-outer n-high s-high))))))
+                        (make-numeric-type 'integer
+                                           (when n-low
+                                             (if (minusp n-low)
+                                                 (ash-outer n-low s-high)
+                                                 (ash-inner n-low s-low)))
+                                           (when n-high
+                                             (if (minusp n-high)
+                                                 (ash-inner n-high s-low)
+                                                 (ash-outer n-high s-high))))))
                  (cond ((eql n-low 0)
                         (type-union (specifier-type '(eql 0))
                                     (make (1+ n-low) n-high s-low s-high)))
@@ -2313,12 +2315,9 @@
                           ((integer rational) 'single-float)
                           (t (numeric-type-format type))))
                 (bound-format (or format 'float)))
-           (make-numeric-type :class 'float
-                              :format format
-                              :complexp :real
-                              :low (coerce 0 bound-format)
-                              :high nil
-                              :normalize-zeros nil)))
+           (make-numeric-type format
+                              (coerce 0 bound-format) nil
+                              nil)))
         (t
          ;; The absolute value of a real number is a non-negative real
          ;; of the same type.
@@ -2328,12 +2327,11 @@
                 (bound-type (or format class 'real))
                 (low (coerce-and-truncate-floats (interval-low abs-bnd) bound-type))
                 (high (coerce-and-truncate-floats (interval-high abs-bnd) bound-type)))
-           (make-numeric-type :class class
-                              :format format
-                              :complexp :real
-                              :low low
-                              :high high
-                              :normalize-zeros nil)))))
+           (make-numeric-union-type :class class
+                                    :format format
+                                    :low low
+                                    :high high
+                                    :normalize-zeros nil)))))
 
 (defoptimizer (abs derive-type) ((num))
   (one-arg-derive-type num #'abs-derive-type-aux))
@@ -2422,10 +2420,9 @@
            (let ((div (interval-div number-interval divisor-interval t)))
              (flet ((make-quot (div)
                       (let ((quot (truncate-quotient-bound div)))
-                        (make-numeric-type :class 'integer
-                                           :low (interval-low quot)
-                                           :high (interval-high quot)
-                                           :normalize-zeros nil))))
+                        (make-numeric-type 'integer
+                                           (interval-low quot)
+                                           (interval-high quot)))))
                (cond ((null div)
                       *empty-type*)
                      ((listp div)
@@ -2448,13 +2445,11 @@
                     (quot (if float
                               (ftruncate-quotient-bound quot number-interval divisor-interval)
                               (truncate-quotient-bound quot))))
-               (make-numeric-type :class (if float
-                                             'float
-                                             'rational)
-                                  :format float
-                                  :low (interval-low quot)
-                                  :high (interval-high quot)
-                                  :normalize-zeros nil)))))))
+               (make-numeric-type (or float
+                                      'integer)
+                                  (interval-low quot)
+                                  (interval-high quot)
+                                  nil)))))))
 
 (defun truncate-derive-type-rem (number-type divisor-type)
   (let* ((rem-type (rem-result-type number-type divisor-type))
@@ -2469,37 +2464,22 @@
           ((eq rem-type 'integer)
            ;; Since the remainder type is INTEGER, both args are
            ;; INTEGERs.
-           (specifier-type `(,rem-type ,(or (interval-low rem) '*)
-                                       ,(or (interval-high rem) '*))))
+           (make-numeric-type 'integer (interval-low rem) (interval-high rem)))
           (t
-           (multiple-value-bind (class format)
-               (ecase rem-type
-                 (rational
-                  (values 'rational nil))
-                 ((single-float double-float #+long-float long-float)
-                  (values 'float rem-type))
-                 (float
-                  (values 'float nil))
-                 (real
-                  (values nil nil)))
-             (when (member rem-type '(float single-float double-float
-                                            #+long-float long-float))
-               (setf rem (interval-func #'(lambda (x)
-                                            (coerce-for-bound x rem-type))
-                                        rem)))
-             ;; KLUDGE: the interval arithmetic doesn't handle -0.0 well
-             (let ((low (interval-low rem))
-                   (high (interval-high rem)))
-               (when (and (or (eql high -0f0)
-                              (eql high -0d0))
-                          (or (eql low 0f0)
-                              (eql low 0d0)))
-                 (rotatef low high))
-              (make-numeric-type :class class
-                                 :format format
-                                 :low low
-                                 :high high
-                                 :normalize-zeros nil)))))))
+           (when (member rem-type '(float single-float double-float
+                                    #+long-float long-float))
+             (setf rem (interval-func #'(lambda (x)
+                                          (coerce-for-bound x rem-type))
+                                      rem)))
+           ;; KLUDGE: the interval arithmetic doesn't handle -0.0 well
+           (let ((low (interval-low rem))
+                 (high (interval-high rem)))
+             (when (and (or (eql high -0f0)
+                            (eql high -0d0))
+                        (or (eql low 0f0)
+                            (eql low 0d0)))
+               (rotatef low high))
+             (make-numeric-type rem-type low high nil))))))
 
 (defun truncate-derive-type-quot-aux (num div same-arg)
   (declare (ignore same-arg))
@@ -2643,13 +2623,11 @@
                                                  (when (numeric-type-p type)
                                                    (let ((lo (numeric-type-low type))
                                                          (hi (numeric-type-high type)))
-                                                     (specifier-type (list ',type
-                                                                           (if lo
-                                                                               (,fun (type-bound-number lo))
-                                                                               '*)
-                                                                           (if hi
-                                                                               (,fun (type-bound-number hi))
-                                                                               '*))))))))))))
+                                                     (make-numeric-type ',type
+                                                                        (and lo
+                                                                             (,fun (type-bound-number lo)))
+                                                                        (and hi
+                                                                             (,fun (type-bound-number hi)))))))))))))
   (defoptimizer (round-single derive-type) ((number mode))
     (derive single-float))
   (defoptimizer (round-double derive-type) ((number mode))
@@ -2668,13 +2646,9 @@
                                (setf low (car low)))
                              (when (consp high)
                                (setf high (car high)))
-                             (specifier-type
-                              `(integer ,(if low
-                                             (round low)
-                                             '*)
-                                        ,(if high
-                                             (round high)
-                                             '*))))))))
+                             (make-numeric-type 'integer
+                                                (and low (round low))
+                                                (and high (round high))))))))
 
 ;;; Define optimizers for FLOOR and CEILING.
 (macrolet
@@ -2693,13 +2667,10 @@
                         (let ((quot (if float
                                         (,(symbolicate "F" q-name) div number-interval divisor-interval)
                                         (,q-name div))))
-                          (make-numeric-type :class (if float
-                                                        'float
-                                                        'rational)
-                                             :format float
-                                             :low (interval-low quot)
-                                             :high (interval-high quot)
-                                             :normalize-zeros nil))))
+                          (make-numeric-type (or float 'integer)
+                                             (interval-low quot)
+                                             (interval-high quot)
+                                             nil))))
                  (cond ((null div)
                         *empty-type*)
                        ((listp div)
@@ -2721,29 +2692,15 @@
                           (numeric-type->interval number-type))
                         (rem (,r-name number-interval divisor-interval))
                         (result-type (rem-result-type number-type divisor-type)))
-                   (multiple-value-bind (class format)
-                       (ecase result-type
-                         (integer
-                          (values 'integer nil))
-                         (rational
-                          (values 'rational nil))
-                         ((single-float double-float #+long-float long-float)
-                          (values 'float result-type))
-                         (float
-                          (values 'float nil))
-                         (real
-                          (values nil nil)))
-                     (when (member result-type '(float single-float double-float
-                                                 #+long-float long-float))
-                       ;; Make sure that the limits on the interval have
-                       ;; the right type.
-                       (setf rem (interval-func (lambda (x)
-                                                  (coerce-for-bound x result-type))
-                                                rem)))
-                     (make-numeric-type :class class
-                                        :format format
-                                        :low (interval-low rem)
-                                        :high (interval-high rem))))
+                   (when (member result-type '(float single-float double-float
+                                               #+long-float long-float))
+                     ;; Make sure that the limits on the interval have
+                     ;; the right type.
+                     (setf rem (interval-func (lambda (x)
+                                                (coerce-for-bound x result-type))
+                                              rem)))
+                   (make-numeric-type result-type
+                                      (interval-low rem) (interval-high rem)))
                  (numeric-contagion number-type divisor-type)))
            ;; the optimizer itself
            (defoptimizer (,name derive-type) ((number divisor))
@@ -3155,14 +3112,14 @@
   (let ((class (numeric-type-class type))
         (high (numeric-type-high type))
         (format (numeric-type-format type)))
-    (make-numeric-type
-         :class class
-         :format format
-         :low (coerce 0 (or format class 'real))
-         :high (cond ((not high) nil)
-                     ((eq class 'integer) (max (1- high) 0))
-                     ((or (consp high) (zerop high)) high)
-                     (t `(,high))))))
+    (make-numeric-union-type
+     :class class
+     :format format
+     :low (coerce 0 (or format class 'real))
+     :high (cond ((not high) nil)
+                 ((eq class 'integer) (max (1- high) 0))
+                 ((or (consp high) (zerop high)) high)
+                 (t `(,high))))))
 
 (defoptimizer (random derive-type) ((bound &optional state))
   (one-arg-derive-type bound #'random-derive-type-aux))
@@ -3186,16 +3143,17 @@
        (let ((lo (numeric-type-low x-type))
              (hi (numeric-type-high x-type)))
          (cond ((and lo hi)
-                (specifier-type `(integer ,(if (<= lo 0 hi)
-                                               0
-                                               (min-il lo hi))
-                                          ,(max-il lo hi))))
+                (make-numeric-type 'integer
+                                   (if (<= lo 0 hi)
+                                       0
+                                       (min-il lo hi))
+                                   (max-il lo hi)))
                (lo
                 (when (> lo 0)
-                  (specifier-type `(integer ,(integer-length lo)))))
+                  (make-numeric-type 'integer (integer-length lo))))
                (hi
                 (when (< hi 0)
-                  (specifier-type `(integer ,(integer-length hi)))))))))))
+                  (make-numeric-type 'integer (integer-length hi))))))))))
 
 ;; (integer-length (ldb (byte 64 0) (lognor n (- n)))) => ctz
 (when-vop-existsp (:translate count-trailing-zeros)
@@ -3227,13 +3185,13 @@
                     (hi (%bignum-length hi)))
                 (when (> lo hi)
                   (rotatef lo hi))
-                (specifier-type `(integer ,lo ,hi))))
+                (make-numeric-type 'integer lo hi)))
              (lo
               (when (> lo 0)
-                (specifier-type `(integer ,(%bignum-length lo)))))
+                (make-numeric-type 'integer (%bignum-length lo))))
              (hi
               (when (< hi 0)
-                (specifier-type `(integer ,(%bignum-length hi))))))))))
+                (make-numeric-type 'integer (%bignum-length hi)))))))))
 
 (defoptimizer (logcount derive-type) ((x))
   (one-arg-derive-type
@@ -3243,8 +3201,7 @@
            (hi (numeric-type-high x-type)))
        (cond ((and lo hi)
               (let ((adjust 0))
-                (make-numeric-type :class 'integer
-                                   :low
+                (make-numeric-type 'integer
                                    (cond ((<= lo 0 hi)
                                           0)
                                          ((progn
@@ -3267,7 +3224,6 @@
                                           0)
                                          (t
                                           1))
-                                   :high
                                    (let ((l (max (integer-length lo)
                                                  (integer-length hi))))
                                      (+ adjust
@@ -3279,10 +3235,10 @@
                                             -1))))))
              (lo
               (when (> lo 0)
-                (specifier-type `(integer 1))))
+                (specifier-type '(integer 1))))
              (hi
               (when (< hi -1)
-                (specifier-type `(integer 1)))))))))
+                (specifier-type '(integer 1)))))))))
 
 (defoptimizer (isqrt derive-type) ((x))
   (one-arg-derive-type
@@ -3294,9 +3250,8 @@
                         (isqrt lo)
                         0))
             (hi-res (if (typep hi 'unsigned-byte)
-                        (isqrt hi)
-                        '*)))
-       (specifier-type `(integer ,lo-res ,hi-res))))))
+                        (isqrt hi))))
+       (make-numeric-type 'integer lo-res hi-res)))))
 
 (defoptimizer (char-code derive-type) ((char))
   (let ((type (type-intersection (lvar-type char) (specifier-type 'character))))
@@ -3314,10 +3269,10 @@
                       collect `(integer ,low ,high)))))
           ((csubtypep type (specifier-type 'base-char))
            (specifier-type
-            `(mod ,base-char-code-limit)))
+            (make-numeric-type 'mod base-char-code-limit)))
           (t
            (specifier-type
-            `(mod ,char-code-limit))))))
+            (make-numeric-type 'mod char-code-limit))))))
 
 (defoptimizer (code-char derive-type) ((code))
   (one-arg-derive-type code
@@ -3360,7 +3315,9 @@
   (if radix
       (let ((max (type-approximate-interval (lvar-type radix))))
         (when (interval-high max)
-          (specifier-type `(or null (mod ,(interval-high max))))))
+          (type-union
+           (specifier-type 'null)
+           (make-numeric-type 'mod (interval-high max)))))
       (specifier-type '(or null (mod 10)))))
 
 (defoptimizer (values derive-type) ((&rest values))
@@ -3398,9 +3355,9 @@
          (let* ((format (case (numeric-type-class type)
                           ((integer rational) 'single-float)
                           (t (numeric-type-format type)))))
-           (make-numeric-type :class 'float
-                              :format format
-                              :complexp :complex)))
+           (make-numeric-union-type :class 'float
+                                    :format format
+                                    :complexp :complex)))
         (t
          (let* ((interval (numeric-type->interval type))
                 (range-info (interval-range-info interval))
@@ -3410,12 +3367,12 @@
                 (one (coerce 1 (or format class 'real)))
                 (zero (coerce 0 (or format class 'real)))
                 (minus-one (coerce -1 (or format class 'real)))
-                (plus (make-numeric-type :class class :format format
-                                         :low one :high one))
-                (minus (make-numeric-type :class class :format format
-                                          :low minus-one :high minus-one))
-                (zero (make-numeric-type :class class :format format
-                                         :low zero :high zero)))
+                (plus (make-numeric-union-type :class class :format format
+                                               :low one :high one))
+                (minus (make-numeric-union-type :class class :format format
+                                                :low minus-one :high minus-one))
+                (zero (make-numeric-union-type :class class :format format
+                                               :low zero :high zero)))
            (let ((result
                    (case range-info
                      (+ (if contains-0-p (type-union plus zero) plus))
@@ -3493,10 +3450,7 @@
     (if (and minuend
              (<= (interval-high minuend)
                  +left-shift-derive-type-cutoff+))
-        (type-intersection (make-numeric-type :class 'integer
-                                              :low 0
-                                              :high
-                                              (1- (ash 1 (interval-high minuend))))
+        (type-intersection (make-numeric-type 'unsigned-byte (interval-high minuend))
                            (or computed *universal-type*))
         computed)))
 
@@ -3505,7 +3459,7 @@
         (posn-high (nth-value 1 (integer-type-numeric-bounds (lvar-type posn)))))
     (if (and size-high posn-high
              (<= (+ size-high posn-high) sb-vm:n-word-bits))
-        (specifier-type `(unsigned-byte* ,(+ size-high posn-high)))
+        (make-numeric-type 'unsigned-byte (+ size-high posn-high))
         (specifier-type 'unsigned-byte))))
 
 (defun related-byte-spec (size posn)
@@ -3568,9 +3522,8 @@
              (size-interval (type-approximate-interval (lvar-type size))))
          (when (and posn-minuend-interval
                     size-interval)
-           (type-intersection (make-numeric-type :class 'integer
-                                                 :low 0
-                                                 :high
+           (type-intersection (make-numeric-type 'integer
+                                                 0
                                                  (max (interval-high int-interval)
                                                       (1- (ash 1 (interval-high posn-minuend-interval)))))
                               (or computed *universal-type*)))))
@@ -3664,7 +3617,8 @@
          (cut (ldb (byte size 0) new)))
     (cond ((/= new cut)
            `(%dpb ,cut ,size posn int))
-          ((not (csubtypep (lvar-type posn) (specifier-type `(integer 0 (,(- sb-vm:n-fixnum-bits size))))))
+          ((not (csubtypep (lvar-type posn)
+                           (make-numeric-type 'mod (- sb-vm:n-fixnum-bits size))))
            (give-up-ir1-transform))
           ((= (logcount new) size)
            ;; Move the cast after the ash for cast-externally-checkable-p to work.
@@ -3708,7 +3662,7 @@
     (if (numeric-type-p size)
         (let ((size-high (numeric-type-high size)))
           (if (and size-high (<= 1 size-high sb-vm:n-word-bits))
-              (specifier-type `(signed-byte ,size-high))
+              (make-numeric-type 'signed-byte size-high)
               *universal-type*))
         *universal-type*)))
 
@@ -3789,15 +3743,15 @@
                    (n-high (numeric-type-high n-type))
                    (s-low (numeric-type-low shift))
                    (s-high (numeric-type-high shift)))
-               (make-numeric-type :class 'integer :complexp :real
-                                  :low (when n-low
-                                         (if (minusp n-low)
-                                             (ash n-low (- s-low))
-                                             (ash n-low (- s-high))))
-                                  :high (when n-high
-                                          (if (minusp n-high)
-                                              (ash n-high (- s-high))
-                                              (ash n-high (- s-low)))))))
+               (make-numeric-type 'integer
+                                  (when n-low
+                                    (if (minusp n-low)
+                                        (ash n-low (- s-low))
+                                        (ash n-low (- s-high))))
+                                  (when n-high
+                                    (if (minusp n-high)
+                                        (ash n-high (- s-high))
+                                        (ash n-high (- s-low)))))))
         *universal-type*))
 
   (defoptimizer (%ash/right derive-type) ((n shift))
@@ -4120,9 +4074,8 @@
                                              (1- (integer-length m))))))
                         (when (and shift
                                    (<= shift sb-vm:n-word-bits)
-                                   (csubtypep (lvar-type b) (make-numeric-type :class 'integer
-                                                                               :low 0
-                                                                               :high (1- (ash 1 shift)))))
+                                   (csubtypep (lvar-type b)
+                                              (make-numeric-type 'unsigned-byte shift)))
                           (delay-ir1-transform node :ir1-phases)
                           (splice-fun-args a name #'first)
                           `(lambda ,ll
@@ -4730,19 +4683,19 @@
                   (lvar-single-value-p result)
                   (csubtypep (single-value-type (node-derived-type node)) (specifier-type 'word))
                   (not (csubtypep (lvar-type x)
-                                  (make-numeric-type :class 'integer :low 0 :high (- sb-ext:most-positive-word delta)))))
+                                  (make-numeric-type 'integer 0 (- sb-ext:most-positive-word delta)))))
              ;; Avoid overflowing word-sized arithmetic
              `(if (= x 0)
                   (values 0 0)
                   (values (1+ (ash (1- x) ,shift)) 0)))
             ((or (and (csubtypep (lvar-type x) (specifier-type 'sb-vm:signed-word))
                       (not (csubtypep (lvar-type x)
-                                      (make-numeric-type :class 'integer
-                                                         :low (- (expt 2 (1- sb-vm:n-word-bits)))
-                                                         :high (- (1- (expt 2 (1- sb-vm:n-word-bits))) delta)))))
+                                      (make-numeric-type 'integer
+                                                         (- (expt 2 (1- sb-vm:n-word-bits)))
+                                                         (- (1- (expt 2 (1- sb-vm:n-word-bits))) delta)))))
                  (and (csubtypep (lvar-type x) (specifier-type 'word))
                       (not (csubtypep (lvar-type x)
-                                      (make-numeric-type :class 'integer :low 0 :high (- sb-ext:most-positive-word delta))))))
+                                      (make-numeric-type 'integer 0 (- sb-ext:most-positive-word delta))))))
              ;; Transforming to truncate is better
              (give-up-ir1-transform))
             (t
@@ -5315,10 +5268,10 @@
 (deftransform logand ((x y) (t (constant-arg integer)) *)
   "fold identity operation"
   (let* ((y (lvar-value y))
-         (width (or (least-zero-bit y) '*)))
+         (width (least-zero-bit y)))
     (unless (and (neq width 0) ; (logand x 0) handled elsewhere
                  (csubtypep (lvar-type x)
-                            (specifier-type `(unsigned-byte ,width))))
+                            (make-numeric-type 'unsigned-byte width)))
       (give-up-ir1-transform))
     'x))
 
@@ -5342,7 +5295,7 @@
   "fold identity operation"
   (let ((size (lvar-value size)))
     (cond ((= size 0) 0)
-          ((csubtypep (lvar-type x) (specifier-type `(signed-byte ,size)))
+          ((csubtypep (lvar-type x) (make-numeric-type 'signed-byte size))
            'x)
           (t
            (give-up-ir1-transform)))))
@@ -5353,7 +5306,7 @@
          (width (or (least-zero-bit (lognot y))
                     (give-up-ir1-transform)))) ; (logior x 0) handled elsewhere
     (unless (csubtypep (lvar-type x)
-                       (specifier-type `(integer ,(- (ash 1 width)) -1)))
+                       (make-numeric-type 'integer (- (ash 1 width)) -1))
       (give-up-ir1-transform))
     'x))
 
@@ -5775,7 +5728,7 @@
                                     (size (integer-length constant)))
                                (when (and (= (logcount constant) 1)
                                           (<= size sb-vm:n-word-bits)
-                                          (csubtypep (lvar-type a) (specifier-type `(unsigned-byte ,size)))
+                                          (csubtypep (lvar-type a) (make-numeric-type 'unsigned-byte size))
                                           (same-leaf-ref-p a a2))
                                  `(mask-signed-field ,size ,a-var)))))))))))))
       (or (transform a b 'a)
@@ -8110,18 +8063,18 @@
                      (t
                       (setf min low
                             max high)))))
-    (specifier-type (cond ((not primes)
-                           `(integer ,(if includes-zero
-                                          0
-                                          1)
-                                     ,(if unbounded
-                                          '*
-                                          (max (abs min)
-                                               (abs max)))))
-                          ((cdr primes)
-                           '(eql 1))
-                          (t
-                           `(or (eql 1) (eql ,(car primes))))))))
+    (cond ((not primes)
+           (make-numeric-type 'integer (if includes-zero
+                                           0
+                                           1)
+                              (unless unbounded
+                                (max (abs min)
+                                     (abs max)))))
+          ((cdr primes)
+           (specifier-type '(eql 1)))
+          (t
+           (type-union (specifier-type '(eql 1))
+                       (make-numeric-type 'eql (car primes)))))))
 
 (defoptimizer (gcd derive-type) ((&rest args))
   (derive-gcd args))
@@ -8147,7 +8100,7 @@
                      (setf min (min min low))
                      (setf min low))
                  (push high maxes))))
-    (specifier-type `(integer ,min ,(reduce #'* maxes)))))
+    (make-numeric-type 'integer min (reduce #'* maxes))))
 
 ;;; Do source transformations for intransitive n-arg functions such as
 ;;; /. With one arg, we form the inverse. With two args we pass.
@@ -8260,9 +8213,9 @@
                                         (null nil)
                                         (t (%%rational bound)))))
                              (make-numeric-type
-                              :class 'rational
-                              :low (%rational (numeric-type-low type))
-                              :high (%rational (numeric-type-high type)))))))
+                              'rational
+                              (%rational (numeric-type-low type))
+                              (%rational (numeric-type-high type)))))))
 
 (defoptimizer (rationalize derive-type) ((x))
   (one-arg-derive-type x (lambda (type)
@@ -8276,9 +8229,9 @@
                                         (null nil)
                                         (t (%%rationalize bound)))))
                              (make-numeric-type
-                              :class 'rational
-                              :low (%rationalize (numeric-type-low type))
-                              :high (%rationalize (numeric-type-high type)))))))
+                              'rational
+                              (%rationalize (numeric-type-low type))
+                              (%rationalize (numeric-type-high type)))))))
 
 
 ;;;; transforming APPLY
@@ -9804,7 +9757,7 @@
                       (let* ((type (lvar-type x))
                              (l (+ (lvar-value l) ,ld))
                              (h (+ (lvar-value h) ,hd))
-                             (range-type (specifier-type `(integer ,l ,h)))
+                             (range-type (make-numeric-type 'integer l h))
                              (intersect (type-intersection type (specifier-type 'fixnum))))
                         (cond ((eq intersect *empty-type*)
                                nil)
@@ -9826,7 +9779,7 @@
                   (let* ((type (lvar-type x))
                          (l (+ (lvar-value l) ,ld))
                          (h (+ (lvar-value h) ,hd))
-                         (range-type (specifier-type `(integer ,l ,h)))
+                         (range-type (make-numeric-type 'integer l h))
                          (unsigned-type (type-intersection type (specifier-type 'unsigned-byte)))
                          (diff (type-difference type range-type)))
                     (cond ((> l h)
@@ -9853,8 +9806,8 @@
   (defoptimizer (check-range<= constraint-propagate-if) ((l x h))
     (let ((l-int (type-approximate-interval (lvar-type l)))
           (h-int (type-approximate-interval (lvar-type h))))
-      (values x (specifier-type `(integer ,(interval-low l-int)
-                                          ,(interval-high h-int)))))))
+      (values x
+              (make-numeric-type 'integer (interval-low l-int) (interval-high h-int))))))
 
 (defun find-or-chains (node op)
   (let ((chains (make-array 1 :adjustable t :fill-pointer 1 :initial-element nil)))

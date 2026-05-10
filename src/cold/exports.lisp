@@ -581,6 +581,8 @@ possibly temporarily, because it might be used internally.")
 
    ;; error-reporting facilities
 
+   "BINARY-INPUT-STREAM-P" "BINARY-OUTPUT-STREAM-P"
+   "CHARACTER-INPUT-STREAM-P" "CHARACTER-OUTPUT-STREAM-P"
    "CLOSED-STREAM-ERROR" "CLOSED-SAVED-STREAM-ERROR"
    "COMPILED-PROGRAM-ERROR"
    "COMPILER-MACRO-KEYWORD-PROBLEM"
@@ -774,7 +776,7 @@ possibly temporarily, because it might be used internally.")
    "INDEX" "LOAD/STORE-INDEX"
    "SIGNED-BYTE-WITH-A-BITE-OUT"
    "UNSIGNED-BYTE-WITH-A-BITE-OUT"
-   "SFUNCTION" "UNSIGNED-BYTE*"
+   "SFUNCTION"
    "CONSTANT-DISPLACEMENT"
    "EXTENDED-FUNCTION-DESIGNATOR"
    "EXTENDED-FUNCTION-DESIGNATOR-P"
@@ -1685,6 +1687,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "BIND" "BINDING-STACK-POINTER-SAP"
            "BOGUS-ARG-TO-VALUES-LIST-ERROR" "BOOLE-CODE"
            "BOUNDING-INDICES-BAD-ERROR" "BYTE-SPECIFIER" "%BYTE-BLT"
+           "BOOLEAN-OR"
            "FUNCTION-DESIGNATOR"
            "CAR-EQ-IF-LISTP"
            "CASE-BODY-ERROR"
@@ -1772,6 +1775,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "FUN-TYPE-KEYP" "FUN-TYPE-KEYWORDS" "FUN-TYPE-NARGS"
            "FUN-TYPE-OPTIONAL" "FUN-TYPE-P" "FUN-TYPE-REQUIRED"
            "FUN-TYPE-REST" "FUN-TYPE-RETURNS" "FUN-TYPE-WILD-ARGS"
+           "FUN-TYPE-CHANGE-RETURN"
            "GENERALIZED-BOOLEAN"
            "GENERIC-ABSTRACT-TYPE-FUNCTION"
            "GET-CLOSURE-LENGTH" "GET-HEADER-DATA"
@@ -1841,7 +1845,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "MAKE-MEMBER-TYPE" "MAKE-NULL-LEXENV"
            "MAKE-EQL-TYPE" "MEMBER-TYPE-FROM-LIST"
            "MAKE-NEGATION-TYPE" "TYPE-NEGATION"
-           "MAKE-NUMERIC-TYPE"
+           "MAKE-NUMERIC-TYPE" "MAKE-NUMERIC-UNION-TYPE"
            "MAKE-SINGLE-FLOAT"
            "MAKE-UNBOUND-MARKER"
            "MAKE-SHORT-VALUES-TYPE" "MAKE-SINGLE-VALUE-TYPE"

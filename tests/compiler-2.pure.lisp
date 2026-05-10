@@ -5143,3 +5143,12 @@
       (declare ((simple-array nil (9)) a))
       (setf (aref a 0) 1)
       a)))
+
+(with-test (:name :xep-type-derivation)
+  (assert-type
+   (lambda (n)
+     (funcall (if n
+                  (lambda (a) (+ a 2))
+                  (lambda (a) (+ a 1)))
+              1))
+   (integer 2 3)))

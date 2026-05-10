@@ -18,4 +18,10 @@ typedef ucontext_t os_context_t;
 #  error "Need a definition of OS_CONTEXT_PC"
 #endif
 
+#ifdef LISP_FEATURE_FREEBSD
+unsigned long os_context_fp_control(os_context_t *context);
+#define RESTORE_FP_CONTROL_FROM_CONTEXT
+void os_restore_fp_control(os_context_t *context);
+#endif
+
 #endif /* _PPC_BSD_OS_H */

@@ -196,10 +196,7 @@
                               (let* ((y-interval (type-approximate-interval (lvar-type y) t))
                                      (int (and c-interval y-interval
                                                (interval-sub c-interval y-interval))))
-                                (add x (specifier-type (if int
-                                                           `(integer ,(or (interval-low int) '*)
-                                                                     ,(or (interval-high int) '*))
-                                                           'integer))))))
+                                (add x (interval-to-type int 'integer)))))
                        (when (or y-integerp x-integerp)
                          (let ((interval (type-approximate-interval constraint t)))
                            (int interval y x)
@@ -226,18 +223,12 @@
                                 (int (and c-interval
                                           y-interval
                                           (interval-add c-interval y-interval))))
-                           (add x (specifier-type (if int
-                                                      `(integer ,(or (interval-low int) '*)
-                                                                ,(or (interval-high int) '*))
-                                                      'integer))))
+                           (add x (interval-to-type int 'integer)))
                          (let* ((x-interval (type-approximate-interval x-type t))
                                 (int (and c-interval
                                           x-interval
                                           (interval-sub x-interval c-interval))))
-                           (add y (specifier-type (if int
-                                                      `(integer ,(or (interval-low int) '*)
-                                                                ,(or (interval-high int) '*))
-                                                      'integer)))))
+                           (add y (interval-to-type int 'integer))))
                        t)))
               (numeric-contagion-constraint-back x y gen constraint nil alternative
                                                  :x-type x-type :y-type y-type
@@ -366,11 +357,11 @@
                                              (1- (interval-high x-int)))))
                           (when (or new-low new-high)
                             (setf x-type
-                                  (make-numeric-type :class 'integer
-                                                     :low (or new-low
-                                                              (interval-low x-int))
-                                                     :high (or new-high
-                                                               (interval-high x-int)))))))
+                                  (make-numeric-type 'integer
+                                                     (or new-low
+                                                         (interval-low x-int))
+                                                     (or new-high
+                                                         (interval-high x-int)))))))
 
                       (when sign
                         (setf x-type (type-intersection x-type sign)))
@@ -421,8 +412,7 @@
                                  (interval-low c-interval) (interval-high c-interval)
                                  (interval-low d-interval) (interval-high d-interval))
                         (let ((m (interval-untruncate c-interval d-interval)))
-                          (add x (specifier-type `(integer ,(interval-low m)
-                                                           ,(interval-high m)))))))))))))))
+                          (add x (interval-to-type m 'integer)))))))))))))
 
 (defoptimizer (unary-truncate constraint-propagate-back) ((x) node nth-value kind constraint gen consequent alternative)
   (case kind
@@ -442,7 +432,9 @@
        (let ((range (type-approximate-interval (lvar-type constraint))))
          (when (and range
                     (numberp (interval-high range)))
-           (add-back-constraint gen 'typep x (specifier-type `(rational (,(- (interval-high range))))) consequent)))))
+           (add-back-constraint gen 'typep x
+                                (make-numeric-type 'rational (list (- (interval-high range))))
+                                consequent)))))
     (typep
      (-constraint-propagate-back nil x (specifier-type '(eql 0)) (lvar-type x) kind constraint gen consequent alternative))))
 
@@ -454,11 +446,11 @@
               (add-back-constraint gen 'typep lvar type consequent)))
        (cond ((csubtypep constraint (specifier-type 'integer))
               (let ((int (type-approximate-interval constraint t)))
-                (add x (specifier-type (if (and int
-                                                (typep (interval-high int) 'unsigned-byte))
-                                           `(integer ,(- (interval-high int))
-                                                     ,(interval-high int))
-                                           'integer)))
+                (add x (if (and int
+                                (typep (interval-high int) 'unsigned-byte))
+                           (make-numeric-type 'integer
+                                              (- (interval-high int)) (interval-high int))
+                           (specifier-type 'integer)))
                 t))
              ((csubtypep constraint (specifier-type 'rational))
               (add x (specifier-type 'rational)))

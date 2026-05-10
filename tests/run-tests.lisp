@@ -608,6 +608,7 @@
            #+gc-verify "--eval" #+gc-verify "(push :gc-verify *features*)"
            #+slow "--eval" #+slow "(push :slow *features*)"
            #+coverage "--eval" #+coverage "(push :coverage *features*)"
+           #+sb-devel "--eval" #+sb-devel "(setf sb-kernel::*check-type-error-consistency* t)"
            "--load" load
            "--eval" (write-to-string eval
                                      :right-margin 1000))

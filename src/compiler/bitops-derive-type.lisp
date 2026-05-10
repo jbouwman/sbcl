@@ -156,23 +156,24 @@
               (cond ((and (null x-len) (null y-len))
                      (specifier-type 'unsigned-byte))
                     ((null x-len)
-                     (specifier-type `(unsigned-byte* ,y-len)))
+                     (make-numeric-type 'unsigned-byte y-len))
                     ((null y-len)
-                     (specifier-type `(unsigned-byte* ,x-len)))
+                     (make-numeric-type 'unsigned-byte x-len))
                     (t
                      (multiple-value-bind (low high)
                          (logand-derive-unsigned-bounds x y)
-                       (specifier-type `(integer ,low ,high)))))
+                       (make-numeric-type 'integer low high))))
               ;; X is positive, but Y might be negative.
               (cond ((and x-len y-low y-high (< y-high 0))
                      (multiple-value-bind (low high)
                          (let ((len (max x-len y-len)))
-                           (logand-derive-unsigned-bounds x (make-numeric-type :class 'integer
-                                                                               :low (ldb (byte len 0) y-low)
-                                                                               :high (ldb (byte len 0) y-high))))
-                       (specifier-type `(integer ,low ,high))))
+                           (logand-derive-unsigned-bounds x
+                                                          (make-numeric-type 'integer
+                                                                             (ldb (byte len 0) y-low)
+                                                                             (ldb (byte len 0) y-high))))
+                       (make-numeric-type 'integer low high)))
                     (x-high
-                     (specifier-type `(integer 0 ,x-high)))
+                     (make-numeric-type 'integer 0 x-high))
                     (t
                      (specifier-type 'unsigned-byte))))
           ;; X might be negative.
@@ -181,23 +182,22 @@
               (cond ((and y-len x-low x-high (< x-high 0))
                      (multiple-value-bind (low high)
                          (let ((len (max x-len y-len)))
-                           (logand-derive-unsigned-bounds y (make-numeric-type :class 'integer
-                                                                               :low (ldb (byte len 0) x-low)
-                                                                               :high (ldb (byte len 0) x-high))))
-                       (specifier-type `(integer ,low ,high))))
+                           (logand-derive-unsigned-bounds y (make-numeric-type 'integer
+                                                                               (ldb (byte len 0) x-low)
+                                                                               (ldb (byte len 0) x-high))))
+                       (make-numeric-type 'integer low high)))
                     (y-high
-                     (specifier-type `(integer 0 ,y-high)))
+                     (make-numeric-type 'integer 0 y-high))
                     (t
                      (specifier-type 'unsigned-byte)))
               ;; Either might be negative.
               (cond ((and x-low y-low)
-                     (specifier-type `(integer ,(zeroes (integer-length (min x-low y-low)))
-                                               ,(if (and x-high y-high)
-                                                    (max x-high y-high -1)
-                                                    '*))))
+                     (make-numeric-type 'integer
+                                        (zeroes (integer-length (min x-low y-low)))
+                                        (and x-high y-high
+                                             (max x-high y-high -1))))
                     ((and x-high y-high)
-                     (specifier-type `(integer *
-                                               ,(max x-high y-high -1))))
+                     (make-numeric-type 'integer nil (max x-high y-high -1)))
                     (t
                      (if (and (not y-pos)
                               (not x-pos))
@@ -238,9 +238,9 @@
         (cond ((and x-len y-len)
                (multiple-value-bind (low high)
                    (logior-derive-unsigned-bounds x y)
-                 (specifier-type `(integer ,low ,high))))
+                 (make-numeric-type 'integer low high)))
               (t
-               (specifier-type `(integer ,(max y-low x-low))))))
+               (make-numeric-type 'integer (max y-low x-low)))))
        ((not x-pos)
         ;; X must be negative.
         (if (not y-pos)
@@ -248,14 +248,12 @@
             ;; and be the same length or shorter than the smaller.
             (if (and x-len y-len)
                 ;; It's bounded.
-                (specifier-type `(integer ,(ash -1 (min x-len y-len)) -1))
+                (make-numeric-type 'integer (ash -1 (min x-len y-len)) -1)
                 ;; It's unbounded.
                 (specifier-type '(integer * -1)))
             ;; X is negative, but we don't know about Y. The result
             ;; will be negative, but no more negative than X.
-            (specifier-type
-             `(integer ,(or x-low '*)
-                       -1))))
+            (make-numeric-type 'integer x-low -1)))
        (t
         ;; X might be either positive or negative.
         (flet ((add-one (a-low b-low b-high)
@@ -276,39 +274,40 @@
                            a-low)))))
           (cond ((not y-pos)
                  ;; But Y is negative. The result will be negative.
-                 (specifier-type
-                  `(integer ,(or y-low '*)
-                            -1)))
+                 (make-numeric-type 'integer y-low -1))
                 ((and y-low
                       (> y-low 0))
-                 (specifier-type `(or (integer ,(if x-low
-                                                    (add-one x-low y-low y-high)
-                                                    '*) -1)
-                                      ,(if (and x-high
-                                                y-len)
-                                           (multiple-value-bind (low high)
-                                               (logior-derive-unsigned-bounds (specifier-type `(integer 0 ,x-high))
-                                                                              y)
-                                             `(integer ,low ,high))
-                                           `(integer ,y-low)))))
+                 (type-union (make-numeric-type 'integer (and x-low
+                                                              (add-one x-low y-low y-high))
+                                                -1)
+                             (if (and x-high
+                                      y-len)
+                                 (multiple-value-bind (low high)
+                                     (logior-derive-unsigned-bounds (make-numeric-type 'integer 0 x-high)
+                                                                    y)
+                                   (make-numeric-type 'integer low high))
+                                 (make-numeric-type 'integer y-low))))
                 ((and x-low
                       (> x-low 0))
-                 (specifier-type `(or (integer ,(if y-low
-                                                    (add-one y-low x-low x-high)
-                                                    '*) -1)
-                                      ,(if (and y-high
-                                                x-len)
-                                           (multiple-value-bind (low high)
-                                               (logior-derive-unsigned-bounds (specifier-type `(integer 0 ,y-high))
-                                                                              x)
-                                             `(integer ,low ,high))
-                                           `(integer ,x-low)))))
+                 (type-union (make-numeric-type 'integer (and y-low
+                                                              (add-one y-low x-low x-high))
+                                                -1)
+                             (if (and y-high
+                                      x-len)
+                                 (multiple-value-bind (low high)
+                                     (logior-derive-unsigned-bounds (make-numeric-type 'integer 0 y-high)
+                                                                    x)
+                                   (make-numeric-type 'integer low high))
+                                 (make-numeric-type 'integer x-low))))
                 (t
                  (cond ((and x-len y-len)
-                        (specifier-type `(integer ,(min x-low y-low)
-                                                  ,(nth-value 1 (logior-derive-unsigned-bounds x y)))))
+                        (make-numeric-type 'integer
+                                           (min x-low y-low)
+                                           (nth-value 1 (logior-derive-unsigned-bounds x y))))
                        ((and x-high y-high)
-                        (specifier-type `(integer * ,(nth-value 1 (logior-derive-unsigned-bounds x y)))))
+                        (make-numeric-type 'integer
+                                           nil
+                                           (nth-value 1 (logior-derive-unsigned-bounds x y))))
                        (t
                         (specifier-type 'integer)))))))))))
 
@@ -343,26 +342,24 @@
          (if (and x-len y-len)
              (multiple-value-bind (low high)
                  (logxor-derive-unsigned-bounds x y)
-               (specifier-type `(integer ,low ,high)))
-             (specifier-type '(unsigned-byte* *))))
+               (make-numeric-type 'integer low high))
+             (specifier-type 'unsigned-byte)))
         ((and (not x-pos) (not y-pos))
          ;; Both are negative.  The result will be positive, and as long
          ;; as the longer.
-         (specifier-type `(unsigned-byte* ,(if (and x-len y-len)
-                                               (max x-len y-len)
-                                               '*))))
+         (make-numeric-type 'unsigned-byte (and x-len y-len
+                                                (max x-len y-len))))
         ((or (and (not x-pos) (not y-neg))
              (and (not y-pos) (not x-neg)))
          ;; Either X is negative and Y is positive or vice-versa. The
          ;; result will be negative.
-         (specifier-type `(integer ,(if (and x-len y-len)
-                                        (ash -1 (max x-len y-len))
-                                        '*)
-                           -1)))
+         (make-numeric-type 'integer (and x-len y-len
+                                          (ash -1 (max x-len y-len)))
+                            -1))
         ;; We can't tell what the sign of the result is going to be.
         ;; All we know is that we don't create new bits.
         ((and x-len y-len)
-         (specifier-type `(signed-byte ,(1+ (max x-len y-len)))))
+         (make-numeric-type 'signed-byte (1+ (max x-len y-len))))
         (t
          (specifier-type 'integer))))))
 
@@ -401,12 +398,11 @@
                       (multiple-value-bind (len pos neg low high) (integer-type-length (lvar-type y))
                         (declare (ignore pos neg))
                         (let* ((int (if len
-                                        (make-numeric-type :class 'integer
-                                                           :complexp :real
-                                                           :low (ash -1 (integer-length (max (abs low) (abs high))))
-                                                           :high (if (<= low 0 high)
-                                                                     0
-                                                                     -2))
+                                        (make-numeric-type 'integer
+                                                           (ash -1 (integer-length (max (abs low) (abs high))))
+                                                           (if (<= low 0 high)
+                                                               0
+                                                               -2))
                                         (if (types-equal-or-intersect (lvar-type y) (specifier-type '(eql 0)))
                                             (specifier-type '(integer * 0))
                                             (specifier-type '(integer * -2))))))
@@ -427,18 +423,17 @@
                   (multiple-value-bind (len pos neg low high) (integer-type-length (lvar-type y))
                     (declare (ignore pos neg))
                     (let ((int (if len
-                                   (make-numeric-type :class 'integer
-                                                      :complexp :real
-                                                      :low (let ((positive (if (plusp high)
-                                                                               (1- (integer-length high))
-                                                                               0))
-                                                                 (negative (if (minusp low)
-                                                                               (if (= low (- (ash 1 len)))
-                                                                                   len
-                                                                                   (1- len))
-                                                                               0)))
-                                                             (- (ash 1 (max positive negative))))
-                                                      :high 0)
+                                   (make-numeric-type 'integer
+                                                      (let ((positive (if (plusp high)
+                                                                          (1- (integer-length high))
+                                                                          0))
+                                                            (negative (if (minusp low)
+                                                                          (if (= low (- (ash 1 len)))
+                                                                              len
+                                                                              (1- len))
+                                                                          0)))
+                                                        (- (ash 1 (max positive negative))))
+                                                      0)
                                    (specifier-type '(integer * 0)))))
                       (if type
                           (type-intersection type int)
@@ -457,20 +452,19 @@
                   (multiple-value-bind (len pos neg low high) (integer-type-length (lvar-type y))
                     (declare (ignore pos neg))
                     (let ((int (if len
-                                   (make-numeric-type :class 'integer
-                                                      :complexp :real
-                                                      :low (if (<= low 0 high)
-                                                               0
-                                                               1)
-                                                      :high (let ((positive (if (plusp high)
-                                                                                (1- (integer-length high))
-                                                                                0))
-                                                                  (negative (if (minusp low)
-                                                                                (if (= low (- (ash 1 len)))
-                                                                                    (1+ len)
-                                                                                    (1- len))
-                                                                                0)))
-                                                              (ash 1 (max positive negative))))
+                                   (make-numeric-type 'integer
+                                                      (if (<= low 0 high)
+                                                          0
+                                                          1)
+                                                      (let ((positive (if (plusp high)
+                                                                          (1- (integer-length high))
+                                                                          0))
+                                                            (negative (if (minusp low)
+                                                                          (if (= low (- (ash 1 len)))
+                                                                              (1+ len)
+                                                                              (1- len))
+                                                                          0)))
+                                                        (ash 1 (max positive negative))))
                                    (if (types-equal-or-intersect (lvar-type y) (specifier-type '(eql 0)))
                                        (specifier-type '(integer 0))
                                        (specifier-type '(integer 1))))))

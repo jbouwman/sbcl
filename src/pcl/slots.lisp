@@ -42,7 +42,7 @@
                          (cell-error-name condition)
                          (type-of (unbound-slot-instance condition))))))))
 
-(define-condition missing-slot (cell-error simple-type-error)
+(define-condition missing-slot (cell-error simple-condition)
   ())
 
 ;;; These three functions work on std-instances and fsc-instances. These are

@@ -506,7 +506,7 @@
                           (union-type
                            (mapc #'max-dim (union-type-types type)))
                           (array-type (if (array-type-complexp type)
-                                          (return '*)
+                                          (return)
                                           (process-dim (array-type-dimensions type))))
                           (t
                            (cond ((csubtypep type (specifier-type 'cons))
@@ -515,13 +515,13 @@
                                  ((csubtypep type (specifier-type 'null))
                                   (setf min 0))
                                  (t
-                                  (return '*))))))
+                                  (return))))))
                       (process-dim (dim)
                         (if (typep dim '(cons integer null))
                             (let ((length (car dim)))
                               (setf max (max max length)
                                     min (min min length)))
-                            (return '*))))
+                            (return))))
                ;; If type derivation were able to notice that non-simple arrays can
                ;; be mutated (changing the type), we could safely use LVAR-TYPE on
                ;; any vector type. But it doesn't notice.

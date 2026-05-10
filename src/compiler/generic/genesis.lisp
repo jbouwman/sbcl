@@ -3069,7 +3069,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
                (return-from check))
              (unless (< start end)
                (error "Space bounds look bad: ~A = ~X..~X" space start end))
-             (let ((type (specifier-type `(integer ,start (,end)))))
+             (let ((type (make-numeric-type 'integer start (1- end))))
                (dolist (other types)
                  (unless (eq *empty-type* (type-intersection (cdr other) type))
                    (error "Space overlap: ~A with ~A" space (car other))))

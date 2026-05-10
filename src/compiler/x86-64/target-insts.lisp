@@ -325,7 +325,7 @@
         (return-from found thing))))) |#
   (awhen (and (typep value 'word)
               (sb-disassem::find-code-constant-from-interior-pointer value dstate))
-    (note (lambda (stream) (princ it stream)) dstate)))
+    (note (lambda (stream) (prin1 it stream)) dstate)))
 
 ;;; Return an instance of REG or MACHINE-EA.
 ;;; MOD and R/M are the extracted bits from the instruction's ModRM byte.

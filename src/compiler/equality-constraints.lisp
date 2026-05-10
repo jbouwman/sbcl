@@ -646,7 +646,7 @@
   (add-equality-constraint '< index dimension gen gen nil)
   (let ((var (ok-lvar-lambda-var index gen))
         (type (if (constant-lvar-p dimension)
-                  (specifier-type `(integer 0 (,(lvar-value dimension))))
+                  (make-numeric-type 'mod (lvar-value dimension))
                   (specifier-type 'index))))
     (when var
       (list (list 'typep var type nil)))))
@@ -967,7 +967,7 @@
     (multiple-value-bind (l h) (subseq-bounds sequence start end gen)
       (when (or h
                 (> l 0))
-        (push (list 'vector-length (specifier-type `(integer ,l ,(or h '*))))
+        (push (list 'vector-length (make-numeric-type 'integer l h))
               c)))
     c))
 
@@ -1021,11 +1021,11 @@
                               (t
                                (setf max nil))))))))
     (when (plusp min-sum)
-      (push (list 'vector-length>= (specifier-type `(eql ,min-sum)))
+      (push (list 'vector-length>= (make-numeric-type 'eql min-sum))
             r))
     (when (and max
                (plusp max-sum))
-      (push (list 'vector-length<= (specifier-type `(eql ,max-sum)))
+      (push (list 'vector-length<= (make-numeric-type 'eql max-sum))
             r))
     r))
 

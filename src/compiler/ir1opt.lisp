@@ -809,8 +809,12 @@
            (unless (type= (res) (tail-set-type tails))
              (setf (tail-set-type tails) (res))
              (dolist (fun (tail-set-funs tails))
-               (dolist (ref (leaf-refs fun))
-                 (reoptimize-lvar (node-lvar ref))))))))))
+               (let* ((entry-type (fun-type-change-return (leaf-type fun) (res)))
+                      (ref-type (make-single-value-type entry-type)))
+                 (setf (leaf-type fun) entry-type)
+                 (dolist (ref (leaf-refs fun))
+                   (setf (node-derived-type ref) ref-type)
+                   (reoptimize-lvar (node-lvar ref)))))))))))
 
 ;;;; IF optimization
 
@@ -1559,10 +1563,27 @@
                                                    (let ((package (sb-xc:symbol-package (classoid-name type))))
                                                      (or (eq package *cl-package*)
                                                          (and package (system-package-p package)))))))))))
-         (cond ((functional-p leaf)
-                (convert-call-if-possible
-                 (lvar-uses (basic-combination-fun call))
-                 call))
+         (cond ((listp (lvar-uses fun-lvar))
+                (loop for use in (lvar-uses fun-lvar)
+                      do (when (ref-p use)
+                           (let* ((leaf (ref-leaf use))
+                                  (type (leaf-type leaf)))
+                             (when (and (fun-type-p type)
+                                        (lambda-p leaf)
+                                        (functional-kind-eq leaf external)
+                                        (let ((arg-count (length (combination-args call))))
+                                          (block nil
+                                            (map-callers (lambda (caller)
+                                                           (unless (= arg-count (length (combination-args caller)))
+                                                             (return)))
+                                                         leaf
+                                                         :not-a-caller (lambda () (return)))
+                                            t)))
+                               (disable-arg-count-checking leaf type (length (combination-args call))))))))
+               ((functional-p leaf)
+                   (convert-call-if-possible
+                    (lvar-uses (basic-combination-fun call))
+                    call))
                ((not leaf))
                ((and (global-var-p leaf)
                      (eq (global-var-kind leaf) :global-function)
@@ -2129,7 +2150,8 @@
 (declaim (start-block ir1-optimize-set constant-reference-p delete-let
                       propagate-let-args propagate-local-call-args
                       propagate-to-refs propagate-from-sets
-                      ir1-optimize-mv-combination))
+                      ir1-optimize-mv-combination
+                      substitute-single-use-lvar))
 
 ;;; Propagate TYPE to LEAF and its REFS, marking things changed.
 ;;;
@@ -2169,10 +2191,10 @@
                class
                (format :no))
            (dolist (part (union-type-types type)
-                         (make-numeric-type :class class
-                                            :format format
-                                            :low low
-                                            :high high))
+                         (make-numeric-union-type :class class
+                                                  :format format
+                                                  :low low
+                                                  :high high))
              (unless (and (numeric-type-real-p part)
                           (if class
                               (eql (numeric-type-class part) class)
@@ -3239,7 +3261,9 @@
     (cond ((delay-p cast)
            (unless (policy cast (>= insert-debug-catch 2)) ;; used to defeat TCO
              (when (do-uses (use value t)
-                     (unless (immediately-used-p value use)
+                     (unless (and (immediately-used-p value use)
+                                  (not (and (combination-p use)
+                                            (unboxed-specialized-return-p (combination-fun-debug-name use)))))
                        (return)))
                (delete-cast cast)
                t)))

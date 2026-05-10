@@ -823,8 +823,10 @@ not supported."
           :documentation "Local modes.")
    (cc :initarg :cc :accessor termios-cc :array-length nccs
        :documentation "Control characters.")
+   #-sunos
    (ispeed :initarg :ispeed :accessor termios-ispeed
            :documentation "Input speed.")
+   #-sunos
    (ospeed :initarg :ospeed :accessor termios-ospeed
            :documentation "Output speed."))
   (:documentation

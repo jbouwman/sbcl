@@ -237,7 +237,7 @@
                                                    while (consp sequence))
                                              t))
                                   (if min
-                                      (let ((int (make-numeric-type :class 'integer :low min :high max)))
+                                      (let ((int (make-numeric-type 'integer min max)))
                                         (if union
                                             (type-union union int)
                                             int))
@@ -284,7 +284,7 @@
                                                 (setf max elt))
                                               (when (< elt min)
                                                 (setf min elt))))
-                                      (make-numeric-type :class 'integer :low min :high max)))))
+                                      (make-numeric-type 'integer min max)))))
                            (declare (inline int-min-max))
                            (macrolet ((test (type)
                                         (let ((ctype (specifier-type type)))
@@ -414,7 +414,7 @@
                                                               (type-union union symbols)
                                                               symbols))))
                                           (if min
-                                              (let ((int (make-numeric-type :class 'integer :low min :high max)))
+                                              (let ((int (make-numeric-type 'integer min max)))
                                                 (if union
                                                     (type-union union int)
                                                     int))
@@ -1200,7 +1200,7 @@
              fill-pointer
              (csubtypep (lvar-type fill-pointer) (specifier-type 'index))
              (not (types-equal-or-intersect (lvar-type fill-pointer)
-                                            (specifier-type `(integer 0 ,c-length)))))
+                                            (make-numeric-type 'integer 0 c-length))))
     (abort-ir1-transform "Invalid fill-pointer ~s for a vector of length ~s."
                          (type-specifier (lvar-type fill-pointer))
                          c-length))
@@ -1579,7 +1579,7 @@
                  (compiler-warn "Only vectors can have fill pointers."))
                 ((and (csubtypep fp-type (specifier-type 'index))
                       (not (types-equal-or-intersect fp-type
-                                                     (specifier-type `(integer 0 ,length)))))
+                                                     (make-numeric-type 'integer 0 length))))
                  (compiler-warn "Invalid fill-pointer ~s for a vector of length ~s."
                                 (type-specifier fp-type)
                                 length))))))
@@ -2132,8 +2132,7 @@
                                 (when (or (not max-length)
                                           (> length max-length))
                                   (setf max-length length)))))
-            (specifier-type `(integer ,(or min-length 0)
-                                      ,max-length)))))))
+            (make-numeric-type 'integer (or min-length 0) max-length))))))
 
 (defoptimizer (vector-length derive-type) ((vector))
   (vector-length-type (lvar-conservative-type vector)))
@@ -2202,12 +2201,12 @@
 (defun check-bound-empty-p (bound index)
   (let* ((bound-type (lvar-type bound))
          (bound-type
-           (specifier-type `(integer 0
-                                     (,(cond ((constant-lvar-p bound)
-                                              (lvar-value bound))
-                                             ((and (integer-type-p bound-type)
-                                                   (nth-value 1 (integer-type-numeric-bounds bound-type))))
-                                             (array-dimension-limit))))))
+           (make-numeric-type 'mod
+                              (cond ((constant-lvar-p bound)
+                                     (lvar-value bound))
+                                    ((and (integer-type-p bound-type)
+                                          (nth-value 1 (integer-type-numeric-bounds bound-type))))
+                                    (array-dimension-limit))))
          (index-type (lvar-type index)))
     (eq (type-intersection bound-type index-type)
         *empty-type*)))
@@ -2708,7 +2707,7 @@
                   (let ((eltype (array-type-upgraded-element-type object)))
                     (if (and (csubtypep object (specifier-type 'vector))
                              (neq eltype *wild-type*))
-                        (specifier-type `(eql ,(sb-vm:saetp-typecode (find-saetp-by-ctype eltype))))
+                        (make-numeric-type 'eql (sb-vm:saetp-typecode (find-saetp-by-ctype eltype)))
                         (specifier-type `(integer ,sb-vm:simple-array-widetag (,sb-vm:complex-base-string-widetag))))))
                  ((csubtypep object (specifier-type '(not (simple-array * (*)))))
                   (specifier-type `(and (not (integer (,sb-vm:simple-array-widetag)

@@ -62,28 +62,28 @@
   (declare (ignore ignore))
   (error 'simple-type-error
          :datum stream
-         :expected-type '(satisfies input-stream-p)
+         :expected-type '(satisfies character-input-stream-p)
          :format-control "~S is not a character input stream."
          :format-arguments (list stream)))
 (defun ill-out (stream &rest ignore)
   (declare (ignore ignore))
   (error 'simple-type-error
          :datum stream
-         :expected-type '(satisfies output-stream-p)
+         :expected-type '(satisfies character-output-stream-p)
          :format-control "~S is not a character output stream."
          :format-arguments (list stream)))
 (defun ill-bin (stream &rest ignore)
   (declare (ignore ignore))
   (error 'simple-type-error
          :datum stream
-         :expected-type '(satisfies input-stream-p)
+         :expected-type '(satisfies binary-input-stream-p)
          :format-control "~S is not a binary input stream."
          :format-arguments (list stream)))
 (defun ill-bout (stream &rest ignore)
   (declare (ignore ignore))
   (error 'simple-type-error
          :datum stream
-         :expected-type '(satisfies output-stream-p)
+         :expected-type '(satisfies binary-output-stream-p)
          :format-control "~S is not a binary output stream."
          :format-arguments (list stream)))
 (defun closed-flame (stream &rest ignore)
@@ -122,12 +122,36 @@
            (or (not (eq (ansi-stream-in stream) #'ill-in))
                (not (eq (ansi-stream-bin stream) #'ill-bin))))))
 
+(defmethod binary-input-stream-p ((stream ansi-stream))
+  (if (synonym-stream-p stream)
+      (binary-input-stream-p (resolve-synonym-stream stream))
+      (and (not (eq (ansi-stream-bin stream) #'closed-flame))
+           (not (eq (ansi-stream-bin stream) #'ill-bin)))))
+
+(defmethod character-input-stream-p ((stream ansi-stream))
+  (if (synonym-stream-p stream)
+      (character-input-stream-p (resolve-synonym-stream stream))
+      (and (not (eq (ansi-stream-in stream) #'closed-flame))
+           (not (eq (ansi-stream-in stream) #'ill-in)))))
+
 (defmethod output-stream-p ((stream ansi-stream))
   (if (synonym-stream-p stream)
       (output-stream-p (resolve-synonym-stream stream))
       (and (not (eq (ansi-stream-in stream) #'closed-flame))
            (or (not (eq (ansi-stream-cout stream) #'ill-out))
                (not (eq (ansi-stream-bout stream) #'ill-bout))))))
+
+(defmethod binary-output-stream-p ((stream ansi-stream))
+  (if (synonym-stream-p stream)
+      (binary-output-stream-p (resolve-synonym-stream stream))
+      (and (not (eq (ansi-stream-bout stream) #'closed-flame))
+           (not (eq (ansi-stream-bout stream) #'ill-bout)))))
+
+(defmethod character-output-stream-p ((stream ansi-stream))
+  (if (synonym-stream-p stream)
+      (character-output-stream-p (resolve-synonym-stream stream))
+      (and (not (eq (ansi-stream-cout stream) #'closed-flame))
+           (not (eq (ansi-stream-cout stream) #'ill-out)))))
 
 (defmethod open-stream-p ((stream ansi-stream))
   ;; CLHS 21.1.4 lets us not worry about synonym streams here.

@@ -237,7 +237,11 @@
                               ((type= type (specifier-type 'null))
                                '(eql 0))
                               ((cons-type-p type)
-                               '(integer 1))
+                               (multiple-value-bind (min exactp)
+                                   (sb-kernel::cons-type-length-info type)
+                                 (if exactp
+                                     `(integer ,min ,min)
+                                     `(integer ,min))))
                               (t (bug "weird type in S-T-L-M-ERROR")))
          ;; FIXME: this format control causes ugly printing.  There's
          ;; probably some ~<~@:_~> incantation that would make it
@@ -283,9 +287,10 @@
 
 (defun is-a-valid-sequence-type-specifier-p (type)
   (let ((type (specifier-type type)))
-    (or (csubtypep type (specifier-type 'list))
-        (and (csubtypep type (specifier-type 'vector))
-             (not (csubtypep type (specifier-type '(and vector (not simple-array)))))))))
+    (and (not (csubtypep type (specifier-type 'nil)))
+         (or (csubtypep type (specifier-type 'list))
+             (and (csubtypep type (specifier-type 'vector))
+                  (not (csubtypep type (specifier-type '(and vector (not simple-array))))))))))
 
 (declaim (ftype (function (sequence index) nil) signal-index-too-large-error))
 (define-error-wrapper signal-index-too-large-error (sequence index)
@@ -2545,26 +2550,6 @@ many elements are copied."
                                 (apply #'sb-sequence:remove-if-not predicate sequence args)))))
 
 ;;;; REMOVE-DUPLICATES
-
-(defun string=-hash (string)
-  (sxhash (string string)))
-
-(defun string-equal-hash (string)
-  (psxhash (string string)))
-
-(declaim (inline make-hash-table-for-duplicates))
-(defun make-hash-table-for-duplicates (fun size)
-  (cond ((or (eq fun #'eq)
-             (eq fun #'eql)
-             (eq fun #'equal)
-             (eq fun #'equalp))
-         (values (make-hash-table :test fun :size size) nil))
-        ((eq fun #'string=)
-         (make-hash-table :test #'string= :hash-function #'string=-hash  :size size))
-        ((eq fun #'string-equal)
-         (make-hash-table :test #'string-equal :hash-function #'string-equal-hash :size size))
-        ((eq fun #'=)
-         (make-hash-table :test #'= :hash-function #'psxhash :size size))))
 
 ;;; Remove duplicates from a list. If from-end, remove the later duplicates,
 ;;; not the earlier ones. Thus if we check from-end we don't copy an item

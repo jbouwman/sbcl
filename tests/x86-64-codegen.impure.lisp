@@ -1355,7 +1355,7 @@
     (assert
      (loop for line in lines
            thereis (and (search "CMP DWORD PTR" line)
-                        (search "#<LAYOUT" line)
+                        (search "#<SB-KERNEL:LAYOUT" line)
                         (search "for SB-THREAD:MUTEX" line))))))
 
 (with-test (:name :dx-list-push-imm :skipped-on (not :immobile-space))
@@ -1456,3 +1456,23 @@
               (assert (oddp index)))
           ;; No always-thread-local special clashes with *PACKAGE*'s indirection cell
           (assert (/= index (1- index-of-package))))))))
+
+(defstruct frozenthing)
+(defstruct (specialthing (:include frozenthing)))
+(defstruct (subspecialthing (:include specialthing)))
+(defstruct (otherspecialthing (:include frozenthing)))
+(declaim (freeze-type frozenthing))
+(with-test (:name :typep-layout-eq-one-type)
+  (let ((expr `(lambda (x)
+                 (declare (optimize (sb-c::verify-arg-count 0)))
+                 (the (and frozenthing (not (or specialthing otherspecialthing))) x)))
+        (comparisons 0)
+        (saw-layout))
+    ;; there should be exactly one CMP instruction comparing to #<LAYOUT for THING>
+    (dolist (line (disassembly-lines (compile nil expr)))
+      (when (search "CMP " line)
+        (incf comparisons)
+        (when (and (search "#<SB-KERNEL:LAYOUT" line)
+                   (search "FROZENTHING" line))
+          (setq saw-layout t))))
+    (assert (and saw-layout (eql comparisons 1)))))

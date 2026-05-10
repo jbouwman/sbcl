@@ -452,6 +452,9 @@ with that condition (or with no condition) will be returned."
     (when (eq (%instance-ref condition i) 'dx-object-type)
       (return (%instance-ref condition (1+ i))))))
 
+#+sb-devel
+(defvar *check-type-error-consistency* nil)
+
 (defun make-condition (type &rest initargs)
   "Make an instance of a condition object using the specified initargs."
   ;; Note: While ANSI specifies no exceptional situations in this function,
@@ -484,6 +487,19 @@ with that condition (or with no condition) will be returned."
         (push (cons (condition-slot-name hslot)
                     (find-slot-default condition classoid hslot))
               (condition-assigned-slots condition))))
+
+    #+sb-devel
+    (when (and *check-type-error-consistency* (typep condition 'type-error))
+      (let* ((expected-type (type-error-expected-type condition))
+             (typecheckfun (compile nil `(lambda (x)
+                                           (declare (optimize safety))
+                                           (the ,expected-type x)))))
+        (handler-case
+            (let ((*check-type-error-consistency* nil))
+              (funcall typecheckfun (type-error-datum condition)))
+          (type-error ())
+          (:no-error (x)
+            (bug "DATUM ~S is of EXPECTED-TYPE ~S" x expected-type)))))
 
     condition))
 

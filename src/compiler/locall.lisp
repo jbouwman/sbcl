@@ -344,7 +344,8 @@
             (leaf-ever-used xep) t
             (functional-entry-fun xep) fun
             (functional-entry-fun fun) xep
-            (component-reanalyze *current-component*) t)
+            (component-reanalyze *current-component*) t
+            (leaf-type xep) (definition-type fun))
       (reoptimize-component *current-component* :maybe)
       (locall-analyze-xep-entry-point fun)
       xep)))

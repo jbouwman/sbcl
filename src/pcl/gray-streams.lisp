@@ -57,29 +57,40 @@
 (progn
   (!def-stream-generic input-stream-p (stream)
     (:documentation "Can STREAM perform input operations?"))
-
-  (defmethod input-stream-p ((stream fundamental-stream))
-    nil)
-
-  (defmethod input-stream-p ((stream fundamental-input-stream))
-    t))
+  (defmethod input-stream-p ((stream fundamental-stream)) nil)
+  (defmethod input-stream-p ((stream fundamental-input-stream)) t))
 
 (progn
   (!def-stream-generic interactive-stream-p (stream)
     (:documentation "Is STREAM an interactive stream?"))
-
-  (defmethod interactive-stream-p ((stream fundamental-stream))
-    nil))
+  (defmethod interactive-stream-p ((stream fundamental-stream)) nil))
 
 (progn
   (!def-stream-generic output-stream-p (stream)
     (:documentation "Can STREAM perform output operations?"))
-
-  (defmethod output-stream-p ((stream fundamental-stream))
-    nil)
-
-  (defmethod output-stream-p ((stream fundamental-output-stream))
-    t))
+  (defmethod output-stream-p ((stream fundamental-stream)) nil)
+  (defmethod output-stream-p ((stream fundamental-output-stream)) t))
+
+(progn
+  (!def-stream-generic binary-input-stream-p (stream)
+    (:documentation "Does STREAM perform binary input operations?"))
+  (defmethod binary-input-stream-p ((stream fundamental-stream)) nil)
+  (defmethod binary-input-stream-p ((stream fundamental-binary-input-stream)) t))
+(progn
+  (!def-stream-generic binary-output-stream-p (stream)
+    (:documentation "Does STREAM perform binary output operations?"))
+  (defmethod binary-output-stream-p ((stream fundamental-stream)) nil)
+  (defmethod binary-output-stream-p ((stream fundamental-binary-output-stream)) t))
+(progn
+  (!def-stream-generic character-input-stream-p (stream)
+    (:documentation "Does STREAM perform character input operations?"))
+  (defmethod character-input-stream-p ((stream fundamental-stream)) nil)
+  (defmethod character-input-stream-p ((stream fundamental-character-input-stream)) t))
+(progn
+  (!def-stream-generic character-output-stream-p (stream)
+    (:documentation "Does STREAM perform character output operations?"))
+  (defmethod character-output-stream-p ((stream fundamental-stream)) nil)
+  (defmethod character-output-stream-p ((stream fundamental-character-output-stream)) t))
 
 ;;; character input streams
 ;;;

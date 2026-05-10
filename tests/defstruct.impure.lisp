@@ -46,7 +46,7 @@
     (let ((s (make-boa-saux)))
       (locally (declare (optimize (safety 3))
                         (inline boa-saux-a))
-        (assert-error (opaque-identity (boa-saux-a s)) type-error))
+        (assert-error (opaque-identity (boa-saux-a s))))
       (setf (boa-saux-a s) 1)
       (setf (boa-saux-c s) 5)
       (assert (eql (boa-saux-a s) 1))
@@ -55,13 +55,9 @@
 
 (with-test (:name :defstruct-boa-nice-error :skipped-on :interpreter)
   (let ((err (nth-value 1 (ignore-errors (boa-saux-a (make-boa-saux))))))
-    (assert (and (typep err 'simple-type-error)
-                 (search "Accessed uninitialized slot"
-                         (simple-condition-format-control err))))))
-
-                                        ; these two checks should be
-                                        ; kept separated
-
+    (assert (search "Accessed uninitialized slot"
+                    (simple-condition-format-control err)))))
+;;; these two checks should be kept separated
 (with-test (:name :defstruct-boa-no-error :skipped-on :interpreter)
  (let ((s (make-boa-saux)))
    (locally (declare (optimize (safety 0))
@@ -77,7 +73,7 @@
   (let ((s (make-boa-saux)))
     (locally (declare (optimize (safety 3))
                       (notinline boa-saux-a))
-      (assert-error (opaque-identity (boa-saux-a s)) type-error))
+      (assert-error (opaque-identity (boa-saux-a s))))
     (setf (boa-saux-a s) 1)
     (setf (boa-saux-c s) 5)
     (assert (eql (boa-saux-a s) 1))
@@ -1162,21 +1158,12 @@ redefinition."
 
 (with-test (:name :bug-3b)
   (handler-case
-      (progn
-        (bug-3b-slot (make-bug-3b))
-        (error "fail"))
-    (type-error (e)
-      (assert (eq 'string (type-error-expected-type e)))
-      ;; This next ASSERT made no sense whatsoever. If the slot named DATUM
-      ;; in the ERROR instance that's reporting the unbound slot in the BUG-3B
-      ;; instance is itself unbound, then how can you expect that reading the
-      ;; DATUM slot in E is supposed to work?
-      ;; It worked only by accident, because the first access to the slot would
-      ;; return it from the initargs without checking for unbound-marker,
-      ;; but a subsequent access would trap on the memoized value.
-      ;; That dubious distinction is gone.
-      ;; (assert (sb-int:unbound-marker-p (type-error-datum e)))
-      (assert (not (slot-boundp e 'sb-kernel::datum))))))
+      (bug-3b-slot (make-bug-3b))
+    ;; not required to be a TYPE-ERROR: and there's no sensible value
+    ;; that can be given for TYPE-ERROR-DATUM.
+    (error (e)
+      (assert (search "uninitialized" (format nil "~A" e))))
+    (:no-error (c) (error "No error on read of uninitialized structure slot: ~S" c))))
 
 (with-test (:name :defstruct-copier-typechecks-argument)
   (copy-person (make-astronaut :name "Neil"))

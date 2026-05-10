@@ -434,7 +434,9 @@
               (tcflag-t cflag "tcflag_t" "c_cflag")
               (tcflag-t lflag "tcflag_t" "c_lflag")
               ((array cc-t) cc "cc_t" "c_cc")
+              #-sunos
               (speed-t ispeed "speed_t" "c_ispeed")
+              #-sunos
               (speed-t ospeed "speed_t" "c_ospeed")))
 
  ;; utime(), utimes()

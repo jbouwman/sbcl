@@ -355,11 +355,10 @@
                 (setf new-lo (scale-bound f-lo ex-hi)))
               (when ex-lo
                 (setf new-lo (scale-bound f-lo ex-lo)))))
-        (make-numeric-type :class (numeric-type-class f)
-                           :format (numeric-type-format f)
-                           :complexp :real
-                           :low new-lo
-                           :high new-hi)))))
+        (make-numeric-union-type :class (numeric-type-class f)
+                                 :format (numeric-type-format f)
+                                 :low new-lo
+                                 :high new-hi)))))
 (defoptimizer (scale-single-float derive-type) ((f ex))
   (two-arg-derive-type f ex #'scale-float-derive-type-aux))
 (defoptimizer (scale-double-float derive-type) ((f ex))
@@ -392,7 +391,7 @@
                                            (coerce x ',type)))
                                      (numeric-type-high num)
                                      nil)))
-                (specifier-type `(,',type ,(or lo '*) ,(or hi '*)))))
+                (make-numeric-type ',type lo hi)))
 
             (defoptimizer (,fun derive-type) ((num))
               (handler-case
@@ -711,7 +710,7 @@
                    ((integer rational) 'single-float)
                    (t (numeric-type-format arg))))
          (float-type (or format 'float)))
-    (specifier-type `(complex ,float-type))))
+    (make-numeric-type 'complex float-type)))
 
 ;;; Compute a specifier like '(OR FLOAT (COMPLEX FLOAT)), except float
 ;;; should be the right kind of float. Allow bounds for the float
@@ -719,14 +718,11 @@
 (defun float-or-complex-float-type (arg &optional lo hi)
   (typecase arg
     (numeric-type
-     (let* ((format (case (numeric-type-class arg)
-                      ((integer rational) 'single-float)
-                      (t (numeric-type-format arg))))
-            (float-type (or format 'float))
-            (lo (coerce-numeric-bound lo float-type))
-            (hi (coerce-numeric-bound hi float-type)))
-       (specifier-type `(or (,float-type ,(or lo '*) ,(or hi '*))
-                            (complex ,float-type)))))
+     (let ((format (case (numeric-type-class arg)
+                     ((integer rational) 'single-float)
+                     (t (numeric-type-format arg)))))
+       (type-union (make-numeric-type format lo hi)
+                   (make-numeric-type 'complex format))))
     ((or union-type numeric-union-type)
      (apply #'type-union
             (loop for type in (sb-kernel::flatten-numeric-union-types arg)
@@ -823,13 +819,8 @@
                                                           'double-float
                                                           'single-float))
                                   (t (numeric-type-format arg))))
-                        (bound-type (or format 'float))
                         (result-type
-                         (make-numeric-type
-                          :class 'float
-                          :format format
-                          :low (coerce-numeric-bound res-lo bound-type)
-                          :high (coerce-numeric-bound res-hi bound-type))))
+                          (make-numeric-type format res-lo res-hi)))
                    ;; If the ARG is a subset of the domain, we don't
                    ;; have to worry about the difference, because that
                    ;; can't occur.
@@ -838,7 +829,7 @@
                            (domain-subtypep arg domain-low domain-high))
                        result-type
                        (list result-type
-                             (specifier-type `(complex ,bound-type))))))
+                             (make-numeric-type 'complex format)))))
                 (t
                  ;; No intersection so the result must be purely complex.
                  (complex-float-type arg)))))
@@ -992,38 +983,33 @@
            (integer
             ;; Positive integer to an integer power is either an
             ;; integer or a rational.
-            (let ((lo (or (interval-low bnd) '*))
-                  (hi (or (interval-high bnd) '*))
+            (let ((lo (interval-low bnd))
+                  (hi (interval-high bnd))
                   (y-lo (interval-low y-int))
                   (y-hi (interval-high y-int)))
-              (cond ((and (eq lo '*)
+              (cond ((and (not lo)
                           (eql y-lo y-hi)
                           (typep y-lo 'unsigned-byte)
                           (evenp y-lo))
-                     (specifier-type `(integer 0 ,hi)))
+                     (make-numeric-type 'integer 0 hi))
                     ((and (interval-low y-int)
                           (>= (type-bound-number y-lo) 0))
-
-                     (specifier-type `(integer ,lo ,hi)))
+                     (make-numeric-type 'integer lo hi))
                     (t
-                     (specifier-type `(rational ,lo ,hi))))))
+                     (make-numeric-type 'rational lo hi)))))
            (rational
             ;; Positive integer to rational power is either a rational
             ;; or a single-float.
             (let* ((lo (interval-low bnd))
                    (hi (interval-high bnd))
-                   (int-lo (if lo
-                               (floor (type-bound-number lo))
-                               '*))
-                   (int-hi (if hi
-                               (ceiling (type-bound-number hi))
-                               '*))
-                   (f-lo (or (bound-func #'float lo nil)
-                             '*))
-                   (f-hi (or (bound-func #'float hi nil)
-                             '*)))
-              (specifier-type `(or (rational ,int-lo ,int-hi)
-                                (single-float ,f-lo, f-hi)))))
+                   (int-lo (and lo
+                                (floor (type-bound-number lo))))
+                   (int-hi (and hi
+                                (ceiling (type-bound-number hi))))
+                   (f-lo (bound-func #'float lo nil))
+                   (f-hi (bound-func #'float hi nil)))
+              (type-union (make-numeric-type 'rational int-lo int-hi)
+                          (make-numeric-type 'single-float f-lo f-hi))))
            (float
             ;; A positive integer to a float power is a float.
             (let ((format (numeric-type-format y-type)))
@@ -1040,29 +1026,23 @@
          (case (numeric-type-class y-type)
            (integer
             ;; A positive rational to an integer power is always a rational.
-            (specifier-type `(rational ,(or (interval-low bnd) '*)
-                                       ,(or (interval-high bnd) '*))))
+            (interval-to-type bnd 'rational))
            (rational
             ;; A positive rational to rational power is either a rational
             ;; or a single-float.
             (let* ((lo (interval-low bnd))
                    (hi (interval-high bnd))
-                   (int-lo (if lo
-                               (floor (type-bound-number lo))
-                               '*))
-                   (int-hi (if hi
-                               (ceiling (type-bound-number hi))
-                               '*))
-                   (f-lo (or (bound-func #'float lo nil)
-                             '*))
-                   (f-hi (or (bound-func #'float hi nil)
-                             '*)))
-              (specifier-type `(or (rational ,int-lo ,int-hi)
-                                (single-float ,f-lo, f-hi)))))
+                   (int-lo (and lo
+                                (floor (type-bound-number lo))))
+                   (int-hi (and hi
+                                (ceiling (type-bound-number hi))))
+                   (f-lo (bound-func #'float lo nil))
+                   (f-hi (bound-func #'float hi nil)))
+              (type-union (make-numeric-type 'rational int-lo int-hi)
+                          (make-numeric-type 'single-float f-lo f-hi))))
            (float
             ;; A positive rational to a float power is a float.
             (let ((format (numeric-type-format y-type)))
-              (aver format)
               (modified-numeric-type
                y-type
                :low (coerce-numeric-bound (interval-low bnd) format)
@@ -1076,25 +1056,14 @@
            ((or integer rational)
             ;; A positive float to an integer or rational power is
             ;; always a float.
-            (let ((format (numeric-type-format x-type)))
-              (aver format)
-              (make-numeric-type
-               :class 'float
-               :format format
-               :low (coerce-numeric-bound (interval-low bnd) format)
-               :high (coerce-numeric-bound (interval-high bnd) format))))
+            (interval-to-type bnd (numeric-type-format x-type)))
            (float
             ;; A positive float to a float power is a float of the
             ;; higher type.
-            (let ((format (float-format-max (numeric-type-format x-type)
-                                            (numeric-type-format y-type))))
-              (aver format)
-              (make-numeric-type
-               :class 'float
-               :format format
-               :low (coerce-numeric-bound (interval-low bnd) format)
-               :high (coerce-numeric-bound (interval-high bnd) format)
-               :normalize-zeros nil)))
+            (let ((format (or (float-format-max (numeric-type-format x-type)
+                                                (numeric-type-format y-type))
+                              'float)))
+              (interval-to-type bnd format nil)))
            (t
             ;; A positive float to a number is a number (for now)
             (specifier-type 'number))))
@@ -1144,11 +1113,11 @@
         ((eq (numeric-type-format type) format)
          type)
         (t
-         (make-numeric-type :class 'float
-                            :format format
-                            :complexp (numeric-type-complexp type)
-                            :low (coerce-for-bound (numeric-type-low type) format)
-                            :high (coerce-for-bound (numeric-type-high type) format)))))
+         (make-numeric-union-type :class 'float
+                                  :format format
+                                  :complexp (numeric-type-complexp type)
+                                  :low (coerce-for-bound (numeric-type-low type) format)
+                                  :high (coerce-for-bound (numeric-type-high type) format)))))
 
 (defun log-derive-type-aux-1 (x &optional (fun #'log) double-float-for-integers)
   (elfun-derive-type-simple x fun
@@ -1222,13 +1191,8 @@
                   ;; appear multiple times, and should be factored out.
                   (format (case (numeric-type-class result-type)
                             ((integer rational) 'single-float)
-                            (t (numeric-type-format result-type))))
-                  (bound-format (or format 'float)))
-             (make-numeric-type :class 'float
-                                :format format
-                                :complexp :real
-                                :low (coerce (sb-xc:- pi) bound-format)
-                                :high (coerce pi bound-format))))
+                            (t (numeric-type-format result-type)))))
+             (make-numeric-type format (sb-xc:- pi) pi)))
           (t
            ;; The result is a float or a complex number
            (float-or-complex-float-type result-type)))))
@@ -1252,47 +1216,26 @@
 (defun phase-derive-type-aux (arg)
   (let* ((format (case (numeric-type-class arg)
                    ((integer rational) 'single-float)
-                   (t (numeric-type-format arg))))
-         (bound-type (or format 'float)))
+                   (t (numeric-type-format arg)))))
     (cond ((numeric-type-real-p arg)
            (case (let ((int (numeric-type->interval arg)))
                    (interval-range-info int (interval-zero int 0.0)))
              (+
               ;; The number is positive, so the phase is 0.
-              (make-numeric-type :class 'float
-                                 :format format
-                                 :complexp :real
-                                 :low (coerce 0 bound-type)
-                                 :high (coerce 0 bound-type)))
+              (make-numeric-type format 0 0))
              (-
               ;; The number is always negative, so the phase is pi.
-              (make-numeric-type :class 'float
-                                 :format format
-                                 :complexp :real
-                                 :low (coerce pi bound-type)
-                                 :high (coerce pi bound-type)))
+              (make-numeric-type format pi pi))
              (t
               ;; We can't tell. The result is 0 or pi. Use a union
               ;; type for this.
               (list
-               (make-numeric-type :class 'float
-                                  :format format
-                                  :complexp :real
-                                  :low (coerce 0 bound-type)
-                                  :high (coerce 0 bound-type))
-               (make-numeric-type :class 'float
-                                  :format format
-                                  :complexp :real
-                                  :low (coerce pi bound-type)
-                                  :high (coerce pi bound-type))))))
+               (make-numeric-type format 0 0)
+               (make-numeric-type format pi pi)))))
           (t
            ;; We have a complex number. The answer is the range -pi
            ;; to pi. (-pi is included because we have -0.)
-           (make-numeric-type :class 'float
-                              :format format
-                              :complexp :real
-                              :low (coerce (sb-xc:- pi) bound-type)
-                              :high (coerce pi bound-type))))))
+           (make-numeric-type format (sb-xc:- pi) pi)))))
 
 (defoptimizer (phase derive-type) ((num))
   (one-arg-derive-type num #'phase-derive-type-aux))
@@ -1318,20 +1261,18 @@
     (cond ((numeric-type-real-p type)
            ;; The realpart of a real has the same type and range as
            ;; the input.
-           (make-numeric-type :class class
-                              :format format
-                              :complexp :real
-                              :low (numeric-type-low type)
-                              :high (numeric-type-high type)))
+           (make-numeric-union-type :class class
+                                    :format format
+                                    :low (numeric-type-low type)
+                                    :high (numeric-type-high type)))
           (t
            ;; We have a complex number. The result has the same type
            ;; as the real part, except that it's real, not complex,
            ;; obviously.
-           (make-numeric-type :class class
-                              :format format
-                              :complexp :real
-                              :low (numeric-type-low type)
-                              :high (numeric-type-high type))))))
+           (make-numeric-union-type :class class
+                                    :format format
+                                    :low (numeric-type-low type)
+                                    :high (numeric-type-high type))))))
 
 (defoptimizer (realpart derive-type) ((num))
   (one-arg-derive-type num #'realpart-derive-type-aux))
@@ -1343,33 +1284,31 @@
            ;; The imagpart of a real has the same type as the input,
            ;; except that it's zero.
            (let ((bound-format (or format class 'real)))
-             (make-numeric-type :class class
-                                :format format
-                                :complexp :real
-                                :low (coerce 0 bound-format)
-                                :high (coerce 0 bound-format)
-                                :normalize-zeros nil)))
+             (make-numeric-union-type :class class
+                                      :format format
+                                      :low (coerce 0 bound-format)
+                                      :high (coerce 0 bound-format)
+                                      :normalize-zeros nil)))
           (t
            ;; We have a complex number. The result has the same type as
            ;; the imaginary part, except that it's real, not complex,
            ;; obviously.
-           (make-numeric-type :class class
-                              :format format
-                              :complexp :real
-                              :low (numeric-type-low type)
-                              :high (numeric-type-high type))))))
+           (make-numeric-union-type :class class
+                                    :format format
+                                    :low (numeric-type-low type)
+                                    :high (numeric-type-high type))))))
 
 (defoptimizer (imagpart derive-type) ((num))
   (one-arg-derive-type num #'imagpart-derive-type-aux))
 
 (defun complex-derive-type-aux-1 (re-type)
   (if (numeric-type-p re-type)
-      (make-numeric-type :class (numeric-type-class re-type)
-                         :format (numeric-type-format re-type)
-                         :complexp (if (csubtypep re-type
-                                                  (specifier-type 'rational))
-                                       :real
-                                       :complex))
+      (make-numeric-union-type :class (numeric-type-class re-type)
+                               :format (numeric-type-format re-type)
+                               :complexp (if (csubtypep re-type
+                                                        (specifier-type 'rational))
+                                             :real
+                                             :complex))
       (specifier-type 'complex)))
 
 (defun complex-derive-type-aux-2 (re-type im-type same-arg)
@@ -1401,9 +1340,9 @@
                  (type-union element-type complex)
                  complex)))
           (t
-           (make-numeric-type :class (numeric-type-class element-type)
-                              :format (numeric-type-format element-type)
-                              :complexp :complex))))
+           (make-numeric-union-type :class (numeric-type-class element-type)
+                                    :format (numeric-type-format element-type)
+                                    :complexp :complex))))
       (specifier-type 'complex)))
 
 (defoptimizer (complex derive-type) ((re &optional im))
@@ -1729,12 +1668,10 @@
                 ((integer rational) 'single-float)
                 (t (numeric-type-format arg)))))
        (cond ((eq (numeric-type-complexp arg) :complex)
-              (make-numeric-type :class 'float
-                                 :format (floatify-format)
-                                 :complexp :complex))
+              (make-numeric-type 'complex
+                                 (floatify-format)))
              ((numeric-type-real-p arg)
-              (let* ((format (floatify-format))
-                     (bound-type (or format 'float)))
+              (let* ((format (floatify-format)))
                 ;; If the argument is a subset of the "principal" domain
                 ;; of the function, we can compute the bounds because
                 ;; the function is monotonic. We can't do this in
@@ -1747,16 +1684,8 @@
                           (res-hi (bound-func fun (numeric-type-high arg) nil)))
                       (unless increasingp
                         (rotatef res-lo res-hi))
-                      (make-numeric-type
-                       :class 'float
-                       :format format
-                       :low (coerce-numeric-bound res-lo bound-type)
-                       :high (coerce-numeric-bound res-hi bound-type)))
-                    (make-numeric-type
-                     :class 'float
-                     :format format
-                     :low (and def-lo (coerce def-lo bound-type))
-                     :high (and def-hi (coerce def-hi bound-type))))))
+                      (make-numeric-type format res-lo res-hi))
+                    (make-numeric-type format def-lo def-hi))))
              (t
               (float-or-complex-float-type arg def-lo def-hi)))))))
 

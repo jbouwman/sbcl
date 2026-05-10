@@ -1457,7 +1457,7 @@
                       (> high high2))
               (setf high high2))))
         (when (or low high)
-          (let ((type (make-numeric-type :class 'integer :high  high :low low)))
+          (let ((type (make-numeric-type 'integer low high)))
             (if (and equality length1 length2
                      (/= length1 length2))
                 (if (eq equality '%sp-string-compare)
@@ -2257,9 +2257,8 @@
                                           1))
                                      (t
                                       min1))))
-    (specifier-type `(or (integer ,min-result
-                                  ,(- max-result min-sequence1-length))
-                         null))))
+    (type-union (make-numeric-type 'integer min-result (- max-result min-sequence1-length))
+                (specifier-type 'null))))
 
 (defun index-into-sequence-derive-type (sequence start end &key (inclusive t))
   (let* ((int-s (and start
@@ -2287,7 +2286,8 @@
   (declare (ignorable sequence2))
   ;; Could be as smart as the SEARCH one above but I ran out of steam.
   (multiple-value-bind (min max) (index-into-sequence-derive-type sequence1 start1 end1)
-    (specifier-type `(or (integer ,min ,max) null))))
+    (type-union (make-numeric-type 'integer min max)
+                (specifier-type 'null))))
 
 (defun position-derive-type (item sequence start end key test test-not)
   (if (eq (lvar-type sequence) (specifier-type 'null))
@@ -2295,7 +2295,7 @@
       (multiple-value-bind (min max)
           (index-into-sequence-derive-type sequence start end :inclusive nil)
         (when (>= max min)
-          (let ((integer-range `(integer ,min ,max))
+          (let ((integer-range (make-numeric-type 'integer min max))
                 (definitely-foundp nil))
             ;; Figure out whether this call will not return NIL.
             ;; This could be smarter about the keywords args, but the primary intent
@@ -2318,9 +2318,9 @@
                               (setq definitely-foundp nil)
                               (return)))
                           item-type))))))
-            (specifier-type (if definitely-foundp
-                                integer-range
-                                `(or ,integer-range null))))))))
+            (if definitely-foundp
+                integer-range
+                (type-union integer-range (specifier-type 'null))))))))
 
 (defun equal-type (type)
   (let ((result type))
@@ -2421,7 +2421,8 @@
   (declare (ignore function))
   (multiple-value-bind (min max)
       (index-into-sequence-derive-type sequence start end :inclusive nil)
-    (specifier-type `(or (integer ,min ,max) null))))
+    (type-union (make-numeric-type 'integer min max)
+                (specifier-type 'null))))
 
 (defoptimizer (position-if-not derive-type) ((function sequence
                                                        &key start end
@@ -2429,7 +2430,8 @@
   (declare (ignore function))
   (multiple-value-bind (min max)
       (index-into-sequence-derive-type sequence start end :inclusive nil)
-    (specifier-type `(or (integer ,min ,max) null))))
+    (type-union (make-numeric-type 'integer min max)
+                (specifier-type 'null))))
 
 (defoptimizer (%find-position derive-type) ((item sequence from-end start end key test))
   (let ((find (find-derive-type item sequence key test start end from-end))
@@ -2458,7 +2460,7 @@
   (declare (ignore item))
   (multiple-value-bind (min max)
       (index-into-sequence-derive-type sequence start end)
-    (specifier-type `(integer 0 ,(- max min)))))
+    (make-numeric-type 'integer 0 (- max min))))
 
 (defoptimizer (count-if derive-type) ((function sequence
                                                 &key start end
@@ -2466,7 +2468,7 @@
   (declare (ignore function))
   (multiple-value-bind (min max)
       (index-into-sequence-derive-type sequence start end)
-    (specifier-type `(integer 0 ,(- max min)))))
+    (make-numeric-type 'integer 0 (- max min))))
 
 (defoptimizer (count-if-not derive-type) ((function sequence
                                                     &key start end
@@ -2474,14 +2476,15 @@
   (declare (ignore function))
   (multiple-value-bind (min max)
       (index-into-sequence-derive-type sequence start end)
-    (specifier-type `(integer 0 ,(- max min)))))
+    (make-numeric-type 'integer 0 (- max min))))
 
 (defoptimizer (sb-impl::length-remove-duplicates derive-type) ((sequence &key &allow-other-keys))
   (multiple-value-bind (max min) (sequence-lvar-dimensions sequence)
-    (specifier-type `(integer ,(if min
-                                   (min 1 min)
-                                   0)
-                              ,(or max '*)))))
+    (make-numeric-type 'integer
+                       (if min
+                           (min 1 min)
+                           0)
+                       max)))
 
 (defoptimizer (subseq derive-type) ((sequence start &optional end) node)
   (let* ((sequence-type (lvar-type sequence))
@@ -4214,7 +4217,7 @@
 (defoptimizer (read-sequence derive-type) ((sequence stream &key start end))
   (multiple-value-bind (min max)
       (index-into-sequence-derive-type sequence start end)
-    (specifier-type `(integer ,min ,max))))
+    (make-numeric-type 'integer min max)))
 
 (defoptimizers constants
     (hairy-data-vector-ref hairy-data-vector-ref/check-bounds

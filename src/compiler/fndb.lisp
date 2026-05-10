@@ -1624,6 +1624,10 @@
 (defknown stream-external-format (stream) t (flushable))
 (defknown (output-stream-p input-stream-p) (stream) boolean
   (movable foldable flushable))
+(defknown (binary-input-stream-p binary-output-stream-p) (stream) boolean
+  (movable foldable flushable))
+(defknown (character-input-stream-p character-output-stream-p) (stream) boolean
+  (movable foldable flushable))
 (defknown open-stream-p (stream) boolean (flushable))
 (defknown close (stream &key (:abort t)) (eql t) ())
 (defknown file-string-length (stream (or string character))

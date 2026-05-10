@@ -957,12 +957,11 @@
               (base-hi (numeric-type-high base-type))
               (index-lo (numeric-type-low index-type))
               (index-hi (numeric-type-high index-type)))
-          (make-numeric-type :class 'integer
-                             :complexp :real
-                             :low (when (and base-lo index-lo)
-                                    (+ base-lo (* index-lo scale) disp))
-                             :high (when (and base-hi index-hi)
-                                     (+ base-hi (* index-hi scale) disp))))))))
+          (make-numeric-type 'integer
+                             (when (and base-lo index-lo)
+                               (+ base-lo (* index-lo scale) disp))
+                             (when (and base-hi index-hi)
+                               (+ base-hi (* index-hi scale) disp))))))))
 
 (defun %lea (base index scale disp)
   (+ base (* index scale) disp))
