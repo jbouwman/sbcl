@@ -76,10 +76,6 @@
           (format stream "~A ~A" name state)
           (format stream "~A" state)))))
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (setf (sb-int:info :variable :wired-tls '*current-fiber*)
-        :always-thread-local))
-
 (defvar *current-fiber* nil
   "Fiber currently running on this thread, or NIL.")
 
