@@ -20,15 +20,15 @@
   (let ((f (make-fiber (lambda ()))))
     (assert (fiber-alive-p f))
     (assert (= (fiber-state f) +fiber-new+))
-    (destroy-fiber f)
+    (release-fiber f)
     (assert (not (fiber-alive-p f)))
     ;; Double destroy is a no-op.
-    (destroy-fiber f)))
+    (release-fiber f)))
 
 (with-test (:name (:fiber :make-fiber :custom-sizes))
   (let ((f (make-fiber (lambda ()) :stack-size 131072 :binding-stack-size 16384)))
     (assert (fiber-alive-p f))
-    (destroy-fiber f)))
+    (release-fiber f)))
 
 (with-test (:name (:fiber :with-fiber-cleans-up))
   (let (captured)
@@ -41,7 +41,7 @@
   (let ((main (make-main-fiber)))
     (assert (fiber-alive-p main))
     (assert (eq main *current-fiber*))
-    (destroy-fiber main)))
+    (release-fiber main)))
 
 (with-test (:name (:fiber :name :is-accessible-and-printed))
   (let ((f (make-fiber (lambda ()) :name "worker")))
@@ -50,10 +50,10 @@
             ()
             "expected PRINT-OBJECT to mention the name, got ~S"
             (princ-to-string f))
-    (destroy-fiber f))
+    (release-fiber f))
   (let ((f (make-fiber (lambda ()))))
     (assert (null (fiber-name f)))
-    (destroy-fiber f)))
+    (release-fiber f)))
 
 (with-test (:name (:fiber :join-fiber))
   (let* ((main (make-main-fiber))
@@ -62,8 +62,8 @@
     ;; value is the entry-fn's return value.
     (assert (eq :done (join-fiber child)))
     (assert (= (fiber-state child) +fiber-dead+))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 ;;; --- Generators ---
 
@@ -75,7 +75,7 @@
                    (loop for v = (funcall gen) while v collect v)))
     ;; Auto-destroyed.
     (assert (null (funcall gen)))
-    (destroy-fiber main)))
+    (release-fiber main)))
 
 (with-test (:name (:fiber :do-fiber-generator))
   (let ((main (make-main-fiber))
@@ -84,7 +84,7 @@
                             (lambda () (yield-fiber :a) (yield-fiber :b))))
       (push v out))
     (assert (equal '(:a :b) (nreverse out)))
-    (destroy-fiber main)))
+    (release-fiber main)))
 
 ;;; --- Interrupt / condition staging ---
 
@@ -98,8 +98,8 @@
       (simple-error (e)
         (assert (search "cancelled" (princ-to-string e)))))
     (assert (null ran))
-    (destroy-fiber f)
-    (destroy-fiber main)))
+    (release-fiber f)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :interrupt-fiber :runnable-fires-in-context))
   (let* ((main   (make-main-fiber))
@@ -114,8 +114,8 @@
                                        :format-control "ouch"))
     (assert (eq :done (join-fiber f)))
     (assert (string= caught "ouch"))
-    (destroy-fiber f)
-    (destroy-fiber main)))
+    (release-fiber f)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :fiber-condition))
   (let ((f (make-fiber (lambda ()))))
@@ -123,7 +123,7 @@
     (let ((c (make-condition 'simple-error :format-control "x")))
       (interrupt-fiber f c)
       (assert (eq c (fiber-condition f))))
-    (destroy-fiber f)))
+    (release-fiber f)))
 
 ;;; --- Control transfer ---
 
@@ -140,8 +140,8 @@
     (push :main-again log)
     (switch-fiber main child)
     (assert (equal (nreverse log) '(:main :child :main-again :child-again)))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :switch-fiber :value-in))
   ;; SWITCH-FIBER delivers VALUE to the resumed fiber as the return
@@ -154,8 +154,8 @@
     (switch-fiber main child)           ; first entry, no value
     (switch-fiber main child :hello)    ; resumed: yield returns :hello
     (assert (eq received :hello))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :yield-fiber :value-out))
   ;; YIELD-FIBER's argument becomes SWITCH-FIBER's return value in
@@ -163,8 +163,8 @@
   (let* ((main (make-main-fiber))
          (child (make-fiber (lambda () (yield-fiber :from-child)))))
     (assert (eq :from-child (switch-fiber main child)))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :switch-fiber :entry-fn-return-propagates))
   ;; When a fiber's entry function returns normally, its value is
@@ -174,22 +174,22 @@
     (assert (eq :done (switch-fiber main child)))
     (assert (= (fiber-state child) +fiber-dead+))
     (assert (not (fiber-alive-p child)))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :yield-fiber :no-return-fiber-errors))
   (let ((main (make-main-fiber)))
     (assert-error (yield-fiber))
-    (destroy-fiber main)))
+    (release-fiber main)))
 
 ;;; --- Switch validation ---
 
 (with-test (:name (:fiber :switch-fiber :destroyed-errors))
   (let* ((main (make-main-fiber))
          (child (make-fiber (lambda ()))))
-    (destroy-fiber child)
+    (release-fiber child)
     (assert-error (switch-fiber main child))
-    (destroy-fiber main)))
+    (release-fiber main)))
 
 (with-test (:name (:fiber :switch-fiber :wrong-thread-errors))
   (let* ((main (make-main-fiber))
@@ -197,8 +197,8 @@
                  (lambda () (make-fiber (lambda ()))))))
     (let ((foreign (sb-thread:join-thread other)))
       (assert-error (switch-fiber main foreign))
-      (destroy-fiber foreign))
-    (destroy-fiber main)))
+      (release-fiber foreign))
+    (release-fiber main)))
 
 ;;; --- Dynamic environment isolation across switches ---
 
@@ -216,8 +216,8 @@
       (switch-fiber main child)
       (assert (eq *fiber-test-var* :rebound)))
     (assert (eq seen :rebound))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :handler-case-across-switch))
   (let* ((main (make-main-fiber))
@@ -233,8 +233,8 @@
     (switch-fiber main child)
     (switch-fiber main child)
     (assert (string= caught "test error"))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :unwind-protect-across-switch))
   (let* ((main (make-main-fiber))
@@ -248,8 +248,8 @@
     (switch-fiber main child)
     (switch-fiber main child)
     (assert cleanup-ran)
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :throw-cannot-escape-fiber))
   ;; THROW out of a fiber to a CATCH on the caller's stack is
@@ -267,8 +267,8 @@
       (assert child-caught () "child did not catch CONTROL-ERROR")
       (assert (eq result :fell-through) ()
               "throw escaped to outer catch (got ~S)" result))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 ;;; --- Pinning ---
 
@@ -281,7 +281,7 @@
         (assert (= 2 (sb-fiber::fiber-pin-count main))))
       (assert (fiber-pinned-p main)))
     (assert (not (fiber-pinned-p main)))
-    (destroy-fiber main)))
+    (release-fiber main)))
 
 (with-test (:name (:fiber :with-fiber-pinned :no-current-fiber-errors))
   (let ((sb-fiber::*current-fiber* nil))
@@ -292,8 +292,8 @@
          (child (make-fiber (lambda ()))))
     (with-fiber-pinned ()
       (assert-error (switch-fiber main child)))
-    (destroy-fiber child)
-    (destroy-fiber main)))
+    (release-fiber child)
+    (release-fiber main)))
 
 (with-test (:name (:fiber :with-fiber-pinned :released-on-non-local-exit))
   (let ((main (make-main-fiber)))
@@ -301,4 +301,4 @@
       (with-fiber-pinned ()
         (return)))
     (assert (not (fiber-pinned-p main)))
-    (destroy-fiber main)))
+    (release-fiber main)))

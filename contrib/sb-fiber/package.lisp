@@ -7,7 +7,8 @@
    #:fiber
    #:make-fiber
    #:make-main-fiber
-   #:destroy-fiber
+   #:with-fiber-thread
+   #:release-fiber
    #:fiber-name
    #:fiber-return-fiber
    #:switch-fiber

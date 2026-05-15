@@ -1,6 +1,6 @@
 ;;;; -*-  Lisp -*-
 ;;;;
-;;;; sb-fiber user-facing API
+;;;; sb-fiber API
 
 (in-package :sb-fiber)
 
@@ -10,9 +10,9 @@
 ;;; --- Lifecycle ---
 
 (defun make-main-fiber (&key name)
-  "Create a fiber representing the current thread's own stack, for
-use as the FROM argument to SWITCH-FIBER.  Sets *CURRENT-FIBER* and
-must be destroyed when no longer needed (but not while running).
+  "Create a fiber representing the current thread's own stack and bind
+*CURRENT-FIBER* to it.  Most users should call WITH-FIBER-THREAD
+instead, or just call MAKE-FIBER, which creates a main fiber lazily.
 NAME, if supplied, is a string label used by PRINT-OBJECT."
   (let ((sap (%fiber-create-main (sb-thread:current-thread-sap))))
     (when (sb-sys:sap= sap (sb-sys:int-sap 0))
@@ -22,16 +22,36 @@ NAME, if supplied, is a string label used by PRINT-OBJECT."
       (setf *current-fiber* f)
       f)))
 
+(defmacro with-fiber-thread (() &body body)
+  "Register a main fiber on the calling thread for the dynamic extent
+of BODY and release it on exit.  Equivalent to MAKE-MAIN-FIBER +
+UNWIND-PROTECT + RELEASE-FIBER, plus a no-op if BODY is reached with
+*CURRENT-FIBER* already bound (e.g. nested WITH-FIBER-THREAD)."
+  (let ((self (gensym "MAIN-FIBER"))
+        (existing (gensym "EXISTING-MAIN")))
+    `(let* ((,existing *current-fiber*)
+            (,self (or ,existing (make-main-fiber))))
+       (declare (ignorable ,self))
+       (unwind-protect (progn ,@body)
+         (unless ,existing (release-fiber ,self))))))
+
 (defun make-fiber (function &key name
                                  (stack-size 65536)
                                  (binding-stack-size 8192))
   "Create a fiber that runs FUNCTION (zero-argument) when first
-switched to.  Must be destroyed with DESTROY-FIBER when no longer
-needed.  NAME is a string label used by PRINT-OBJECT.
+switched to.  NAME is a string label used by PRINT-OBJECT.  Implicitly
+ensures a main fiber for the calling thread.
 
 When FUNCTION returns, the fiber is marked DEAD and control switches
 back to its most recent resumer, delivering FUNCTION's return value
-as that resumer's SWITCH-FIBER value."
+as that resumer's SWITCH-FIBER value.
+
+If the calling thread has no main fiber yet, creates one (binding
+*CURRENT-FIBER*) so the new fiber has a switch-back target.
+
+Fibers are auto-released when their owning thread exits; explicit
+RELEASE-FIBER is only needed if you want to reclaim resources sooner."
+  (unless *current-fiber* (make-main-fiber))
   (let ((sap (%fiber-create stack-size binding-stack-size)))
     (when (sb-sys:sap= sap (sb-sys:int-sap 0))
       (error "Failed to allocate fiber"))
@@ -43,9 +63,13 @@ as that resumer's SWITCH-FIBER value."
       (%fiber-register (sb-thread:current-thread-sap) sap)
       f)))
 
-(defun destroy-fiber (fiber)
-  "Deallocate FIBER's stacks. FIBER must not be currently running.
-For main fibers, call this after you've finished all fiber switching."
+(defun release-fiber (fiber)
+  "Release FIBER.  For a worker fiber, unmaps its stacks and frees the
+bookkeeping struct.  For a main fiber, just frees the struct; the
+thread's own stack and binding stack are untouched.  FIBER must not be
+RUNNING (other than a main fiber, which is always RUNNING until
+released).  Optional: registered fibers are released automatically
+when their owning thread exits."
   (unless (sb-sys:sap= (fiber-sap fiber) (sb-sys:int-sap 0))
     (let* ((sap (fiber-sap fiber))
            (c   (fiber-c sap)))
@@ -54,7 +78,7 @@ For main fibers, call this after you've finished all fiber switching."
       ;; agrees we're tearing it down.
       (when (= (sb-fiber-c-state c) +fiber-running+)
         (when (fiber-function fiber)
-          (error "destroy-fiber: ~S is RUNNING" fiber))
+          (error "release-fiber: ~S is RUNNING" fiber))
         (setf (sb-fiber-c-state c) +fiber-runnable+))
       (let ((owner (sb-fiber-c-owner c)))
         (when (and (not (zerop owner))
@@ -77,7 +101,7 @@ For main fibers, call this after you've finished all fiber switching."
 
 (defun fiber-alive-p (fiber)
   "Return T if FIBER has not finished running and has not been
-destroyed."
+released."
   (/= (fiber-state fiber) +fiber-dead+))
 
 (defun switch-fiber (from to &optional value)
@@ -93,7 +117,7 @@ re-signalled here."
         (to-sap   (fiber-sap to)))
     (when (or (sb-sys:sap= from-sap (sb-sys:int-sap 0))
               (sb-sys:sap= to-sap   (sb-sys:int-sap 0)))
-      (error "switch-fiber: destroyed fiber"))
+      (error "switch-fiber: released fiber"))
     (let ((th-sap (sb-thread:current-thread-sap))
           (from-c (fiber-c from-sap))
           (to-c   (fiber-c to-sap)))
@@ -151,19 +175,16 @@ re-signalled here."
   (fiber-value from))
 
 (defmacro with-fiber ((var function &rest make-args) &body body)
-  "Create a fiber, bind it to VAR, execute BODY, destroy on exit."
+  "Create a fiber, bind it to VAR, execute BODY, release on exit."
   `(let ((,var (make-fiber ,function ,@make-args)))
      (unwind-protect (progn ,@body)
-       (destroy-fiber ,var))))
+       (release-fiber ,var))))
 
 (defun yield-fiber (&optional value)
   "Switch from the current fiber to its return fiber, delivering VALUE.
-Returns the value supplied by the next switch-in.  Equivalent to
-  (switch-fiber *current-fiber* (fiber-return-fiber *current-fiber*) value)
-Errors if there is no current fiber or no recorded return fiber."
+Returns the value supplied by the next switch-in.  Errors if the
+current fiber has no recorded return fiber (never resumed)."
   (let ((self *current-fiber*))
-    (unless self
-      (error "yield-fiber: no current fiber"))
     (let ((target (fiber-return-fiber self)))
       (unless target
         (error "yield-fiber: ~S has no return fiber (never resumed)"
@@ -171,15 +192,13 @@ Errors if there is no current fiber or no recorded return fiber."
       (switch-fiber self target value))))
 
 (defun join-fiber (fiber)
-  "Resume FIBER from *CURRENT-FIBER* until it runs to completion, and
-return its entry-function value.  FIBER must be RUNNABLE or NEW and
-on the current thread."
+  "Resume FIBER from the current fiber until it runs to completion,
+and return its entry-function value.  FIBER must be RUNNABLE or NEW
+and on the current thread."
   (declare (type fiber fiber))
-  (let ((self (or *current-fiber*
-                  (error "join-fiber: no current fiber (call MAKE-MAIN-FIBER first)"))))
-    (loop until (= (fiber-state fiber) +fiber-dead+)
-          for v = (switch-fiber self fiber)
-          finally (return v))))
+  (loop until (= (fiber-state fiber) +fiber-dead+)
+        for v = (switch-fiber *current-fiber* fiber)
+        finally (return v)))
 
 (defun interrupt-fiber (fiber condition)
   "Stage CONDITION to be signalled in FIBER on its next resume.
@@ -203,13 +222,13 @@ condition; cleared when consumed."
 (defun make-fiber-generator (function &key name)
   "Wrap FUNCTION in a fiber and return a thunk that, on each call,
 returns the fiber's next YIELD-FIBER value (or its entry-function's
-return value).  Returns NIL once the fiber finishes, auto-destroying
-it on that transition."
+return value).  Returns NIL once the fiber finishes, and releases the
+fiber."
   (let ((f (make-fiber function :name name)))
     (lambda ()
       (cond ((not (fiber-alive-p f)) nil)
             ((= (fiber-state f) +fiber-dead+)
-             (destroy-fiber f)
+             (release-fiber f)
              nil)
             (t (switch-fiber *current-fiber* f))))))
 
@@ -223,8 +242,8 @@ by MAKE-FIBER-GENERATOR), terminating when it returns NIL."
 
 (declaim (inline fiber-pinned-p))
 (defun fiber-pinned-p (fiber)
-  "Return T if FIBER's pin count is nonzero (SWITCH-FIBER refuses to
-suspend such a fiber)."
+  "Return T if FIBER's pin count is greater than zero. SWITCH-FIBER
+will only suspend a fiber with a pin count of zero."
   (declare (type fiber fiber))
   (plusp (fiber-pin-count fiber)))
 

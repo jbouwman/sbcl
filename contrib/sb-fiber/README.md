@@ -1,7 +1,6 @@
 # sb-fiber design notes
 
-User-facing documentation lives in `sb-fiber.texinfo`.  This file
-contains some implementation notes.
+User-facing documentation lives in `sb-fiber.texinfo`.
 
 ## Code organization
 
@@ -15,16 +14,16 @@ contains some implementation notes.
 |            | `src/runtime/fiber.{c, h}`          |
 
 C manages allocation of stacks, GC integration, binding stack swap,
-pseudo-atomic entry/exit, and defines architecture-specific context
-structures for per-fiber ABI-spec callee-saved registers that are
-preserved when a fiber is switched.
+pseudo-atomic entry and exit, and defines per-architecture context
+structures to hold callee-saved registers that are preserved when a
+fiber is switched.
 
 Lisp manages argument validation, catch and unwind chain save and
 install, `*current-fiber*`, re-signaling conditions captured by the
 trampoline, and defines the VOP that implements register swap inline
 at the `switch-fiber` call site.
 
-The assembly routine `fiber-swap-context` is the C-callable fallback
+The assembly routine `fiber-swap-context` is a C-callable fallback
 used by an auto-return path.
 
 ## Stack layout
@@ -60,13 +59,13 @@ A thread is inconsistent during `switch-fiber`, so the swap is bracketed
 by pseudo-atomic.
 
 The Lisp shim enters PA by calling the C function
-`sb_fiber_switch_prep`: the C code stages BSP swap, control stack
-bounds swap, state flip, and binding stack swap.
+`sb_fiber_switch_prep`, which stages BSP swap, control stack bounds
+swap, state flip, and binding stack swap.
 
-The `%fiber-register-swap` VOP then does the register/SP swap and
-transfers to the resuming fiber's stack.  The resuming side, at the
-VOP's `RESUME` label, exits PA and checks to see if a signal arrived
-during the window.
+The `%fiber-register-swap` VOP then does the register and SP swap, and
+transfers control to the resuming fiber's stack.  The resuming side,
+at the VOP's `RESUME` label, exits PA and checks to see if a signal
+arrived during the window.
 
 `sb_fiber_exit_pa` is the same exit path for the trampoline's
 auto-return flow, which runs in C and can't use the VOP's exit.
@@ -87,17 +86,16 @@ suspended fiber and pins anything pointer-shaped.  Above CSP, future
 resumes may grow CSP into uninitialized slots whose prologues don't
 zero the region they reserve; without intervention those slots would
 expose stale residue to the next GC and either pin junk objects
-(conservative path) or trip `lose()` (if a precise scanner ran and the
-residue happened to be widetag-shaped).
+(conservative path) or `lose()` on widetag-shaped data (precise path).
 
 `sb_fiber_lisp_stack_suspend` maintains a `dirty_high` per fiber: the
 address such that `[dirty_high, usable_end)` is known clean.  On each
 suspend:
 
 - `CSP == dirty_high` (tight yield loop): no scrub.
-- `CSP <  dirty_high` (fiber returned to a shallower depth): scrub
+- `CSP < dirty_high` (fiber returned to a shallower depth): scrub
   the band `[CSP, dirty_high)`.
-- `CSP >  dirty_high` (fiber grew above prior clean boundary):
+- `CSP > dirty_high` (fiber grew above prior clean boundary):
   scrub all the way to `usable_end`.
 
 Tight-yield fibers pay zero scrub cost after the first suspend.
@@ -121,5 +119,4 @@ swap, and TLS persists across the stack swap unchanged.
 A saved core's restart restores Lisp wrappers but not the C `sb_fiber`
 structs they point at.  An `*init-hooks*` callback clears
 `*current-fiber*` on startup; user code holding wrappers across
-`save-lisp-and-die` is on its own (analogous to the behaviour for
-`sb-thread`).
+`save-lisp-and-die` is on its own, similarly to `sb-thread`.

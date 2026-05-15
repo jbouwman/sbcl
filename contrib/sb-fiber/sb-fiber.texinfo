@@ -3,47 +3,59 @@
 @cindex Fiber
 @cindex Sb-fiber
 
-@code{sb-fiber} provides user-space execution contexts -- coroutines
-with their own control and binding stacks, cooperatively scheduled and
-confined to a single OS thread.
+@code{sb-fiber} provides user-space coroutines with their own control
+and binding stacks, cooperatively scheduled and confined to a single
+OS thread.
 
-@code{switch-fiber} is the only control-transfer operation;
-schedulers, I/O integration, and fiber-aware synchronization live in
-user code.
+@code{switch-fiber} is the only control-transfer operation and is
+intended to be the building block for schedulers, I/O integration, and
+fiber-aware synchronization in user application code.
 
 @subsection API
 
 @deffn Function make-fiber function &key name (stack-size 65536) (binding-stack-size 8192)
 Create a new fiber whose entry @var{function} runs when first switched
 to.  @var{name}, if supplied, is a string label used by
-@code{print-object} (mirroring @code{sb-thread:thread-name}).  Returns
-a @code{fiber} object that must eventually be passed to
-@code{destroy-fiber}.
+@code{print-object}.  Implicitly ensures a main fiber for the calling
+thread.  Registered fibers are released automatically at thread exit;
+@code{release-fiber} is only needed if you want to reclaim resources
+sooner.
 
 If @var{function} returns normally, the fiber is marked @code{:dead}
-and control auto-switches back to its return fiber, carrying the
-return value as the auto-return's value (see @code{switch-fiber}).
-If @var{function} exits via an unhandled condition, the condition is
-stashed on the fiber and re-signaled in the caller's context on the
-auto-return.
+and control switches back to its return fiber, with the function's
+return value (see @code{switch-fiber}).  If @var{function} exits via
+an unhandled condition, the condition is stored on the fiber and
+re-signaled in the caller's context.
 @end deffn
 
 @deffn Function make-main-fiber &key name
 Create a fiber representing the current thread's own stack and bind
-@code{*current-fiber*}.  Must be called once on each thread that
-intends to use fibers, and destroyed after that thread is done.
+@code{*current-fiber*}.  Most code should use @code{with-fiber-thread}
+or just call @code{make-fiber}, which creates a main fiber lazily;
+@code{make-main-fiber} is the explicit form.
+@end deffn
+
+@deffn Macro with-fiber-thread () &body body
+Register a main fiber on the calling thread for the dynamic extent of
+@var{body} and release it on exit.  A no-op if @code{*current-fiber*}
+is already bound on entry (nesting is safe).
 @end deffn
 
 @deffn Function fiber-name fiber
 The @code{:name} string supplied to @code{make-fiber}, or @code{nil}.
 @end deffn
 
-@deffn Function destroy-fiber fiber
-Release @var{fiber}'s stacks.  @var{fiber} must not be running.
+@deffn Function release-fiber fiber
+Reclaim @var{fiber}'s resources.  For a worker fiber, unmaps its
+stacks and frees the bookkeeping struct.  For a main fiber, just frees
+the struct; the thread's own stack and binding stack are untouched.
+@var{fiber} must not be RUNNING (other than a main fiber, which is
+always RUNNING until released).  Optional: registered fibers are
+released automatically when their owning thread exits.
 @end deffn
 
 @deffn Macro with-fiber (var function &rest make-args) &body body
-@code{make-fiber} + @code{unwind-protect} + @code{destroy-fiber}.
+@code{make-fiber} + @code{unwind-protect} + @code{release-fiber}.
 @end deffn
 
 @deffn Function switch-fiber from to &optional value
@@ -95,7 +107,7 @@ Wrap @var{function} in a fiber and return a thunk that, on each
 call, resumes the fiber and returns its next @code{yield-fiber}
 value (or the entry function's return value).  Returns @code{nil}
 when the fiber has run to completion; the underlying fiber is
-auto-destroyed at that point.  Mirrors Lua's @code{coroutine.wrap}.
+auto-released at that point.  Mirrors Lua's @code{coroutine.wrap}.
 @end deffn
 
 @deffn Macro do-fiber-generator (var generator) &body body
@@ -122,7 +134,7 @@ re-entered stack.
 
 @deffn Function fiber-alive-p fiber
 @code{t} if @var{fiber}'s state is not @code{+fiber-dead+} (i.e. it
-has not run to completion or been destroyed).
+has not run to completion or been released).
 @end deffn
 
 @deffn Function fiber-state fiber
@@ -136,17 +148,15 @@ Integer state: @code{+fiber-new+}, @code{+fiber-runnable+},
 (require :sb-fiber)
 (use-package :sb-fiber)
 
-(let* ((main  (make-main-fiber))
-       (child (make-fiber
-               (lambda ()
-                 (format t "hello from child~%")
-                 (yield-fiber)
-                 (format t "back again~%")))))
-  (switch-fiber main child)
-  (format t "main resumed~%")
-  (switch-fiber main child)
-  (destroy-fiber child)
-  (destroy-fiber main))
+(with-fiber-thread ()
+  (let ((child (make-fiber
+                (lambda ()
+                  (format t "hello from child~%")
+                  (yield-fiber)
+                  (format t "back again~%")))))
+    (switch-fiber *current-fiber* child)
+    (format t "main resumed~%")
+    (switch-fiber *current-fiber* child)))
 @end lisp
 
 Prints @code{hello from child}, @code{main resumed}, @code{back again}.
