@@ -24,12 +24,12 @@ NAME, if supplied, is a string label used by PRINT-OBJECT."
 
 (defmacro with-fiber-thread (() &body body)
   "Register a main fiber on the calling thread for the dynamic extent
-of BODY and release it on exit.  Equivalent to MAKE-MAIN-FIBER +
-UNWIND-PROTECT + RELEASE-FIBER, plus a no-op if BODY is reached with
-*CURRENT-FIBER* already bound (e.g. nested WITH-FIBER-THREAD)."
+of BODY and release it on exit.  A no-op if BODY is reached with
+*CURRENT-FIBER* already bound."
   (let ((self (gensym "MAIN-FIBER"))
         (existing (gensym "EXISTING-MAIN")))
-    `(let* ((,existing *current-fiber*)
+    `(let* ((*current-fiber* *current-fiber*)
+            (,existing *current-fiber*)
             (,self (or ,existing (make-main-fiber))))
        (declare (ignorable ,self))
        (unwind-protect (progn ,@body)

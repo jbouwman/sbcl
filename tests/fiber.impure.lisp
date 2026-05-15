@@ -152,17 +152,17 @@
                   (let ((idx ti))
                     (sb-thread:make-thread
                      (lambda ()
-                       (let* ((main  (make-main-fiber))
-                              (count 0)
-                              (child (make-fiber
-                                      (lambda ()
-                                        (dotimes (_ 1000)
-                                          (incf count) (yield-fiber))))))
-                         (dotimes (_ 1000) (switch-fiber main child))
-                         (release-fiber child)
-                         (release-fiber main)
-                         (sb-thread:with-mutex (lock)
-                           (setf (aref results idx) count)))))))))
+                       (with-fiber-thread ()
+                         (let* ((count 0)
+                                (child (make-fiber
+                                        (lambda ()
+                                          (dotimes (_ 1000)
+                                            (incf count) (yield-fiber))))))
+                           (dotimes (_ 1000)
+                             (switch-fiber *current-fiber* child))
+                           (release-fiber child)
+                           (sb-thread:with-mutex (lock)
+                             (setf (aref results idx) count))))))))))
       (mapc #'sb-thread:join-thread threads))
     (dotimes (i 4) (assert (= 1000 (aref results i))))))
 
@@ -175,17 +175,16 @@
                   (let ((idx i))
                     (sb-thread:make-thread
                      (lambda ()
-                       (let ((m (make-main-fiber))
-                             (c (make-fiber
-                                 (lambda () (loop (yield-fiber))))))
-                         (sb-thread:wait-on-semaphore start)
-                         (handler-case
-                             (progn (dotimes (_ 5000)
-                                      (switch-fiber m c))
-                                    (setf (aref results idx) :ok))
-                           (error (e) (setf (aref results idx) e)))
-                         (release-fiber c)
-                         (release-fiber m))))))))
+                       (with-fiber-thread ()
+                         (let ((c (make-fiber
+                                   (lambda () (loop (yield-fiber))))))
+                           (sb-thread:wait-on-semaphore start)
+                           (handler-case
+                               (progn (dotimes (_ 5000)
+                                        (switch-fiber *current-fiber* c))
+                                      (setf (aref results idx) :ok))
+                             (error (e) (setf (aref results idx) e)))
+                           (release-fiber c)))))))))
       (sleep 0.05)
       (dotimes (_ n-threads) (sb-thread:signal-semaphore start))
       (mapc #'sb-thread:join-thread threads))
