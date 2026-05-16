@@ -59,7 +59,7 @@
   (pin-count 0 :type (and fixnum unsigned-byte))
   (return-fiber nil :type (or null fiber))
   (name nil :type (or null string))
-  (value nil))
+  (value nil :type list))
 
 (defun %print-fiber (fiber stream)
   (print-unreadable-object (fiber stream :type t :identity t)
@@ -87,13 +87,15 @@
       (let ((sb-kernel:*handler-clusters* sb-kernel::**initial-handler-clusters**)
             (sb-kernel:*restart-clusters* nil))
         (handler-case
-            (let ((rv (cond ((fiber-pending-condition f)
-                             (let ((c (fiber-pending-condition f)))
-                               (setf (fiber-pending-condition f) nil)
-                               (error c)))
-                            (t (funcall (fiber-function f))))))
+            (let ((rv-list
+                    (multiple-value-list
+                     (cond ((fiber-pending-condition f)
+                            (let ((c (fiber-pending-condition f)))
+                              (setf (fiber-pending-condition f) nil)
+                              (error c)))
+                           (t (funcall (fiber-function f)))))))
               (when (fiber-return-fiber f)
-                (setf (fiber-value (fiber-return-fiber f)) rv)))
+                (setf (fiber-value (fiber-return-fiber f)) rv-list)))
           (condition (c)
             (setf (fiber-pending-condition f) c)))))))
 

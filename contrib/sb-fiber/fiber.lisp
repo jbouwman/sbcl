@@ -104,15 +104,11 @@ when their owning thread exits."
 released."
   (/= (fiber-state fiber) +fiber-dead+))
 
-(defun switch-fiber (from to &optional value)
-  "Suspend FROM and resume TO, delivering VALUE.  Returns whatever
-the next switch back to FROM delivers, or TO's entry-function return
-value if TO ran to completion.
-
-Both fibers must be on the current thread; FROM must be RUNNING and
-TO RUNNABLE or NEW.  A condition that escaped TO's entry function is
-re-signalled here."
-  (declare (type fiber from to))
+(defun %switch-fiber (from to values)
+  "Internal switch primitive.  VALUES is the already-collected list of
+values to stage on TO's value slot for delivery to the resumer."
+  (declare (type fiber from to)
+           (type list values))
   (let ((from-sap (fiber-sap from))
         (to-sap   (fiber-sap to)))
     (when (or (sb-sys:sap= from-sap (sb-sys:int-sap 0))
@@ -138,7 +134,7 @@ re-signalled here."
       ;; touch Lisp-owned slots only.
       (setf (sb-fiber-c-return-fiber to-c) (sb-sys:sap-int from-sap)
             (fiber-return-fiber to)        from
-            (fiber-value to)               value
+            (fiber-value to)               values
             *current-fiber*                to)
       (%switch-fiber-prep from-sap to-sap)
       ;; Catch/unwind chains point into the running fiber's stack
@@ -172,7 +168,14 @@ re-signalled here."
     (when c
       (setf (fiber-pending-condition to) nil)
       (error c)))
-  (fiber-value from))
+  (values-list (fiber-value from)))
+
+(defun switch-fiber (from to &rest values)
+  "Suspend FROM and resume TO, delivering VALUES to the resumer as
+multiple values.  Returns whatever the next switch back to FROM
+delivers, also as multiple values."
+  (declare (type fiber from to))
+  (%switch-fiber from to values))
 
 (defmacro with-fiber ((var function &rest make-args) &body body)
   "Create a fiber, bind it to VAR, execute BODY, release on exit."
@@ -180,16 +183,17 @@ re-signalled here."
      (unwind-protect (progn ,@body)
        (release-fiber ,var))))
 
-(defun yield-fiber (&optional value)
-  "Switch from the current fiber to its return fiber, delivering VALUE.
-Returns the value supplied by the next switch-in.  Errors if the
-current fiber has no recorded return fiber (never resumed)."
-  (let ((self *current-fiber*))
-    (let ((target (fiber-return-fiber self)))
-      (unless target
-        (error "yield-fiber: ~S has no return fiber (never resumed)"
-               self))
-      (switch-fiber self target value))))
+(defun yield-fiber (&rest values)
+  "Switch from the current fiber to its return fiber, delivering VALUES
+as multiple values to the resumer.  Returns whatever the next
+switch-in delivers (as multiple values).  Errors if the current fiber
+has no recorded return fiber (never resumed)."
+  (let* ((self *current-fiber*)
+         (target (fiber-return-fiber self)))
+    (unless target
+      (error "yield-fiber: ~S has no return fiber (never resumed)"
+             self))
+    (%switch-fiber self target values)))
 
 (defun join-fiber (fiber)
   "Resume FIBER from the current fiber until it runs to completion,
@@ -219,31 +223,49 @@ condition; cleared when consumed."
   (declare (type fiber fiber))
   (fiber-pending-condition fiber))
 
+(defconstant +generator-done+ '+generator-done+
+  "Sentinel returned by a generator thunk built by MAKE-FIBER-GENERATOR
+once the underlying fiber has run to completion.  Compare with EQ.")
+
 (defun make-fiber-generator (function &key name
                                            (stack-size 65536)
                                            (binding-stack-size 8192))
   "Wrap FUNCTION in a fiber and return a thunk that, on each call,
-returns the fiber's next YIELD-FIBER value (or its entry-function's
-return value).  Returns NIL once the fiber finishes, and releases the
-fiber.  STACK-SIZE and BINDING-STACK-SIZE are forwarded to MAKE-FIBER."
+resumes the fiber and returns its next YIELD-FIBER values as multiple
+values.  Only yielded values reach the consumer; the entry function's
+own return value is discarded.  Producers that need to communicate a
+final result can capture it via a closure variable or use plain
+MAKE-FIBER + JOIN-FIBER instead."
   (let ((f (make-fiber function
                        :name name
                        :stack-size stack-size
                        :binding-stack-size binding-stack-size)))
     (lambda ()
-      (cond ((not (fiber-alive-p f)) nil)
-            ((= (fiber-state f) +fiber-dead+)
-             (release-fiber f)
-             nil)
-            (t (switch-fiber *current-fiber* f))))))
+      (cond ((sb-sys:sap= (fiber-sap f) (sb-sys:int-sap 0))
+             +generator-done+)
+            (t
+             (switch-fiber *current-fiber* f)
+             (cond ((= (fiber-state f) +fiber-dead+)
+                    (release-fiber f)
+                    +generator-done+)
+                   (t (values-list (fiber-value *current-fiber*)))))))))
 
-(defmacro do-fiber-generator ((var generator) &body body)
-  "Iterate VAR over the values produced by GENERATOR (a thunk built
-by MAKE-FIBER-GENERATOR), terminating when it returns NIL."
-  (let ((gen (gensym "GEN")))
+(defmacro do-fiber-generator ((vars generator) &body body)
+  "Iterate over the values produced by GENERATOR (a thunk built by
+MAKE-FIBER-GENERATOR), binding each yield via MULTIPLE-VALUE-BIND to
+VARS and terminating when GENERATOR returns the *GENERATOR-DONE*
+sentinel.  VARS must be a non-empty list of symbols; extra yielded
+values past its length are discarded, and missing values bind to NIL."
+  (unless (and (consp vars) (every #'symbolp vars))
+    (error "do-fiber-generator: VARS must be a non-empty list of symbols, got ~S"
+           vars))
+  (let ((gen (gensym "GEN"))
+        (first (first vars)))
     `(let ((,gen ,generator))
-       (loop for ,var = (funcall ,gen)
-             while ,var do ,@body))))
+       (loop
+         (multiple-value-bind ,vars (funcall ,gen)
+           (when (eq ,first +generator-done+) (return))
+           ,@body)))))
 
 (declaim (inline fiber-pinned-p))
 (defun fiber-pinned-p (fiber)

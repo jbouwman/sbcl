@@ -69,21 +69,63 @@
 
 (with-test (:name (:fiber :make-fiber-generator))
   (let* ((main (make-main-fiber))
+         (gen (make-fiber-generator
+               (lambda ()
+                 (yield-fiber 1)
+                 (yield-fiber 2)))))
+    (assert (eql 1 (funcall gen)))
+    (assert (eql 2 (funcall gen)))
+    (assert (eq +generator-done+ (funcall gen)))
+    (assert (eq +generator-done+ (funcall gen)))
+    (release-fiber main)))
+
+(with-test (:name (:fiber :make-fiber-generator :yields-nil))
+  (let* ((main (make-main-fiber))
          (gen  (make-fiber-generator
-                (lambda () (yield-fiber 1) (yield-fiber 2) 3))))
-    (assert (equal '(1 2 3)
-                   (loop for v = (funcall gen) while v collect v)))
-    ;; Auto-destroyed.
-    (assert (null (funcall gen)))
+                (lambda () (yield-fiber nil) (yield-fiber 42)))))
+    (assert (eq nil (funcall gen)))
+    (assert (eql 42 (funcall gen)))
+    (assert (eq +generator-done+ (funcall gen)))
+    (release-fiber main)))
+
+(with-test (:name (:fiber :make-fiber-generator :multi-value-yield))
+  (let* ((main (make-main-fiber))
+         (gen  (make-fiber-generator
+                (lambda ()
+                  (yield-fiber :a 1 #\x)
+                  (yield-fiber :b 2 #\y)))))
+    (multiple-value-bind (k n c) (funcall gen)
+      (assert (eq :a k)) (assert (eql 1 n)) (assert (eql #\x c)))
+    (multiple-value-bind (k n c) (funcall gen)
+      (assert (eq :b k)) (assert (eql 2 n)) (assert (eql #\y c)))
+    (assert (eq +generator-done+ (funcall gen)))
+    (release-fiber main)))
+
+(with-test (:name (:fiber :yield-fiber :zero-values))
+  (let* ((main  (make-main-fiber))
+         (child (make-fiber (lambda () (yield-fiber)))))
+    (assert (equal '() (multiple-value-list (switch-fiber main child))))
+    (release-fiber child)
     (release-fiber main)))
 
 (with-test (:name (:fiber :do-fiber-generator))
   (let ((main (make-main-fiber))
         (out  '()))
-    (do-fiber-generator (v (make-fiber-generator
-                            (lambda () (yield-fiber :a) (yield-fiber :b))))
+    (do-fiber-generator ((v) (make-fiber-generator
+                              (lambda () (yield-fiber :a) (yield-fiber :b))))
       (push v out))
     (assert (equal '(:a :b) (nreverse out)))
+    (release-fiber main)))
+
+(with-test (:name (:fiber :do-fiber-generator :multi-var))
+  (let ((main (make-main-fiber))
+        (out  '()))
+    (do-fiber-generator ((k n) (make-fiber-generator
+                                (lambda ()
+                                  (yield-fiber :a 1)
+                                  (yield-fiber :b 2))))
+      (push (cons k n) out))
+    (assert (equal '((:a . 1) (:b . 2)) (nreverse out)))
     (release-fiber main)))
 
 ;;; --- Interrupt / condition staging ---

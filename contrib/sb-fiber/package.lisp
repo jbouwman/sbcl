@@ -18,6 +18,7 @@
    #:fiber-condition
    #:make-fiber-generator
    #:do-fiber-generator
+   #:+generator-done+
    #:fiber-alive-p
    #:fiber-state
    #:with-fiber

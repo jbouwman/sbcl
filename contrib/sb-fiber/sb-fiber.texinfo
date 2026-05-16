@@ -76,9 +76,11 @@ condition, that condition is re-signaled here in the caller's
 context.
 @end deffn
 
-@deffn Function yield-fiber &optional value
-@code{(switch-fiber *current-fiber* (fiber-return-fiber *current-fiber*) value)}.
-Errors if the current fiber has never been resumed.
+@deffn Function yield-fiber &rest values
+Switch to the current fiber's return fiber, delivering @var{values} as
+multiple values to the resumer's @code{switch-fiber} return.  Returns
+whatever the next switch-in delivers, also as multiple values.  Errors
+if the current fiber has never been resumed.
 @end deffn
 
 @deffn Function join-fiber fiber
@@ -105,25 +107,31 @@ The condition (if any) staged for @var{fiber}'s next resume, or
 @deffn Function make-fiber-generator function &key name (stack-size 65536) (binding-stack-size 8192)
 Wrap @var{function} in a fiber and return a thunk that, on each
 call, resumes the fiber and returns its next @code{yield-fiber}
-value (or the entry function's return value).  Returns @code{nil}
-when the fiber has run to completion; the underlying fiber is
-auto-released at that point.  Mirrors Lua's @code{coroutine.wrap}.
-@var{stack-size} and @var{binding-stack-size} are forwarded to
-@code{make-fiber}; cheap iterators over small inputs can drop the
-control stack to a few pages, while deeply-recursive producers can
-ask for more.
+values as multiple values.  Only yielded values reach the consumer;
+the entry function's own return value is discarded. 
 
-The returned thunk is pinned to the thread that called
-@code{make-fiber-generator}: every call to it must come from that
-same thread, since fibers do not migrate.  Resuming the thunk from
-another thread is undefined behaviour and will corrupt fiber state
-rather than signal a clean error.
+Once the fiber has run to completion the thunk returns the sentinel
+@code{+generator-done+} and releases the fiber; subsequent calls keep
+returning the sentinel.
+
+@var{stack-size} and @var{binding-stack-size} are forwarded to
+@code{make-fiber}.
 @end deffn
 
-@deffn Macro do-fiber-generator (var generator) &body body
-Iterate @var{var} over the values produced by @var{generator}
-(a thunk built by @code{make-fiber-generator}), terminating when
-the generator returns @code{nil}.
+@defvr Constant +generator-done+
+Sentinel value returned by a generator thunk built by
+@code{make-fiber-generator} once the underlying fiber has run to
+completion.  Compare with @code{eq}.
+@end defvr
+
+@deffn Macro do-fiber-generator (vars generator) &body body
+Iterate over the values produced by @var{generator} (a thunk built by
+@code{make-fiber-generator}), binding each yield via
+@code{multiple-value-bind} to @var{vars} and terminating when
+@var{generator} returns the @code{+generator-done+} sentinel.
+@var{vars} must be a non-empty list of symbols (use @code{((v) g)}
+for the single-value case).  Extra yielded values past the binding
+list are discarded; missing values bind to @code{nil}.
 @end deffn
 
 @deffn Function current-fiber
@@ -186,7 +194,7 @@ poll loop wakes it when ready.
 a fresh @code{*handler-clusters*} / @code{*restart-clusters*};
 handlers on the caller's stack do not catch conditions raised inside.
 Let conditions escape -- they're re-signaled in the caller on the
-auto-return.
+return.
 @item @strong{Image survival.}  Fibers do not survive
 @code{save-lisp-and-die}; drop wrapper references before saving.
 @end itemize
