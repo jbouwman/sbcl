@@ -84,7 +84,7 @@ when their owning thread exits."
         (when (and (not (zerop owner))
                    (= owner (sb-sys:sap-int (sb-thread:current-thread-sap))))
           (%fiber-unregister (sb-thread:current-thread-sap) sap)))
-      (%fiber-destroy sap)
+      (%fiber-release sap)
       (setf (fiber-sap fiber) (sb-sys:int-sap 0)
             (fiber-function fiber) nil
             (fiber-return-fiber fiber) nil
@@ -219,12 +219,17 @@ condition; cleared when consumed."
   (declare (type fiber fiber))
   (fiber-pending-condition fiber))
 
-(defun make-fiber-generator (function &key name)
+(defun make-fiber-generator (function &key name
+                                           (stack-size 65536)
+                                           (binding-stack-size 8192))
   "Wrap FUNCTION in a fiber and return a thunk that, on each call,
 returns the fiber's next YIELD-FIBER value (or its entry-function's
 return value).  Returns NIL once the fiber finishes, and releases the
-fiber."
-  (let ((f (make-fiber function :name name)))
+fiber.  STACK-SIZE and BINDING-STACK-SIZE are forwarded to MAKE-FIBER."
+  (let ((f (make-fiber function
+                       :name name
+                       :stack-size stack-size
+                       :binding-stack-size binding-stack-size)))
     (lambda ()
       (cond ((not (fiber-alive-p f)) nil)
             ((= (fiber-state f) +fiber-dead+)

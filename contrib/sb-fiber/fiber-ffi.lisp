@@ -17,7 +17,7 @@
     system-area-pointer
   (thread system-area-pointer))
 
-(define-alien-routine ("sb_fiber_destroy" %fiber-destroy)
+(define-alien-routine ("sb_fiber_release" %fiber-release)
     void
   (fiber system-area-pointer))
 

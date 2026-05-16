@@ -63,7 +63,7 @@ void gc_scav_fiber_binding_stacks(struct thread *th)
     }
 }
 
-static void fiber_release(struct sb_fiber *f)
+static void fiber_free(struct sb_fiber *f)
 {
     if (f->stack_base && f->stack_base != MAP_FAILED)
         munmap(f->stack_base, f->stack_alloc_size);
@@ -82,7 +82,7 @@ void sb_fiber_release_registered(struct thread *th)
         struct sb_fiber *next = f->next;
         f->owner = NULL;
         f->next = NULL;
-        fiber_release(f);
+        fiber_free(f);
         f = next;
     }
 }
@@ -153,12 +153,12 @@ struct sb_fiber *sb_fiber_create_main(struct thread *th)
     return f;
 }
 
-void sb_fiber_destroy(struct sb_fiber *f)
+void sb_fiber_release(struct sb_fiber *f)
 {
     if (!f) return;
     assert(f->state != FIBER_RUNNING);
     if (f->owner) sb_fiber_unregister(f->owner, f);
-    fiber_release(f);
+    fiber_free(f);
 }
 
 void sb_fiber_register(struct thread *th, struct sb_fiber *fiber)

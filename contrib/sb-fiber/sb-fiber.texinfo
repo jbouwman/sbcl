@@ -102,12 +102,22 @@ The condition (if any) staged for @var{fiber}'s next resume, or
 @code{nil}.  Cleared when consumed by @code{switch-fiber}.
 @end deffn
 
-@deffn Function make-fiber-generator function &key name
+@deffn Function make-fiber-generator function &key name (stack-size 65536) (binding-stack-size 8192)
 Wrap @var{function} in a fiber and return a thunk that, on each
 call, resumes the fiber and returns its next @code{yield-fiber}
 value (or the entry function's return value).  Returns @code{nil}
 when the fiber has run to completion; the underlying fiber is
 auto-released at that point.  Mirrors Lua's @code{coroutine.wrap}.
+@var{stack-size} and @var{binding-stack-size} are forwarded to
+@code{make-fiber}; cheap iterators over small inputs can drop the
+control stack to a few pages, while deeply-recursive producers can
+ask for more.
+
+The returned thunk is pinned to the thread that called
+@code{make-fiber-generator}: every call to it must come from that
+same thread, since fibers do not migrate.  Resuming the thunk from
+another thread is undefined behaviour and will corrupt fiber state
+rather than signal a clean error.
 @end deffn
 
 @deffn Macro do-fiber-generator (var generator) &body body

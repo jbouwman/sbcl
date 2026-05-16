@@ -74,7 +74,7 @@ struct sb_fiber {
 /* Lifecycle */
 struct sb_fiber *sb_fiber_create(size_t stack_size, size_t binding_stack_size);
 struct sb_fiber *sb_fiber_create_main(struct thread *th);
-void             sb_fiber_destroy(struct sb_fiber *fiber);
+void             sb_fiber_release(struct sb_fiber *fiber);
 
 /* GC registration */
 void sb_fiber_register  (struct thread *th, struct sb_fiber *fiber);
