@@ -35,6 +35,7 @@
    #:with-fiber-pinned
    #:fiber-pinned-p
    #:fiber-pin-count
+   #:fiber-migrate
    ;; Conditions
    #:fiber-error
    #:fiber-error-fiber

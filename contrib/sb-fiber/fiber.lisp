@@ -301,4 +301,41 @@ BODY; SWITCH-FIBER refuses to suspend a pinned fiber.  Pins nest."
        (unwind-protect (progn ,@body)
          (decf (fiber-pin-count ,f))))))
 
+;;; --- Cross-thread migration ---
+
+(defun fiber-migrate (fiber dest-thread)
+  "Atomically move FIBER's ownership from its current owner thread to
+DEST-THREAD.  After this returns, FIBER may be switched into only from
+DEST-THREAD.
+
+FIBER must be in state :RUNNABLE."
+  (declare (type fiber fiber)
+           (type sb-thread:thread dest-thread))
+  (when (fiber-released-p fiber)
+    (error 'dead-fiber-error :fiber fiber))
+  (let ((state (fiber-c-state fiber)))
+    (unless (= state +fiber-runnable+)
+      (error 'fiber-state-error
+             :fiber fiber
+             :state (fiber-state fiber)
+             :expected '(:runnable))))
+  (let ((dest-sap (sb-thread::thread-primitive-thread dest-thread)))
+    (when (zerop dest-sap)
+      (error "fiber-migrate: destination thread is not live"))
+    (let ((rc (%fiber-migrate (fiber-sap fiber)
+                              (sb-sys:int-sap dest-sap))))
+      (case rc
+        (0
+         (setf (fiber-thread fiber) dest-thread)
+         fiber)
+        (-1
+         (error 'fiber-state-error
+                :fiber fiber
+                :state (fiber-state fiber)
+                :expected '(:runnable)))
+        (-2
+         (error 'fiber-error :fiber fiber))
+        (t
+         (error "fiber-migrate: unexpected runtime return ~D" rc))))))
+
 )

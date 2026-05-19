@@ -183,6 +183,61 @@ void sb_fiber_unregister(struct thread *th, struct sb_fiber *fiber)
     }
 }
 
+static int fiber_list_remove(struct thread *src, struct sb_fiber *fiber)
+{
+    struct extra_thread_data *ed = thread_extra_data(src);
+    for (;;) {
+        struct sb_fiber **pp = &ed->fiber_list;
+        struct sb_fiber *cur =
+            __atomic_load_n(&ed->fiber_list, __ATOMIC_ACQUIRE);
+        while (cur && cur != fiber) {
+            pp  = &cur->next;
+            cur = cur->next;
+        }
+        if (!cur) return -1;           /* fiber not on this list */
+        struct sb_fiber *next = cur->next;
+        if (pp == &ed->fiber_list) {
+            struct sb_fiber *expected = fiber;
+            if (__atomic_compare_exchange_n(&ed->fiber_list, &expected,
+                                            next, 0,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE))
+                return 0;
+            continue;                   /* head changed; restart walk */
+        }
+        *pp = next;
+        return 0;
+    }
+}
+
+static void fiber_list_insert(struct thread *dest, struct sb_fiber *fiber)
+{
+    struct extra_thread_data *ed = thread_extra_data(dest);
+    struct sb_fiber *head;
+    do {
+        head = __atomic_load_n(&ed->fiber_list, __ATOMIC_ACQUIRE);
+        fiber->next = head;
+    } while (!__atomic_compare_exchange_n(&ed->fiber_list, &head, fiber, 0,
+                                          __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE));
+}
+
+int sb_fiber_migrate(struct sb_fiber *fiber, struct thread *dest)
+{
+    if (fiber->state != FIBER_RUNNABLE) return -1;
+    struct thread *src = fiber->owner;
+    if (!src) return -2;
+    if (src == dest) return 0;
+
+    int rc = fiber_list_remove(src, fiber);
+    if (rc == 0) {
+        fiber->owner = dest;
+        sb_fiber_arch_rebind_thread(fiber, dest);
+        fiber_list_insert(dest, fiber);
+    }
+    return rc;
+}
+
 static inline void swap_bindings_forward (struct thread *th,
                                           lispobj *base, lispobj *limit);
 static inline void swap_bindings_backward(struct thread *th,
@@ -267,6 +322,7 @@ void fiber_trampoline_c(struct sb_fiber *self)
 
     if (self->return_fiber) {
         struct sb_fiber *ret = self->return_fiber;
+        struct thread *th = get_sb_vm_thread();
         sb_fiber_switch_prep(self, ret);
         th->current_catch_block          = ret->current_catch_block;
         th->current_unwind_protect_block = ret->current_unwind_protect_block;

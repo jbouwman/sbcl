@@ -494,3 +494,112 @@
     (let ((m (make-main-fiber)))
       (assert (fiber-alive-p m))
       (release-fiber m))))
+
+;;; --- Cross-thread migration ---
+
+(with-test (:name (:fiber :migrate :metadata-only)
+            :skipped-on (not :sb-thread))
+  (let* ((fiber-cell (list nil))
+         (a-installed (sb-thread:make-semaphore :name "metaonly-installed"))
+         (a-released  (sb-thread:make-semaphore :name "metaonly-released"))
+         (b-go        (sb-thread:make-semaphore :name "metaonly-b-go")))
+    (let* ((a-thread
+             (sb-thread:make-thread
+              (lambda ()
+                (with-main-fiber (a-main)
+                  (let ((child (make-fiber (lambda () (yield-fiber) :done))))
+                    (resume-fiber child)
+                    (setf (car fiber-cell) child)
+                    (sb-thread:signal-semaphore a-installed)
+                    (sb-thread:wait-on-semaphore a-released))))
+              :name "fiber-migrate-meta-src"))
+           (b-thread
+             (sb-thread:make-thread
+              (lambda ()
+                (sb-thread:wait-on-semaphore b-go)
+                ;; Migrated child sits in B's fiber list.  B releases
+                ;; it without ever switching into it.  The wrapper's
+                ;; FIBER-THREAD must be B by this point, and
+                ;; RELEASE-FIBER must succeed without signalling.
+                (release-fiber (car fiber-cell)))
+              :name "fiber-migrate-meta-dest")))
+      (sb-thread:wait-on-semaphore a-installed)
+      (let ((child (car fiber-cell)))
+        (assert child)
+        (assert (eq (sb-fiber::fiber-thread child) a-thread)
+                nil "before migrate, fiber's thread slot should be A")
+        (assert (eq child (fiber-migrate child b-thread)))
+        (assert (eq (sb-fiber::fiber-thread child) b-thread)
+                nil "after migrate, fiber's thread slot should be B"))
+      (sb-thread:signal-semaphore b-go)
+      (sb-thread:join-thread b-thread)
+      (sb-thread:signal-semaphore a-released)
+      (sb-thread:join-thread a-thread))))
+
+(with-test (:name (:fiber :migrate :runnable-runs-on-dest)
+            :skipped-on (not :sb-thread))
+  (let* ((fiber-cell (list nil))
+         (a-installed (sb-thread:make-semaphore :name "a-installed"))
+         (a-released  (sb-thread:make-semaphore :name "a-released"))
+         (migrate-done (sb-thread:make-semaphore :name "migrate-done"))
+         (b-result    (list nil))
+         (observed-thread (list nil)))
+    (let* ((a-thread
+             (sb-thread:make-thread
+              (lambda ()
+                (with-main-fiber (a-main)
+                  (let ((child (make-fiber
+                                (lambda ()
+                                  (yield-fiber)
+                                  (setf (car observed-thread)
+                                        sb-thread:*current-thread*)
+                                  :body-done))))
+                    (resume-fiber child)
+                    (setf (car fiber-cell) child)
+                    (sb-thread:signal-semaphore a-installed)
+                    (sb-thread:wait-on-semaphore a-released))))
+              :name "fiber-migrate-src")))
+      (sb-thread:wait-on-semaphore a-installed)
+      (let ((child (car fiber-cell)))
+        (assert child)
+        (let ((b-thread
+                (sb-thread:make-thread
+                 (lambda ()
+                   (sb-thread:wait-on-semaphore migrate-done)
+                   (with-main-fiber (b-main)
+                     (setf (car b-result) (join-fiber child))))
+                 :name "fiber-migrate-dest")))
+          (fiber-migrate child b-thread)
+          (assert (eq (sb-fiber::fiber-thread child) b-thread)
+                  nil
+                  "after migrate, fiber THREAD slot should be B; got ~A"
+                  (sb-fiber::fiber-thread child))
+          (sb-thread:signal-semaphore migrate-done)
+          (sb-thread:join-thread b-thread)
+          (assert (eq (car observed-thread) b-thread)
+                  nil
+                  "fiber body ran on ~A; expected B = ~A"
+                  (car observed-thread) b-thread)
+          (assert (eq (car b-result) :body-done)
+                  nil
+                  "join-fiber returned ~A; expected :body-done"
+                  (car b-result))))
+      (sb-thread:signal-semaphore a-released)
+      (sb-thread:join-thread a-thread))))
+
+(with-test (:name (:fiber :migrate :rejects-released)
+            :skipped-on (not :sb-thread))
+  (let* ((other (sb-thread:make-thread
+                 (lambda () (sb-thread:thread-yield) :ok)
+                 :name "migrate-validate-dest"))
+         (released-fiber nil))
+    (with-main-fiber (main)
+      (let ((f (make-fiber (lambda () :immediately-done))))
+        (join-fiber f)
+        (release-fiber f)
+        (setf released-fiber f)))
+    (handler-case
+        (progn (fiber-migrate released-fiber other)
+               (error "expected DEAD-FIBER-ERROR; none signaled"))
+      (dead-fiber-error () :ok))
+    (sb-thread:join-thread other)))

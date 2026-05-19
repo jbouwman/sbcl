@@ -172,7 +172,8 @@ extern int dynamic_values_bytes;
 
 #ifdef LISP_FEATURE_SB_THREAD
 # ifdef LISP_FEATURE_GCC_TLS
-extern __thread struct thread *current_thread;
+extern __thread __attribute__((tls_model("initial-exec")))
+       struct thread *current_thread;
 # elif !defined LISP_FEATURE_WIN32
 extern pthread_key_t current_thread;
 #endif

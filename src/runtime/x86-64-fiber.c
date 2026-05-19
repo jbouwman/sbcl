@@ -47,6 +47,11 @@ int sb_fiber_ctx_gc_regs(const struct sb_fiber *f, lispobj *out, int max)
     return i;
 }
 
+void sb_fiber_arch_rebind_thread(struct sb_fiber *f, struct thread *new_owner)
+{
+    f->ctx.r13 = (void *)new_owner;
+}
+
 /* Lisp-stack hooks: alias control_stack_* to the fiber's native C
    stack range. */
 

@@ -31,6 +31,11 @@
   (thread system-area-pointer)
   (fiber system-area-pointer))
 
+(define-alien-routine ("sb_fiber_migrate" %fiber-migrate)
+    int
+  (fiber system-area-pointer)
+  (dest-thread system-area-pointer))
+
 (define-alien-routine ("sb_fiber_prepare" %fiber-prepare)
     void
   (fiber system-area-pointer)

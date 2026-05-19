@@ -80,6 +80,9 @@ void             sb_fiber_release(struct sb_fiber *fiber);
 void sb_fiber_register  (struct thread *th, struct sb_fiber *fiber);
 void sb_fiber_unregister(struct thread *th, struct sb_fiber *fiber);
 
+/* Cross-thread migration */
+int  sb_fiber_migrate(struct sb_fiber *fiber, struct thread *dest);
+
 /* Thread-exit cleanup.  Called from free_thread_struct. */
 void sb_fiber_release_registered(struct thread *th);
 
@@ -97,6 +100,7 @@ void sb_fiber_exit_pa    (struct thread *th);
 /* Arch-specific helpers */
 void  sb_fiber_prepare(struct sb_fiber *f, void (*fn)(void *), void *arg);
 void *sb_fiber_ctx_sp (const struct sb_fiber *f);
+void  sb_fiber_arch_rebind_thread(struct sb_fiber *f, struct thread *new_owner);
 /* Write the fiber's callee-saved GC-relevant register words into OUT
  * (up to MAX). Return the count actually written. */
 int   sb_fiber_ctx_gc_regs(const struct sb_fiber *f, lispobj *out, int max);

@@ -116,7 +116,8 @@ unsigned int text_space_size;
 #endif
 
 #ifdef LISP_FEATURE_GCC_TLS
-__thread struct thread *current_thread;
+__thread __attribute__((tls_model("initial-exec")))
+struct thread *current_thread;
 #elif defined LISP_FEATURE_SB_THREAD && !defined LISP_FEATURE_WIN32
 pthread_key_t current_thread = 0;
 #endif
