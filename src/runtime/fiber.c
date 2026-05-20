@@ -309,6 +309,15 @@ int sb_fiber_handle_bs_fault(void *context_, void *addr, struct thread *th)
 
 typedef void (*fiber_swap_context_fn)(void *save, void *restore);
 
+/* A fiber can migrate to a different OS thread inside entry_fn.  The
+ * compiler may cache the TLS-slot address of `current_thread', making
+ * causing post-yield `get_sb_vm_thread()' to read the old thread's
+ * slot.  Hide the read behind a noinline to defeat the cache. */
+static __attribute__((noinline)) struct thread *fresh_sb_vm_thread(void)
+{
+    return get_sb_vm_thread();
+}
+
 void fiber_trampoline_c(struct sb_fiber *self)
 {
     struct thread *th = get_sb_vm_thread();
@@ -322,7 +331,7 @@ void fiber_trampoline_c(struct sb_fiber *self)
 
     if (self->return_fiber) {
         struct sb_fiber *ret = self->return_fiber;
-        struct thread *th = get_sb_vm_thread();
+        struct thread *th = fresh_sb_vm_thread();
         sb_fiber_switch_prep(self, ret);
         th->current_catch_block          = ret->current_catch_block;
         th->current_unwind_protect_block = ret->current_unwind_protect_block;
@@ -409,6 +418,7 @@ static inline void fiber_enter_pa(struct thread *th)
 #endif
 }
 
+__attribute__((noinline))
 void sb_fiber_switch_prep(struct sb_fiber *from, struct sb_fiber *to)
 {
     struct thread *th = get_sb_vm_thread();
