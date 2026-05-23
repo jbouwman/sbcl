@@ -222,6 +222,8 @@ static void fiber_list_insert(struct thread *dest, struct sb_fiber *fiber)
                                           __ATOMIC_ACQUIRE));
 }
 
+static inline void sb_fiber_enter_pa(struct thread *th);
+
 int sb_fiber_migrate(struct sb_fiber *fiber, struct thread *dest)
 {
     if (fiber->state != FIBER_RUNNABLE) return -1;
@@ -229,12 +231,15 @@ int sb_fiber_migrate(struct sb_fiber *fiber, struct thread *dest)
     if (!src) return -2;
     if (src == dest) return 0;
 
+    struct thread *self = get_sb_vm_thread();
+    sb_fiber_enter_pa(self);
     int rc = fiber_list_remove(src, fiber);
     if (rc == 0) {
         fiber->owner = dest;
         sb_fiber_arch_rebind_thread(fiber, dest);
         fiber_list_insert(dest, fiber);
     }
+    sb_fiber_exit_pa(self);
     return rc;
 }
 
@@ -321,11 +326,11 @@ static __attribute__((noinline)) struct thread *fresh_sb_vm_thread(void)
 void fiber_trampoline_c(struct sb_fiber *self)
 {
     struct thread *th = get_sb_vm_thread();
-    sb_fiber_exit_pa(th);
 #ifdef LISP_FEATURE_ARM64
     th->control_stack_pointer = self->control_stack_pointer;
     th->control_frame_pointer = self->control_frame_pointer;
 #endif
+    sb_fiber_exit_pa(th);
     self->entry_fn(self->entry_arg);
     self->state = FIBER_DEAD;
 
@@ -407,22 +412,11 @@ static inline void swap_bindings_backward(struct thread *th,
     while (b > start) { b--; exchange_binding_with_tls(th, b); }
 }
 
-static inline void fiber_enter_pa(struct thread *th)
-{
-#if defined LISP_FEATURE_ARM64
-    /* Low 32 bits = flag_PseudoAtomic; high 32 bits = PA_INTERRUPTED. */
-    ((volatile uint32_t *)&th->pseudo_atomic_bits)[0] = flag_PseudoAtomic;
-#else
-    /* Whole word nonzero; bit 0 reserved for PA_INTERRUPTED. */
-    th->pseudo_atomic_bits = (uword_t)th;
-#endif
-}
-
 __attribute__((noinline))
 void sb_fiber_switch_prep(struct sb_fiber *from, struct sb_fiber *to)
 {
     struct thread *th = get_sb_vm_thread();
-    fiber_enter_pa(th);
+    sb_fiber_enter_pa(th);
 
     from->binding_stack_pointer = get_binding_stack_pointer(th);
 
@@ -435,6 +429,15 @@ void sb_fiber_switch_prep(struct sb_fiber *from, struct sb_fiber *to)
     if (to->binding_stack_base)
         swap_bindings_forward(th, to->binding_stack_base,
                               to->binding_stack_pointer);
+}
+
+static inline void sb_fiber_enter_pa(struct thread *th)
+{
+#if defined LISP_FEATURE_ARM64
+    ((volatile uint32_t *)&th->pseudo_atomic_bits)[0] = flag_PseudoAtomic;
+#else
+    th->pseudo_atomic_bits = (uword_t)th;
+#endif
 }
 
 void sb_fiber_exit_pa(struct thread *th)

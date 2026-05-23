@@ -69,6 +69,26 @@
         (when (zerop (mod i 50)) (sb-ext:gc :full t)))
       (mapc #'release-fiber fibers))))
 
+(with-test (:name (:fiber :trampoline-vs-gc-stop))
+  (let ((done (sb-thread:make-semaphore))
+        (stop-gc nil))
+    (let ((gc-thread
+            (sb-thread:make-thread
+             (lambda ()
+               (loop until stop-gc do (sb-ext:gc) (sleep 0.0001)))
+             :name "trampoline-vs-gc-stop pumper")))
+      (sb-thread:make-thread
+       (lambda ()
+         (with-fiber-thread ()
+           (dotimes (i 500)
+             (let ((f (make-fiber (lambda () i))))
+               (resume-fiber f))))
+         (sb-thread:signal-semaphore done))
+       :name "trampoline-vs-gc-stop worker")
+      (sb-thread:wait-on-semaphore done)
+      (setf stop-gc t)
+      (sb-thread:join-thread gc-thread))))
+
 (defvar *bs-stress-var* :default)
 
 (with-test (:name (:fiber :binding-stack-stress))
