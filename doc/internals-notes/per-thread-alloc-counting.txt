@@ -1,0 +1,546 @@
+Per-thread precise allocation counting
+======================================
+
+Goal
+====
+Give every Lisp thread an exact, always-on count of the dynamic-space
+bytes it has allocated, with these properties:
+
+  * zero cost on the inline (pseudo-atomic pointer-bump) allocation path:
+    no new instructions in any allocation vop, no code-size growth;
+  * precision: reading the counter for the current thread, a stopped
+    thread, or a dead thread yields the exact number of bytes handed out
+    by the allocator to that thread, not an estimate;
+  * works on every backend and both page-based GCs (gencgc and
+    mark-region), in threaded and unthreaded builds, with no build-time
+    feature required;
+  * usable for: a TIME macro that reports only the calling thread's
+    consing, per-thread telemetry in servers and thread pools, and a
+    precise process-wide "bytes consed" that is a sum of monotone
+    counters rather than the current usage+freed reconstruction.
+
+Terminology: "span" below means the memory delimited by one
+struct alloc_region while it is open, i.e. [start_addr, end_addr),
+of which [start_addr, free_pointer) has been handed out.
+
+What exists today, and why it isn't this
+========================================
+1. The global counter. 'bytes_allocated' (gencgc.c, mark-region.c) is
+   credited when a region is closed (gc_close_region sums the used part
+   of the span; it asserts region_size == free_pointer - start_addr),
+   when a large object is allocated (gc_alloc_large), or -- under
+   mark-region -- when a whole page is claimed for small allocation
+   (try_allocate_small_from_pages counts the entire remainder of the
+   page at claim time). GET-BYTES-CONSED is then
+   dynamic-usage + *N-BYTES-FREED-OR-PURIFIED*, where the freed
+   accumulator is maintained in SUB-GC with a (WHEN (PLUSP FREED) ...)
+   clamp because gencgc "occasionally reports negative here". The
+   metric is global, and it has known slop: open TLABs are invisible
+   until closed, fillers deposited by CONSUME_REMAINDER are counted as
+   consing (see close_region_tot_bytes_wasted), the negative-freed clamp
+   discards information, and under mark-region the page-granular
+   crediting overstates actual bump allocation.
+
+2. thread->slow_path_allocs counts entries to lisp_alloc(). Calls, not
+   bytes, and only the slow path.
+
+3. #+allocation-size-histogram (x86-64 only, build-time feature).
+   emit-instrument-alloc in src/compiler/x86-64/alloc.lisp makes every
+   inline allocation sequence add its size into the SB-THREAD:THREAD
+   instance slots TOT-BYTES-ALLOC-{BOXED,UNBOXED} and bump a size-class
+   histogram. This *is* precise per-thread counting, but it pays for
+   attribution on the fast path (several instructions per allocation
+   site plus code size), exists only when SBCL itself was built with the
+   feature, is x86-64-specific, and misses allocations that never have
+   an inline sequence (code objects via alloc_code_object, the C halves
+   of make_list / listify_rest_arg beyond what the vop accounted).
+
+4. The deterministic allocation profiler (thread->profile_data,
+   sb-aprof) gives exact per-call-site counts by patching code, again
+   x86-64-only and intended to be enabled temporarily.
+
+The design below fills the remaining cell of the matrix: precise AND
+free AND portable AND always on. It is the same accounting shape that
+HotSpot uses for ThreadMXBean getThreadAllocatedBytes and .NET for
+GetAllocatedBytesForCurrentThread: charge TLAB deltas at retirement,
+plus direct charges for allocations that bypass TLABs.
+
+Core observation
+================
+Every dynamic-space byte a mutator obtains is handed out in exactly one
+of two ways:
+
+  (a) by advancing the free_pointer of a span that, at that moment, is
+      owned exclusively by one thread (its TLABs; both the inline vops
+      and the "quick case" at the top of lisp_alloc do this), or
+
+  (b) by a direct allocation of known size inside lisp_alloc, on behalf
+      of an identified thread: gc_alloc_large / the mark-region largep
+      path, and every allocation into the shared, mutex-serialized
+      code_region (alloc_code_object, alloc_funinstance).
+
+For (a), both region openers establish free_pointer = start_addr
+(gc_alloc_new_region; try_allocate_small sets free_pointer =
+start_addr + nbytes with the first object included in the span), and
+free_pointer only moves forward within the span. Therefore
+
+    free_pointer - start_addr  ==  bytes handed out from this span
+
+holds at every instant, without any cooperation from the fast path.
+When the span is *retired* -- closed, or replaced in situ -- that
+difference is final. So:
+
+    bytes allocated by thread T
+      =   T->allocated_bytes                  (credited at retirements
+                                               and direct allocations)
+      +   sum over T's open TLAB spans of (free_pointer - start_addr)
+
+The accumulator is only ever touched in C, in paths that already take
+locks or are otherwise rare; the inline allocator is untouched. This is
+the entire trick. The rest of this document is bookkeeping: enumerating
+every retirement site, defining ownership at each, and specifying read
+protocols and their precision guarantees.
+
+What is counted
+===============
+Counted, at allocator granularity (sizes rounded up to two words):
+  * all dynamic-space allocation by the thread: conses, mixed, boxed,
+    the sys_* TLABs used under #+system-tlabs, large objects, code
+    objects and funinstances -- whether performed inline, via the C
+    fallback, or by C helpers (make_list, listify_rest_arg,
+    alloc_code_object, alloc_lisp_thread_instance, ...);
+  * allocation performed by signal handlers and interrupts running on
+    the thread (they cons through the same TLABs). The counter means
+    "bytes consed BY this thread", not "by this function".
+
+Not counted:
+  * the collector's own copying/compaction traffic (GC allocates through
+    the global gc_alloc_region[] array and collector_alloc_fallback,
+    never through a thread's TLABs, and lisp_alloc is never called
+    during GC);
+  * TLAB waste: unused span remainders and the fillers deposited under
+    CONSUME_REMAINDER. The global bytes_allocated counts these; the
+    per-thread counter deliberately does not, which makes it strictly
+    more accurate as a measure of program behavior. Consequently the sum
+    over threads is expected to be <= the global figure, and test
+    tolerances must allow for that (see Invariants);
+  * dynamic-extent (stack) allocation, static space
+    (atomic_bump_static_space_free_ptr), immobile space and permgen
+    allocations, arenas (see Arenas below), and foreign malloc. Static /
+    immobile exclusions match GET-BYTES-CONSED's current scope; they can
+    be added later by crediting their (already serialized) allocation
+    entry points.
+
+The counter is monotone for the life of the thread. GC never decrements
+it, so no freed-bytes reconstruction and no negative-freed clamp exist
+in this design at all.
+
+Data model
+==========
+New slots in the thread primitive object (src/compiler/generic/objdef):
+
+    (allocated-bytes :c-type "uint64_t" :length #.(/ 64 sb-vm:n-word-bits))
+
+placed with the other instrumentation slots next to SLOW-PATH-ALLOCS,
+NOT in the byte-displacement-precious prefix before "END of slots to
+keep near the beginning" -- the fast path never references it, so it
+must not consume one of the <2^7 offsets that allocation vops depend on.
+The uint64_t width (two words on 32-bit) is required: a word-sized slot
+would wrap at 4GiB of lifetime consing on 32-bit targets. Precedent for
+a 64-bit slot: state-word uses :length #.(/ 64 sb-vm:n-word-bits).
+
+A global in C:
+
+    uword_t exited_thread_bytes_allocated;   // uint64 even on 32-bit
+
+accumulates the final counter value of every thread that unregisters,
+so that (exited_thread_bytes_allocated + sum over live threads) is a
+precise, monotone process-wide total. Like *N-BYTES-FREED-OR-PURIFIED*
+it is reset by GC-REINIT on core startup, preserving the "since the
+program began" reading of process-wide reports.
+
+Post-mortem value: the SB-THREAD:THREAD instance gets a raw slot
+(#+64-bit one sb-vm:word; #-64-bit two words, low/high) holding the
+thread's final total. unregister_thread writes it after the final TLAB
+close, through th->lisp_thread, exactly as alloc_lisp_thread_instance
+already writes uw_primitive_thread and friends from C. This makes
+THREAD-BYTES-CONSED of a joined/dead thread exact, including the last
+few bytes the thread consed while running its Lisp-side teardown.
+
+Initialization: alloc_thread_struct must zero the new slot explicitly.
+The memset of the whole struct is not sufficient because recycled
+thread structs (the is_recycled path, used for reattaching foreign
+call-in threads) are NOT re-memset; today slow_path_allocs silently
+leaks across recycling, which is tolerable for a diagnostic but not for
+this counter.
+
+Crediting sites
+===============
+A tiny helper, single point of truth for the delta:
+
+    static inline void
+    thread_credit_span(struct thread* th, struct alloc_region* r) {
+        if (r->start_addr)
+            th->allocated_bytes +=
+                (uword_t)((char*)r->free_pointer - (char*)r->start_addr);
+    }
+
+gc_close_region itself is NOT modified and does not learn about threads:
+it is also used for the collector's global regions, for code_region, and
+by gc-unit-tests with stack-allocated regions, none of which have (or
+should credit) an owner. Instead, ownership is established at the small
+set of funnels through which thread-TLAB spans retire. The audit:
+
+1. gencgc lisp_alloc (src/runtime/gencgc.c).
+   * On entry: if (region == code_region || (flags & 1))
+       thread->allocated_bytes += nbytes.
+     This single direct charge covers code-region allocations (each code
+     object makes exactly one lisp_alloc call, there is no inline path
+     for code, and the shared code_region span must never be span-
+     credited to whichever thread happens to close it) and large-object
+     allocations (which return via gc_alloc_large without touching the
+     region). The two cases can't double-charge span accounting because
+     both bypass it entirely; a large *code* object satisfies both tests
+     and is charged once by the combined condition.
+   * Refill path: immediately before ensure_region_closed(region, ...)
+     and before each of the two read-ahead gc_close_region calls (the
+     nearly-empty CONS / mixed refills), do
+       if (region != code_region) thread_credit_span(thread, region);
+     After the subsequent gc_alloc_new_region + free_pointer bump, the
+     newly served object lies inside the new open span and is picked up
+     by that span's eventual retirement or by a reader's open-span sum.
+     If gc_alloc_new_region instead signals heap exhaustion, the credit
+     for the retired span has already happened and remains correct: the
+     never-materialized request was never counted.
+
+2. mark-region lisp_alloc (src/runtime/pmrgc.c).
+   * Same entry rule for code_region; same span-credit before
+     ensure_region_closed; the largep branch adds nbytes directly
+     (guarded region != code_region, since code was entry-charged).
+   * The extra funnel unique to this backend: the medium path
+     try_allocate_small_after_region *replaces* the region's fields with
+     a fresh chunk of lines on success -- an in-place retirement with no
+     close. Capture the span delta before the call and credit it only if
+     the call succeeds (and region != code_region):
+       uword_t pending = span_used(region);
+       if (try_allocate_small_after_region(nbytes, region)) {
+           if (region != code_region) thread->allocated_bytes += pending;
+           ...
+     On failure the region is untouched and the later
+     ensure_region_closed credit applies; crediting unconditionally
+     would double-count.
+   * Note that mark-region's whole-page crediting of the global counter
+     is unchanged; per-thread numbers will legitimately sum to less than
+     bytes_allocated under this GC.
+
+3. sync_close_regions (src/runtime/alloc.c). Gains an owner parameter
+   (struct thread* or NULL). Inside the loop, after the find_page_index
+   < 0 'continue' (which is what skips arena-backed spans -- see
+   Arenas) and BEFORE the CONSUME_REMAINDER block pushes free_pointer to
+   the page boundary, do: if (owner) thread_credit_span(owner, a[i].r).
+   Ordering matters twice here: crediting after the arena skip keeps
+   arena bytes out of the heap counter, and crediting before the filler
+   bump keeps TLAB waste out of everyone's counter. Callers:
+     - close_current_thread_tlab: owner = self;
+     - gc_close_thread_regions(th, ...): owner = th. This one funnel
+       covers the stop-the-world close of every thread's TLABs at GC
+       start (gencgc.c / pmrgc.c), thread death (unregister_thread),
+       save-lisp-and-die, traceroot, and ldb's monitor -- all of which
+       already pass the owning thread;
+     - close_code_region: owner = NULL.
+
+4. Arena switching (src/runtime/arena.c). switch_to_arena's
+   close_heap_region calls close the thread's own heap mixed/cons TLABs
+   before pointing them at the arena: credit self there (the thread is
+   the caller). In the arena->heap direction the discarded spans are
+   arena memory and must not touch the heap counter (see Arenas).
+
+5. Thread death (src/runtime/thread.c unregister_thread). The existing
+   gc_close_thread_regions call performs the final span credit via
+   funnel 3. After it, and before unlink_thread:
+     exited_thread_bytes_allocated += th->allocated_bytes;   (atomically
+       or under all_threads_lock, see Concurrency)
+     write the final total into the THREAD instance's raw slot(s).
+
+Sites audited and deliberately NOT credited: the collector's closes of
+the six global regions at GC (gencgc.c/pmrgc.c close of code / boxed /
+unboxed / mixed / small_mixed / cons regions), collector_alloc_fallback
+and everything reached only when gc_active_p, stringspace.c and
+immobile-space.c region use during save, x86-64-arch.c's code_region
+close, and gc-unit-tests.c's local regions. None of these are mutator
+TLAB spans; several have no meaningful owner.
+
+The six TLABs (boxed, cons, mixed, symbol, sys_mixed, sys_cons) are
+handled uniformly by readers even though boxed/symbol are currently
+unused ("not used yet" per monitor.c): thread_credit_span's start_addr
+guard and the reader's per-span guards make unused slots free, and the
+scheme won't silently break when a backend starts using them -- provided
+their retirement sites route through funnels 1-3, which today is the
+only mechanism by which any TLAB retires.
+
+Concurrency and memory model
+============================
+Writers of th->allocated_bytes for a given thread are mutually excluded
+in time by existing mechanisms, so the += needs no atomicity for
+correctness of the value:
+
+  * the owner itself, inside pseudo-atomic in lisp_alloc, or with
+    blockable signals blocked in close_current_thread_tlab /
+    switch_to_arena / unregister_thread;
+  * the GCing thread, only while the world (including the owner) is
+    stopped;
+  * nobody else, ever.
+
+Readers are the interesting part. Reads of another running thread's
+counter must first ensure the struct thread stays mapped -- that is the
+existing THREAD-STORAGE-LOCK protocol guarding primitive-thread, which
+remote readers must follow anyway (and 'primitive-thread = 0' routes
+them to the post-mortem slot instead).
+
+For the sum to be exact rather than merely bounded, exploit a property
+the design gives us for free: th->allocated_bytes changes if and only
+if a span retires or a direct charge lands, and every span-field reset
+(gc_set_region_empty / medium-path replacement) is strictly preceded by
+its credit. Make the credit a release store and read it with acquire
+loads, and the accumulator becomes its own seqlock:
+
+    read acc (A1); read the <=6 open spans; read acc (A2);
+    if A1 == A2, no retirement or direct charge completed during the
+    window, so every span read was either untouched or only advanced by
+    fast-path bumps -- each span read is then a pair of plain aligned
+    loads whose difference is a value that span really had at some
+    instant in the window. The total A1 + sum is the thread's exact
+    count at some instant within the read. If A1 != A2, retry; span
+    retirements are rare (order once per TLAB refill), so retries are
+    too. A retry cap with fall-back to "bounded" semantics guards
+    against a pathological allocator loop in the target.
+
+Two refinements: on 32-bit targets the 64-bit accumulator must be read
+with the classic high/low/high sequence inside the same loop, and
+free_pointer must be read with a single aligned load (it is one word on
+all targets). Without the seqlock a remote sum can transiently
+double-count or miss one retiring span (read acc before +=, span after
+reset misses it; acc after +=, span before reset double-counts), which
+also means successive raw reads are not monotone -- the seqlock read is
+what makes remote monotonicity real.
+
+Self-reads need none of that: perform them inside WITHOUT-GCING with
+interrupts disabled and no allocation between the loads (a handful of
+SAP-REFs, or one alien call, see below), and no retirement can
+intervene: the thread doesn't enter lisp_alloc while not allocating,
+and stop-the-world is deferred. Exact, always.
+
+exited_thread_bytes_allocated is written by dying threads concurrently
+with process-total readers: update it with an atomic add (or under
+all_threads_lock, which unregister_thread takes moments later anyway);
+readers of the process total take the same lock or accept the sub-word
+race, 32-bit again preferring the lock.
+
+Read API
+========
+C helper, doing classification where the page table lives:
+
+    uint64_t thread_allocated_bytes(struct thread* th) {
+        // accumulator + open dynamic-space spans; the caller
+        // guarantees th is stable (self, stopped, storage-locked).
+        uint64_t sum = th->allocated_bytes;
+        for each of th's six TLABs r:
+            if (r->start_addr && find_page_index(r->start_addr) >= 0)
+                sum += (char*)r->free_pointer - (char*)r->start_addr;
+        return sum;
+    }
+
+The find_page_index >= 0 guard excludes arena-backed spans (arena memory
+is outside the page table), mirroring the skip in sync_close_regions, so
+open-span sums and retirement credits classify identically.
+
+Lisp:
+
+    SB-THREAD:THREAD-BYTES-CONSED &optional (thread *current-thread*)
+      => (unsigned-byte 64)
+
+  * thread eq *current-thread*: WITHOUT-GCING + alien call (or inline
+    SAP-REF loop): exact at the instant of the call.
+  * live other thread: under the storage-lock liveness protocol, using
+    the seqlock read: exact at some instant within the call.
+  * dead thread: the instance's final-total slot: exact.
+
+Process-wide precise total (name subject to bikeshed;
+SB-THREAD::TOTAL-BYTES-CONSED or an argument convention on the above,
+paralleling ALLOCATOR-HISTOGRAM's :ALL):
+exited_thread_bytes_allocated + sum of THREAD-BYTES-CONSED over
+%LIST-ALL-THREADS. Each addend is monotone; the sum as read is not a
+snapshot across threads, which is fine for its telemetry purpose and
+should be documented.
+
+TIME: sb-impl::time-get-sys-info's (GET-BYTES-CONSED) becomes
+(THREAD-BYTES-CONSED), making TIME's "bytes consed" line mean "consed
+by this thread during the timed form" -- unpolluted by sibling threads,
+and no longer crediting the timed thread for work done by helpers it
+spawned. Both are behavior changes for multithreaded programs and the
+second is arguably information loss for fork/join code, so this step
+ships separately with a NEWS entry (and PROFILE, which has the same
+global-counter problem, can follow the same path later).
+
+Arenas
+======
+When a thread runs inside WITH-ARENA, its mixed/cons TLAB spans point
+into arena memory and retire through different paths: replaced in situ
+by handle_arena_alloc's case 1, discarded by gc_set_region_empty when
+leaving the arena, and skipped (p < 0) by every heap close funnel.
+Arena consing is therefore invisible to the heap counter by
+construction, which is the correct default: GET-BYTES-CONSED has the
+same scope, and arenas already meter themselves (arena_bytes_used,
+uw_bytes_wasted).
+
+Phase 2 adds a parallel thread slot arena-allocated-bytes with credits
+in exactly three places, all in arena.c and all with self as owner:
+handle_arena_alloc case 1 (credit the replaced span's delta -- note the
+symmetry: uw_bytes_wasted already accumulates end_addr - free_pointer
+there, i.e. the waste; the new credit is free_pointer - start_addr, the
+use), handle_arena_alloc case 2 (direct claim: credit nbytes), and
+switch_to_arena's leaving direction (credit each span's delta before
+gc_set_region_empty). Readers classify open spans to the arena counter
+when find_page_index(start_addr) < 0 while th->arena is set. Retirement
+of arena spans while OTHER threads read is covered by the same
+accumulator-seqlock (the arena slot participates in the A1/A2 check).
+
+Odds and ends per configuration
+===============================
+  * #-sb-thread (non-x86-64): the TLABs are the static-space
+    main_thread_*_region blocks rather than thread-struct slots. All
+    funnels still receive the (single) struct thread explicitly, so
+    nothing changes; the counter equals the precise process total.
+    x86-64 keeps TLABs in the thread struct even unthreaded.
+  * #+sb-safepoint vs. signal-based STW: both close remote TLABs only
+    with the world stopped, via funnel 3. No difference.
+  * Foreign call-in threads: attach starts the counter at zero (the
+    explicit reset in alloc_thread_struct covers recycled structs);
+    detach rolls the total into exited_thread_bytes_allocated via
+    unregister_thread like any exit. A thread that attaches N times
+    contributes N disjoint counting epochs, consistent with each epoch
+    having its own THREAD instance.
+  * make_list / listify_rest_arg: their partial requests bump cons-TLAB
+    spans through lisp_alloc; span accounting captures exactly the
+    conses produced, across any number of discontiguous pages.
+  * alloc_lisp_thread_instance: a new thread's THREAD instance and
+    histogram vector are consed by the *creating* thread through its own
+    TLAB (gc_general_alloc on the parent's region) and are correctly
+    charged to the parent.
+  * Heap exhaustion, unwinds: credits precede the operations that can
+    signal; an aborted request is never counted, a retired span always
+    is.
+  * save-lisp-and-die: the surviving thread's slot value is saved with
+    the image; GC-REINIT zeroes exited_thread_bytes_allocated (matching
+    *N-BYTES-FREED-OR-PURIFIED* treatment). Whether the main thread's
+    own counter should also restart from zero on core startup follows
+    whatever GET-BYTES-CONSED's "since the program began" ends up
+    meaning; the mechanism supports either by (not) zeroing one slot in
+    thread reinit.
+
+Alternatives considered
+=======================
+  * Instrument the fast path (extend #+allocation-size-histogram):
+    rejected as the primary mechanism for the reasons it is a non-default
+    feature today: per-allocation-site cost and code growth, per-backend
+    assembly work, and it still misses the C-only paths. It remains
+    complementary (size *distributions*), and on builds that have it,
+    equality between tot-bytes-alloc-{boxed,unboxed} and this counter
+    over single-threaded workloads is a powerful cross-check test.
+  * Credit spans at open (subtract waste at close): same set of hook
+    sites plus one more quantity to plumb, transient overcount in the
+    meantime, no benefit.
+  * Infer the owner inside gc_close_region by address arithmetic
+    (container_of against the six TLAB offsets): saves passing an owner
+    at ~5 funnels, but must also recognize global regions, on-stack test
+    regions, and static-space main-thread regions, and breaks silently
+    if a region is ever hosted anywhere new. Explicit ownership at the
+    funnels is smaller than it looks and self-documenting.
+  * Walk the page table attributing pages to threads at read time:
+    impossible; pages don't record their allocating thread, and most are
+    multiplexed across threads over time.
+  * Sampling: solves a different problem (attribution profiles), not
+    counting.
+
+Costs
+=====
+Fast path: zero. No vop changes anywhere; the byte-displacement slot
+budget near the thread base is untouched.
+Slow path: one predicated 64-bit add per TLAB retirement (roughly once
+per GENCGC_PAGE_BYTES of allocation per TLAB, alongside a mutex acquire
+and page-table work that dwarf it) and one add per large/code
+allocation. The release barrier on the credit is free on x86-64 and a
+cheap store-release on arm64, again only at retirement frequency.
+Memory: 8 bytes per thread (16 on 32-bit) + the instance slot(s) + one
+global; +8/thread more for the phase-2 arena counter.
+Reader: ~14 loads and a compare, or one alien call; a bignum cons for
+results above most-positive-fixnum on 32-bit.
+
+Invariants and testing
+======================
+INV1 (exactness, single thread): for a quiesced thread, the counter
+delta across a block equals the sum of PRIMITIVE-OBJECT-SIZE of every
+object the block allocated (plus the reader's own consing if any; the
+test uses a non-consing read of the own-thread counter). Run the same
+test compiled at various policies so allocations take inline, quick-C,
+refill, and large paths; include a &REST-heavy call (listify), MAKE-LIST
+crossing multiple cons pages, MAKE-ARRAY over LARGE_OBJECT_SIZE, and
+COMPILE (code_region path).
+INV2 (GC-independence): (GC :FULL T) between reads changes nothing:
+GC neither credits nor debits mutator counters, and the stop-world
+closes move bytes from open-span sum to accumulator, leaving the total
+fixed. This is a sharp test that the close funnels neither drop nor
+double-credit.
+INV3 (conservation): after joining N worker threads of known workloads,
+each final total is exact, and exited_thread_bytes_allocated equals
+their sum. The process-wide total is monotone across any interleaving of
+worker lifetimes and GCs.
+INV4 (relation to the global counter): over a stress run,
+sum(per-thread) <= global bytes-allocated-derived figure, with the gap
+explained by fillers/waste (gencgc) or page-granularity (mark-region);
+assert the direction and a generous bound, not equality.
+INV5 (remote-read sanity): a reader thread hammering seqlock reads of a
+busy allocator observes non-decreasing values; raw (non-seqlock) reads
+are allowed to regress transiently -- test documents rather than
+forbids this.
+Cross-check on an #+allocation-size-histogram build: boxed+unboxed
+totals == counter for single-threaded runs minus the known C-only
+allocations (or just assert <== with slack).
+Backends/targets: gencgc and #+mark-region-gc runs of the same tests;
+x86-64, arm64, and one 32-bit target minimally; #+system-tlabs and
+arena builds run the arena tests (phase 2). Existing harness homes:
+tests/alloc-histo.impure.lisp (histogram precedent) and a new
+tests/thread-alloc-count.impure.lisp.
+
+Implementation plan
+===================
+Phase 1 (core, one commit-series):
+  objdef slot + genesis; thread_credit_span helper; gencgc.c and
+  pmrgc.c lisp_alloc credits; sync_close_regions owner parameter and
+  its three callers; switch_to_arena heap-close credit;
+  alloc_thread_struct zeroing; unregister_thread rollup + instance
+  write; thread_allocated_bytes(); SB-THREAD:THREAD-BYTES-CONSED with
+  the three read protocols; tests INV1-INV3.
+Phase 2: arena-allocated-bytes and its three arena.c credits + reader
+  classification + tests.
+Phase 3: TIME (and later PROFILE) switch to the thread-local counter;
+  NEWS + manual (threading chapter) entries; consider exporting the
+  process-wide precise total and deprecating nothing -- GET-BYTES-CONSED
+  keeps its meaning and its warts for compatibility.
+
+Open questions
+==============
+  * Naming: THREAD-BYTES-CONSED (traditional) vs THREAD-ALLOCATED-BYTES
+    (matches the slot and other runtimes' terminology). The former reads
+    better next to GET-BYTES-CONSED; this document assumes it.
+  * Should the phase-2 arena counter instead fold into the same slot
+    under a "count everything the thread allocates anywhere" semantic?
+    Separate slots preserve both readings (sum them for "everything");
+    folding loses the heap-only reading, so: separate.
+  * Whether TIME should additionally print process-global consing when
+    it differs materially from the thread's (cheap to compute; possibly
+    noisy). Deferred to the phase-3 patch discussion.
+  * Immobile-space/permgen crediting (symbols, layouts, fdefns) --
+    mechanically easy at their serialized allocators, but changes the
+    counter's alignment with GET-BYTES-CONSED; if added, likely behind
+    the same decision made for the global metric.
