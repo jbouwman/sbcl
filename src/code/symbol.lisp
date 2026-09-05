@@ -381,7 +381,11 @@ distinct from the global value. Can also be SETF."
         ;; I don't feel like writing a different variant of POSSIBLY-FROB-TO-HEAP just
         ;; to satisfy pedants. However, only users of arenas would detect
         ;; a change of element-type, if they care at all, which they don't.
-        (if (or (dynamic-space-obj-p name) (read-only-space-obj-p name))
+        ;; Symbols always live in the global heap, so a name owned by a
+        ;; process heap must be copied out too.
+        (if (or (and (dynamic-space-obj-p name)
+                     #+sb-process-heaps (not (sb-vm::process-owned-p name)))
+                (read-only-space-obj-p name))
             name ; use as-is
             (possibly-base-stringize-to-heap name)))
        (()

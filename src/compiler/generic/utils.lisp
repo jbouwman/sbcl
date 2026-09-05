@@ -595,22 +595,32 @@
                     smallest-f d n))
            (values (ceiling (expt 2 fraction-bits) d) fraction-bits)))))
 
+;;; The innermost (DECLARE (SB-C::TLAB kind)) in effect: :SYSTEM, :USER,
+;;; or NIL if there is none.
+(defun env-tlab-declaration (env)
+  (and env
+       (dolist (data (sb-c::lexenv-user-data env)
+                     (and (sb-c::lexenv-parent env)
+                          (env-tlab-declaration (sb-c::lexenv-parent env))))
+         (when (and (eq (first data) :declare)
+                    (eq (second data) 'sb-c::tlab))
+           (return (third data))))))
+
 (defun env-system-tlab-p (env)
   #-system-tlabs (declare (ignore env))
   #+system-tlabs
-  (or sb-c::*force-system-tlab*
-      (and env
-           (dolist (data (sb-c::lexenv-user-data env)
-                         (and (sb-c::lexenv-parent env)
-                              (env-system-tlab-p (sb-c::lexenv-parent env))))
-             (when (and (eq (first data) :declare)
-                        (eq (second data) 'sb-c::tlab))
-               (return (eq (third data) :system)))))))
+  (let ((declaration (env-tlab-declaration env)))
+    (if declaration
+        (eq declaration :system)
+        sb-c::*force-system-tlab*)))
 
 (defun system-tlab-p (type node)
   #-system-tlabs (declare (ignore type node))
   #+system-tlabs
-  (or sb-c::*force-system-tlab*
+  (or (and sb-c::*force-system-tlab*
+           ;; An explicit :USER declaration overrides the file-wide default.
+           (not (and node
+                     (eq (env-tlab-declaration (sb-c::node-lexenv node)) :user))))
       (let ((typename (cond ((sb-kernel::layout-p type)
                              (classoid-name (layout-classoid type)))
                             ((sb-kernel::defstruct-description-p type)

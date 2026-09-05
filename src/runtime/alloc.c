@@ -23,6 +23,7 @@
 #include "genesis/symbol.h"
 #include "code.h"
 #include "fiber.h"
+#include "process-heap.h"
 
 lispobj* atomic_bump_static_space_free_ptr(int nbytes)
 {
@@ -814,6 +815,9 @@ void free_thread_struct(struct thread *th)
     struct extra_thread_data *extra_data = thread_extra_data(th);
 #ifdef LISP_FEATURE_SB_FIBER
     sb_fiber_release_registered(th);
+#endif
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    process_heap_thread_exit(th);
 #endif
     if (extra_data->arena_savearea) free(extra_data->arena_savearea);
     os_deallocate((os_vm_address_t) th->os_address, THREAD_STRUCT_SIZE);

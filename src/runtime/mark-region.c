@@ -25,6 +25,7 @@
 #include "tiny-lock.h"
 #include "gc-thread-pool.h"
 #include "queue-suballocator.h"
+#include "process-heap.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
@@ -90,6 +91,42 @@ static uword_t get_time() {
   clock_gettime(CLOCK_MONOTONIC, &t);
   return t.tv_sec * 1000000 + t.tv_nsec/1000;
 }
+
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+/* A process heap's local collection runs on the heap's own thread, at
+ * the same time as other threads' local collections, so everything the
+ * global collector keeps in globals lives here for it: what to collect,
+ * the grey queue (traced by the one thread, without the thread pool)
+ * and the weak-object lists that pmrgc-impl.h reaches through
+ * thread-local pointers.  One per thread, reused across collections. */
+struct ph_local_gc {
+  struct process_heap *heap;
+  uint32_t owner;
+  generation_index_t gen;
+  struct Qblock *grey_list;      /* full blocks waiting to be traced */
+  sword_t blocks_in_flight;
+  struct Qblock *free_blocks;    /* malloc'd blocks kept for reuse */
+  struct weak_pointer *wp_chain;
+  struct cons *wvectors;
+  struct hash_table *whash_tables;
+  struct hopscotch_table wobjects;
+  struct cons *private_recycle;  /* GC-private conses: free list and chunks */
+  struct cons *private_chunks;
+  int private_avail;
+};
+/* Non-NULL on a thread while it collects a process heap. */
+static _Thread_local struct ph_local_gc *ph_local;
+static inline generation_index_t gen_to_collect(void);
+static inline uint32_t process_heap_target_owner(void) { return ph_local ? ph_local->owner : 0; }
+
+/* Defined in process-heap-gc.inc, included at the end of this file. */
+static line_index_t process_heap_region_limit(struct alloc_region *region, line_index_t page_end);
+static void process_heap_note_outgoing(lispobj object);
+/* Owner of the block holding NP, 0 for global memory or outside dynamic space. */
+static inline uint32_t process_heap_owner_of_native(void *np) {
+  return find_page_index(np) < 0 ? 0 : block_owner[address_block(np)];
+}
+#endif
 
 static void allocate_bitmap(uword_t **bitmap, uword_t size,
                             const char *description) {
@@ -168,6 +205,9 @@ void pre_search_for_small_space(sword_t nbytes, int page_type,
   for (page_index_t page = state->page; page < end; page++) {
     if (page_bytes_used(page) <= GENCGC_PAGE_BYTES - nbytes &&
         !target_pages[page] &&
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+        !ph_process_page[page] &&
+#endif
         ((state->allow_free_pages && page_free_p(page)) ||
          (page_table[page].type == page_type &&
           page_table[page].gen != PSEUDO_STATIC_GENERATION))) {
@@ -225,6 +265,11 @@ bool try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region
   if (!region->start_addr) return 0;
   /* We search to the end of this page. */
   line_index_t end = address_line(PTR_ALIGN_UP(region->end_addr, GENCGC_PAGE_BYTES));
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  /* A process heap's region grows only through its heap's slow path,
+   * which accounts for every line it claims. */
+  end = process_heap_region_limit(region, end);
+#endif
   return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
 }
 
@@ -240,6 +285,9 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
   for (page_index_t where = start->page; where < end; where++) {
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
         !target_pages[where] &&
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+        !ph_process_page[where] &&
+#endif
         ((start->allow_free_pages && page_free_p(where)) ||
          (page_table[where].type == page_type &&
           page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
@@ -331,17 +379,32 @@ CPU_SPLIT
 void mr_update_closed_region(struct alloc_region *region, generation_index_t gen) {
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
+  line_index_t first = page_to_line(the_page), limit = first + LINES_PER_PAGE;
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  /* A process page may host regions of several heaps at once, so it has
+   * no open flag, and closing marks only the region's own lines: a heap
+   * accounts for exactly the lines its regions cover, and the free lines
+   * around them stay free for its later regions. */
+  bool process_page = ph_process_page[the_page];
+  if (process_page) {
+    first = address_line(region->start_addr);
+    limit = address_line(region->end_addr);
+  } else
+#endif
   if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
     lose("Page %d wasn't open", the_page);
 
   /* Mark the lines as allocated. */
   unsigned char *lines = line_bytemap;
-  for_lines_in_page (l, the_page) {
+  for (line_index_t l = first; l < limit; l++) {
     /* Remember to copy mark bits set by GC and fresh bits set
      * by the allocator. */
     unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
     lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
   }
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  if (!process_page)
+#endif
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
 }
@@ -349,6 +412,13 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
 /* Marking */
 
 static generation_index_t generation_to_collect = 0;
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+static inline generation_index_t gen_to_collect(void) {
+  return ph_local ? ph_local->gen : generation_to_collect;
+}
+#else
+#define gen_to_collect() generation_to_collect
+#endif
 
 static inline uword_t object_index(lispobj object) {
   return (uword_t)((object - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS);
@@ -373,12 +443,21 @@ static bool set_mark_bit(lispobj object) {
   return ((~atomic_fetch_or(mark_bitmap + word_index, bit)) >> bit_index) & 1;
 }
 
+
 static bool in_dynamic_space(lispobj object) {
   return find_page_index((void*)object) != -1;
 }
 
 bool taggedptr_alivep_impl(lispobj object) {
-  return !in_dynamic_space(object) || object_marked_p(object) || gc_gen_of(object, 0) > generation_to_collect;
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  /* Objects outside the domain being collected are never reclaimed by
+   * this collection, so they are alive as far as it is concerned. */
+  if (!in_dynamic_space(object)) return 1;
+  if (block_owner[address_block((void*)object)] != process_heap_target_owner()) return 1;
+#else
+  if (!in_dynamic_space(object)) return 1;
+#endif
+  return object_marked_p(object) || gc_gen_of(object, 0) > gen_to_collect();
 }
 
 /* The number of blocks on the grey list and being processed.
@@ -398,6 +477,19 @@ static _Thread_local struct Qblock *output_block;
 
 static struct Qblock *grab_qblock() {
   struct Qblock *block;
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  if (ph_local) {
+    if (ph_local->free_blocks) {
+      block = ph_local->free_blocks;
+      ph_local->free_blocks = block->next;
+    } else {
+      block = checked_malloc(QBLOCK_BYTES);
+    }
+    block->count = 0;
+    ph_local->blocks_in_flight++;
+    return block;
+  }
+#endif
   if (recycle_list) {
     block = recycle_list;
     recycle_list = block->next;
@@ -411,6 +503,14 @@ static struct Qblock *grab_qblock() {
 static void recycle_qblock(struct Qblock *block) {
   if (block->count == -1) lose("%p is already dead", block);
   block->count = -1;
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  if (ph_local) {
+    block->next = ph_local->free_blocks;
+    ph_local->free_blocks = block;
+    ph_local->blocks_in_flight--;
+    return;
+  }
+#endif
   block->next = recycle_list;
   recycle_list = block;
   atomic_fetch_add(&blocks_in_flight, -1);
@@ -451,14 +551,72 @@ static _Thread_local generation_index_t dirty_generation_source = 0;
 static _Thread_local bool dirty = 0;
 static _Thread_local lispobj *source_object;
 
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+static lispobj *find_object(uword_t address, uword_t start);
+int process_heap_debug;
+#endif
 static void mark(lispobj object, lispobj *where, enum source source_type) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    /* A global collection traces only global objects; a local collection
+     * traces only its heap's objects. Everything else is a leaf. */
+    {
+      page_index_t page = find_page_index((void*)object);
+      uint32_t owner = block_owner[address_block((void*)object)];
+      uint32_t target = process_heap_target_owner();
+      if (owner != target) {
+        /* A local collection remembers the global objects it saw. */
+        if (target && !owner) process_heap_note_outgoing(object);
+        if (process_heap_check_refs && source_object && owner) {
+          uint32_t src = process_heap_owner_of_native(source_object);
+          if (src != owner) process_heap_note_violation(source_object, where, object);
+        }
+        return;
+      }
+      /* Every allocated process object is walked as a root of a global
+       * collection, dead ones included, and a dead object may still
+       * point at global memory that was freed and reused since.  Treat
+       * such edges as ambiguous: only mark an actual object start. */
+      if (target == 0 && source_object
+          && process_heap_owner_of_native(source_object)) {
+        if (page_free_p(page)) return;
+        lispobj *found = find_object(object, DYNAMIC_SPACE_START);
+        if (found != native_pointer(object)) return;
+      }
+      if (process_heap_debug) {
+        lispobj *np = native_pointer(object);
+        int cons_page = (page_table[page].type & PAGE_TYPE_MASK) == PAGE_TYPE_CONS;
+        int bad = page_free_p(page)
+          || (listp(object) ? !cons_page : (cons_page || !is_header(*np)))
+          || (owner && !listp(object) && !allocation_bit_marked(np)
+              && !IS_FRESH(line_bytemap[address_line(np)]));
+        if (bad) {
+          fprintf(stderr, "ph BAD MARK: obj %p (word %lx) page %d type %x owner %u free %d "
+                  "line %x alloc %d where %p source %p (owner %u) target-owner %u gc_active %d\n",
+                  (void*)object, (unsigned long)*np, (int)page, page_table[page].type, owner,
+                  page_free_p(page), line_bytemap[address_line(np)], allocation_bit_marked(np),
+                  (void*)where, (void*)source_object,
+                  source_object ? process_heap_owner_of_native(source_object) : 0,
+                  target, gc_active_p);
+          if (source_object) {
+            fprintf(stderr, "  source header %lx size %ld page %d type %x line %x alloc %d\n",
+                    (unsigned long)*source_object, (long)object_size(source_object),
+                    (int)find_page_index(source_object),
+                    page_table[find_page_index(source_object)].type,
+                    line_bytemap[address_line(source_object)],
+                    allocation_bit_marked(source_object));
+          }
+          lose("bad object marked");
+        }
+      }
+    }
+#endif
 
     lispobj *np = native_pointer(object);
     if (gc_gen_of(object, 0) < dirty_generation_source)
       /* Used to find dirty pages in mr_scavenge_root_gens. */
       dirty = 1;
-    if (gc_gen_of(object, 0) > generation_to_collect)
+    if (gc_gen_of(object, 0) > gen_to_collect())
       return;
 
     /* Fix up embedded simple-fun objects. */
@@ -475,10 +633,18 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
         struct Qblock *next = grab_qblock();
         if (output_block) {
-          acquire_lock(&grey_list_lock);
-          output_block->next = grey_list;
-          grey_list = output_block;
-          release_lock(&grey_list_lock);
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+          if (ph_local) {
+            output_block->next = ph_local->grey_list;
+            ph_local->grey_list = output_block;
+          } else
+#endif
+          {
+            acquire_lock(&grey_list_lock);
+            output_block->next = grey_list;
+            grey_list = output_block;
+            release_lock(&grey_list_lock);
+          }
         }
         output_block = next;
       }
@@ -556,7 +722,16 @@ static bool work_to_do(struct Qblock **where) {
     *where = output_block;
     output_block = NULL;
     return 1;
-  } else {
+  }
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  else if (ph_local) {
+    if (!ph_local->grey_list) return 0;
+    *where = ph_local->grey_list;
+    ph_local->grey_list = (*where)->next;
+    return 1;
+  }
+#endif
+  else {
     acquire_lock(&grey_list_lock);
     if (grey_list) {
       *where = grey_list;
@@ -571,11 +746,17 @@ static bool work_to_do(struct Qblock **where) {
 
 static _Atomic(uword_t) traced;          /* Number of objects traced. */
 static bool threads_did_any_work;
-static void trace_step() {
+static inline bool blocks_remain(void) {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  if (ph_local) return ph_local->blocks_in_flight != 0;
+#endif
+  return atomic_load(&blocks_in_flight) != 0;
+}
+static bool trace_step() {
   uword_t local_traced = 0, start_time = get_time(), running_time = 0;
   bool did_anything = 0;
   uword_t backoff = 1;
-  while (atomic_load(&blocks_in_flight)) {
+  while (blocks_remain()) {
     /* Back off if we're out of work, since there isn't anything
      * more intelligent we can do, I think. */
     struct Qblock *block;
@@ -609,16 +790,22 @@ static void trace_step() {
     recycle_qblock(block);
     running_time += get_time() - trace_start;
   }
-  if (did_anything) threads_did_any_work = 1;
   atomic_fetch_add(&traced, local_traced);
   atomic_fetch_add(&meters.trace_alive, get_time() - start_time);
   atomic_fetch_add(&meters.trace_running, running_time);
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  if (ph_local) return did_anything;
+#endif
   recycle_list = NULL;
+  return did_anything;
+}
+static void trace_step_on_pool() {
+  if (trace_step()) threads_did_any_work = 1;
 }
 
 static bool parallel_trace_step() {
   threads_did_any_work = 0;
-  run_on_thread_pool(trace_step);
+  run_on_thread_pool(trace_step_on_pool);
   suballoc_release(&grey_suballocator);
   return threads_did_any_work;
 }
@@ -628,6 +815,13 @@ static bool parallel_trace_step() {
 static void mark_weak(lispobj obj) { mark(obj, NULL, SOURCE_NORMAL); }
 
 static void __attribute__((noinline)) trace_everything() {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  /* A local collection traces on its own thread alone. */
+  if (ph_local) {
+    while (trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark_weak);
+    return;
+  }
+#endif
   while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark_weak);
 }
 
@@ -708,7 +902,11 @@ static lispobj *find_object(uword_t address, uword_t start) {
   } else
     /* Don't compute allocations if the GC is not running, they won't
        be preserved for any future invocations */
-    if (!fresh || (gc_active_p && (compute_allocations(np, true), 1))) {
+    if (!fresh || ((gc_active_p
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+                    || (ph_local && block_owner[address_block(np)] == ph_local->owner)
+#endif
+                    ) && (compute_allocations(np, true), 1))) {
       uword_t first_bit_index = object_index(address);
       sword_t first_word_index = first_bit_index / N_WORD_BITS;
       sword_t last_word_index = mark_bitmap_word_index((void*)start);
@@ -785,6 +983,10 @@ static void local_smash_weak_pointers()
     }
     weak_vectors = 0;
 
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    /* Symbols never live in a process heap. */
+    if (ph_local) return;
+#endif
     if (!tlsindex_to_symbol_map) return;
     int i;
     int n_elements = dynamic_values_bytes / bytes_per_tls_symbol;
@@ -801,6 +1003,9 @@ static void local_smash_weak_pointers()
 static void reset_statistics() {
   traced = 0;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    if (ph_process_page[p]) continue;
+#endif
     if (page_single_obj_p(p) &&
         (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION)) {
       generations[page_table[p].gen].bytes_allocated -= page_bytes_used(p);
@@ -811,34 +1016,40 @@ static void reset_statistics() {
 
 /* Pulled out these functions to clue auto-vectorisation. */
 CPU_SPLIT
-static page_bytes_t count_dead_bytes(page_index_t p) {
-  unsigned char dead = ENCODE_GEN(generation_to_collect);
+static page_bytes_t count_dead_lines(line_index_t first, line_index_t end) {
+  unsigned char dead = ENCODE_GEN(gen_to_collect());
   page_bytes_t n = 0;
   unsigned char *lines = line_bytemap;
-  for_lines_in_page(l, p)
+  for (line_index_t l = first; l < end; l++)
     if (UNFRESHEN_GEN(lines[l]) == dead) n++;
   return n * LINE_SIZE;
 }
+static page_bytes_t count_dead_bytes(page_index_t p) {
+  return count_dead_lines(page_to_line(p), page_to_line(p + 1));
+}
 
 CPU_SPLIT
-static void sweep_small_page(page_index_t p) {
-  unsigned char unmarked = ENCODE_GEN(generation_to_collect),
+static void sweep_small_lines(line_index_t first, line_index_t end) {
+  unsigned char unmarked = ENCODE_GEN(gen_to_collect()),
                 marked = MARK_GEN(unmarked);
   /* Some of the other algorithms make sense with words, this one
    * makes sense with bytes. Go figure. */
   unsigned char *marks = (unsigned char*)mark_bitmap,
                 *allocs = (unsigned char*)allocation_bitmap,
                 *lines = line_bytemap;
-  for_lines_in_page(l, p) {
+  for (line_index_t l = first; l < end; l++) {
     unsigned char new = marks[l], old = allocs[l];
     allocs[l] = (UNMARK_GEN(lines[l]) == unmarked) ? new : old;
   }
-  for_lines_in_page(l, p) {
+  for (line_index_t l = first; l < end; l++) {
     unsigned char line = UNFRESHEN_GEN(lines[l]);
     lines[l] = (line == unmarked) ? 0 : (line == marked) ? unmarked : line;
   }
-  for_lines_in_page(l, p)
+  for (line_index_t l = first; l < end; l++)
     marks[l] = 0;
+}
+static void sweep_small_page(page_index_t p) {
+  sweep_small_lines(page_to_line(p), page_to_line(p + 1));
 }
 
 static _Atomic(page_index_t) last_page_processed;
@@ -853,6 +1064,13 @@ static void sweep_lines() {
   page_index_t claim, limit;
   for_each_claim (claim, limit) {
     for (page_index_t p = claim; p < limit; p++) {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+      if (ph_process_page[p]) {
+        if (generation_to_collect == PSEUDO_STATIC_GENERATION && !page_single_obj_p(p))
+          generations[0].bytes_allocated += page_bytes_used(p);
+        continue;
+      }
+#endif
       if (!page_free_p(p) && !page_single_obj_p(p)) {
         if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
           unsigned char *marks = (unsigned char*)mark_bitmap,
@@ -897,6 +1115,15 @@ static void __attribute__((noinline)) sweep_pages() {
    * reuse partially filled pages, so it's not useful for allocation */
   next_free_page = page_table_pages;
   for (page_index_t p = 0; p < page_table_pages; p++) {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    if (ph_process_page[p]) {
+      bytes_allocated += page_bytes_used(p);
+      if (page_single_obj_p(p) && generation_to_collect == PSEUDO_STATIC_GENERATION)
+        generations[0].bytes_allocated += page_bytes_used(p);
+      next_free_page = p + 1;
+      continue;
+    }
+#endif
     /* Rather than clearing marks for every page, we only clear marks for
      * pages which were live before, as a dead page cannot have any marks
      * that we need to clear. */
@@ -1005,6 +1232,12 @@ static void trace_static_roots() {
 void mr_preserve_ambiguous(uword_t address) {
   page_index_t p = find_page_index(native_pointer(address));
   if (p > -1) {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    /* A local collection must not even look at other heaps' blocks:
+     * their owners may be allocating into them right now. */
+    if (ph_local && block_owner[address_block(native_pointer(address))] != ph_local->owner)
+      return;
+#endif
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START);
     if (obj) {
       mark(compute_lispobj(obj), NULL, SOURCE_NORMAL);
@@ -1028,6 +1261,9 @@ void mr_preserve_range(lispobj *from, sword_t nwords) {
  * allocate into pages we intend to evacuate. */
 void mr_preserve_leaf(lispobj obj) {
   if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    if (block_owner[address_block((void*)obj)] != process_heap_target_owner()) return;
+#endif
     set_mark_bit(obj);
     lispobj *n = native_pointer(obj);
     mark_lines(n);
@@ -1079,118 +1315,142 @@ static void scavenge_root_object(generation_index_t gen, lispobj *where) {
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 static _Atomic(uword_t) root_objects_checked = 0, dirty_root_objects = 0;
+/* Scavenge the marked cards of page I for pointers into the generation
+ * being collected.  Shared by the global card scan and by a generational
+ * process-heap collection, which scans only that heap's pages. */
+static void CPU_SPLIT scavenge_root_lines(page_index_t i, line_index_t first_line,
+                                          line_index_t end_line, uword_t *prefixes_checked);
+static void CPU_SPLIT scavenge_root_page(page_index_t i, uword_t *prefixes_checked) {
+  unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
+  if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(i)) return;
+  if (page_single_obj_p(i)) {
+    if (page_table[i].gen > gen_to_collect()) {
+      int widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
+      switch (widetag) {
+      case SIMPLE_VECTOR_WIDETAG:
+      case WEAK_POINTER_WIDETAG: {
+        /* Scavenge a page of a vector. */
+        source_object = (lispobj*)(page_address(i) - page_scan_start_offset(i));
+        dirty_generation_source = page_table[i].gen;
+        /* page_address(i) + page_words_used(i) only demarcates
+         * the end of a (sole) object on the page with this heap
+         * layout when the object is large. */
+        lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+        lispobj *start = (lispobj*)page_address(i);
+        for (int j = 0, card = addr_to_card_index(start);
+             j < CARDS_PER_PAGE;
+             j++, card++, start += WORDS_PER_CARD) {
+          if (card_dirtyp(card)) {
+            lispobj *card_end = start + WORDS_PER_CARD;
+            lispobj *end = (limit < card_end) ? limit : card_end;
+            dirty = 0;
+            for (lispobj *p = start; p < end; p++)
+              mark(*p, p, SOURCE_NORMAL);
+            update_card_mark(card, dirty);
+          }
+        }
+        break;
+      }
+      case CODE_HEADER_WIDETAG: {
+        int card = addr_to_card_index(page_address(i));
+        if (page_starts_contiguous_block_p(i) && card_dirtyp(card)) {
+          source_object = (lispobj*)page_address(i);
+          dirty_generation_source = page_table[i].gen, dirty = 0;
+          trace_other_object((lispobj*)page_address(i));
+          update_card_mark(card, dirty);
+        }
+        break;
+      }
+      default:
+        /* How odd. Just remove the card marks. */
+        for (int j = 0, card = page_to_card_index(i); j < CARDS_PER_PAGE; j++, card++)
+          gc_card_mark[card] = CARD_UNMARKED;
+      }
+    }
+  } else {
+    scavenge_root_lines(i, page_to_line(i), page_to_line(i + 1), prefixes_checked);
+  }
+}
+
+/* Scavenge the marked cards of the lines [FIRST_LINE, END_LINE) of small
+ * page I.  A process heap's collection passes the runs of blocks it
+ * owns, so that neighbouring heaps' cards are left alone. */
+static void CPU_SPLIT scavenge_root_lines(page_index_t i, line_index_t first_line,
+                                          line_index_t end_line, uword_t *prefixes_checked) {
+  {
+    /* Scavenge every object in every card and try to re-protect. */
+    lispobj *start = (lispobj*)line_address(first_line);
+    int first_card = addr_to_card_index(start);
+    unsigned int ncards = end_line - first_line;
+    /* As cards are as large as lines, we can blast through
+     * and make a bitmap of interesting objects to scavenge. */
+    unsigned char mask[CARDS_PER_PAGE];
+    unsigned char *cards = gc_card_mark + first_card,
+                  *lines = line_bytemap + first_line;
+    int gen = gen_to_collect();
+    for (unsigned int n = 0; n < ncards; n++) {
+      unsigned char line = lines[n], mark = cards[n];
+      mask[n] = (DECODE_GEN(line) > gen && mark != CARD_UNMARKED) ? 0xFF : 0x00;
+    }
+    /* Reset mark, which scavenging might re-instate. */
+    for (unsigned int n = 0; n < ncards; n++)
+      cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
+
+    unsigned char *allocations = (unsigned char*)allocation_bitmap;
+    line_index_t last_seen = -1;
+    for (unsigned int n = 0; n < ncards; n++)
+      if (mask[n]) {
+        line_index_t this_line = first_line + n;
+        unsigned char a = allocations[this_line], this_gen = DECODE_GEN(line_bytemap[this_line]);
+        bool worked = 0;
+        dirty = 0;
+        /* Check if there's a new->old word belonging to a
+         * SIMPLE-VECTOR overlapping this card. */
+        for (int word = 0; word < 2 * (a ? __builtin_ctz(a) : 8); word++)
+          if (gc_gen_of(start[WORDS_PER_CARD * n + word], PSEUDO_STATIC_GENERATION) < this_gen) {
+            (*prefixes_checked)++;
+            lispobj *before = find_object((uword_t)line_address(this_line), (uword_t)start);
+            /* Check if we already scavenged this vector before, too. */
+            if (before
+                && widetag_of(before) == SIMPLE_VECTOR_WIDETAG
+                && address_line(before) > last_seen)
+              scavenge_root_object(this_gen, before);
+            /* Always dirty this card regardless of avoiding a
+             * re-scan or not, as we already found an interesting
+             * pointer. */
+            dirty = 1, worked = 1;
+            break;
+          }
+        while (a) {
+          worked = 1;
+          int bit = __builtin_ctzl(a);
+          scavenge_root_object(this_gen, start + WORDS_PER_CARD * n + 2 * bit);
+          a &= ~(1 << bit);
+        }
+        update_card_mark(first_card + n, dirty);
+        /* Only advance last_seen if we did any work here.
+         * If we always advance, we can confuse prefix scanning.
+         * Suppose a simple-vector spans cards 0, 1 and 2, and 1
+         * and 2 are dirtied. Card 1 has no interesting pointers on it,
+         * but sets last_seen = 1. Then we don't search the prefix of 2
+         * because address_line(before) == 0 which is less than 1. So
+         * we need last_seen to actually reflect the work we did. */
+        if (worked) last_seen = this_line;
+      }
+  }
+}
+
 static void CPU_SPLIT scavenge_root_gens_worker(void) {
   page_index_t claim, limit;
   uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0, prefixes_checked = 0;
   for_each_claim (claim, limit) {
     for (page_index_t i = claim; i < limit; i++) {
-      unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
-      if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(i)) continue;
-      if (page_single_obj_p(i)) {
-        if (page_table[i].gen > generation_to_collect) {
-          int widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
-          switch (widetag) {
-          case SIMPLE_VECTOR_WIDETAG:
-          case WEAK_POINTER_WIDETAG: {
-            /* Scavenge a page of a vector. */
-            source_object = (lispobj*)(page_address(i) - page_scan_start_offset(i));
-            dirty_generation_source = page_table[i].gen;
-            /* page_address(i) + page_words_used(i) only demarcates
-             * the end of a (sole) object on the page with this heap
-             * layout when the object is large. */
-            lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
-            lispobj *start = (lispobj*)page_address(i);
-            for (int j = 0, card = addr_to_card_index(start);
-                 j < CARDS_PER_PAGE;
-                 j++, card++, start += WORDS_PER_CARD) {
-              if (card_dirtyp(card)) {
-                lispobj *card_end = start + WORDS_PER_CARD;
-                lispobj *end = (limit < card_end) ? limit : card_end;
-                dirty = 0;
-                for (lispobj *p = start; p < end; p++)
-                  mark(*p, p, SOURCE_NORMAL);
-                update_card_mark(card, dirty);
-              }
-            }
-            break;
-          }
-          case CODE_HEADER_WIDETAG: {
-            int card = addr_to_card_index(page_address(i));
-            if (page_starts_contiguous_block_p(i) && card_dirtyp(card)) {
-              source_object = (lispobj*)page_address(i);
-              dirty_generation_source = page_table[i].gen, dirty = 0;
-              trace_other_object((lispobj*)page_address(i));
-              update_card_mark(card, dirty);
-            }
-            break;
-          }
-          default:
-            /* How odd. Just remove the card marks. */
-            for (int j = 0, card = page_to_card_index(i); j < CARDS_PER_PAGE; j++, card++)
-              gc_card_mark[card] = CARD_UNMARKED;
-          }
-        }
-      } else {
-        /* Scavenge every object in every card and try to re-protect. */
-        lispobj *start = (lispobj*)page_address(i);
-        int first_card = page_to_card_index(i);
-        line_index_t first_line = address_line(start);
-        /* As cards are as large as lines, we can blast through
-         * and make a bitmap of interesting objects to scavenge. */
-        unsigned char mask[CARDS_PER_PAGE];
-        unsigned char *cards = gc_card_mark + first_card,
-                      *lines = line_bytemap + first_line;
-        int gen = generation_to_collect;
-        for (unsigned int n = 0; n < CARDS_PER_PAGE; n++) {
-          unsigned char line = lines[n], mark = cards[n];
-          mask[n] = (DECODE_GEN(line) > gen && mark != CARD_UNMARKED) ? 0xFF : 0x00;
-        }
-        /* Reset mark, which scavenging might re-instate. */
-        for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
-          cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
-
-        unsigned char *allocations = (unsigned char*)allocation_bitmap;
-        line_index_t last_seen = -1;
-        for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
-          if (mask[n]) {
-            line_index_t this_line = address_line(start) + n;
-            unsigned char a = allocations[this_line], this_gen = DECODE_GEN(line_bytemap[this_line]);
-            bool worked = 0;
-            dirty = 0;
-            /* Check if there's a new->old word belonging to a
-             * SIMPLE-VECTOR overlapping this card. */
-            for (int word = 0; word < 2 * (a ? __builtin_ctz(a) : 8); word++)
-              if (gc_gen_of(start[WORDS_PER_CARD * n + word], PSEUDO_STATIC_GENERATION) < this_gen) {
-                prefixes_checked++;
-                lispobj *before = find_object((uword_t)line_address(this_line), (uword_t)page_address(i));
-                /* Check if we already scavenged this vector before, too. */
-                if (before
-                    && widetag_of(before) == SIMPLE_VECTOR_WIDETAG
-                    && address_line(before) > last_seen)
-                  scavenge_root_object(this_gen, before);
-                /* Always dirty this card regardless of avoiding a
-                 * re-scan or not, as we already found an interesting
-                 * pointer. */
-                dirty = 1, worked = 1;
-                break;
-              }
-            while (a) {
-              worked = 1;
-              int bit = __builtin_ctzl(a);
-              scavenge_root_object(this_gen, start + WORDS_PER_CARD * n + 2 * bit);
-              a &= ~(1 << bit);
-            }
-            update_card_mark(first_card + n, dirty);
-            /* Only advance last_seen if we did any work here.
-             * If we always advance, we can confuse prefix scanning.
-             * Suppose a simple-vector spans cards 0, 1 and 2, and 1
-             * and 2 are dirtied. Card 1 has no interesting pointers on it,
-             * but sets last_seen = 1. Then we don't search the prefix of 2
-             * because address_line(before) == 0 which is less than 1. So
-             * we need last_seen to actually reflect the work we did. */
-            if (worked) last_seen = this_line;
-          }
-      }
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+      /* Process pages are walked as roots wholesale, and their card marks
+       * track old->young pointers for their own collections. */
+      if (ph_process_page[i]) continue;
+#endif
+      scavenge_root_page(i, &prefixes_checked);
     }
   }
   dirty_generation_source = 0;
@@ -1211,11 +1471,19 @@ static void CPU_SPLIT raise_survivors(void) {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
   for (page_index_t p = 0; p < next_free_page; p++)
-    if (!page_free_p(p))
+    if (!page_free_p(p)
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+        && !ph_process_page[p]
+#endif
+        )
       for_lines_in_page(l, p)
         bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
   for (page_index_t p = 0; p < next_free_page; p++)
-    if (page_table[p].gen == gen && page_single_obj_p(p))
+    if (page_table[p].gen == gen && page_single_obj_p(p)
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+        && !ph_process_page[p]
+#endif
+        )
       page_table[p].gen++;
   generations[gen + 1].bytes_allocated += generations[gen].bytes_allocated;
   generations[gen].bytes_allocated = 0;
@@ -1238,6 +1506,14 @@ void mr_pre_gc(generation_index_t generation) {
 #endif
   generation_to_collect = generation;
   reset_statistics();
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  source_object = NULL;
+  gc_assert(!ph_local);
+  if (process_heap_count) {
+    extern bool compacting;
+    compacting = 0;
+  } else
+#endif
 #if ENABLE_COMPACTION
   if (generation != PSEUDO_STATIC_GENERATION)
     METER(consider, consider_compaction(generation_to_collect));
@@ -1250,6 +1526,9 @@ void mr_collect_garbage(bool raise) {
     METER(scavenge, mr_scavenge_root_gens());
   }
   trace_static_roots();
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  process_heaps_trace_roots();
+#endif
   METER(trace, trace_everything());
   METER(sweep, sweep());
 #if ENABLE_COMPACTION
@@ -1282,6 +1561,11 @@ void mr_collect_garbage(bool raise) {
 }
 
 void zero_all_free_ranges() {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  if (process_heap_count)
+    lose("%d process heap(s) still exist; release them before saving a core",
+         process_heap_count);
+#endif
   for (page_index_t p = 0; p < page_table_pages; p++) {
     char* addr = page_address(p);
     char* limit = addr + GENCGC_PAGE_BYTES;
@@ -1309,6 +1593,11 @@ void zero_all_free_ranges() {
 }
 
 void prepare_lines_for_final_gc() {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+  if (process_heap_count)
+    lose("%d process heap(s) still exist; release them before saving a core",
+         process_heap_count);
+#endif
   for (line_index_t l = 0; l < line_count; l++) {
     unsigned char line = line_bytemap[l];
     /* Line might still be fresh here. */
@@ -1419,3 +1708,5 @@ void check_weird_pages() {
       if (fail) lose("Errors checking line/page usage, as above.");
     }
 }
+
+#include "process-heap-gc.inc"

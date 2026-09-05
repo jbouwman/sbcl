@@ -1,0 +1,399 @@
+@node sb-process
+@section sb-process
+@cindex Processes, lightweight
+@cindex Actors
+@cindex Supervisor
+
+The @code{sb-process} module provides lightweight processes in the
+manner of Erlang/OTP on top of @code{sb-fiber}: a process is a fiber
+with a mailbox, scheduled cooperatively on a pool of carrier threads.
+Processes communicate by message passing only.  They can be linked,
+so that one's exit is signaled to the other, and monitored, so that
+one's exit is reported to the other as a message.  A registry maps
+names to processes.  On top of the primitives, a generic server
+behaviour handles calls and casts through methods, and supervisors
+start, watch and restart children according to a strategy.
+
+On builds with @code{:sb-process-heaps}, every process owns a heap of
+its own by default: messages are copied between heaps, a process
+shares no mutable state with any other, and its memory is returned in
+one step when it exits.  Without that feature, or for processes spawned
+with @code{:heap nil}, messages are passed by reference and processes
+share the global heap.
+
+@subsection Scheduler
+
+The scheduler is started on demand by the first @code{spawn}, with one
+carrier thread per online CPU.  Each carrier runs processes from a run
+queue of its own and steals from the others when idle; a process runs
+until it waits for a message, sleeps, yields, or has performed
+@code{*reductions-per-slice*} message operations.  Scheduling is
+cooperative: a process that neither sends, receives nor yields keeps
+its carrier until it does.
+
+@deffn Function start-scheduler &key carriers
+Start the scheduler with @var{carriers} carrier threads.  Only needed
+to choose the carrier count.
+@end deffn
+
+@deffn Function stop-scheduler &key (timeout 5)
+Send every process a @code{:kill} signal, wait up to @var{timeout}
+seconds for them to exit, and stop the carriers.
+@end deffn
+
+@deffn Function scheduler-running-p
+@deffnx Function scheduler-carrier-count
+Whether the scheduler is running, and with how many carriers.
+@end deffn
+
+@deffn Variable *default-carrier-count*
+@deffnx Variable *reductions-per-slice*
+@deffnx Variable *default-process-stack-size*
+@deffnx Variable *default-process-heap*
+@deffnx Variable *report-process-errors*
+The carrier count when @code{start-scheduler} is not told (@code{nil}
+means one per CPU); the number of message operations a process may
+perform before it yields; the control stack size of a process fiber;
+what @code{spawn} does about a heap when not told (@code{t} or
+@code{nil}); and whether a process that exits through an unhandled
+error reports it on @code{*error-output*} (@code{nil}, @code{t}, or
+@code{:backtrace}).
+@end deffn
+
+@subsection Processes
+
+@deffn Function spawn function &key arguments name link monitor heap stack-size binding-stack-size trap-exits
+Start a process that applies @var{function} to @var{arguments} and
+return it, and the monitor reference when @var{monitor} is true.
+@var{function} is a global function or the name of one: a closure
+allocated in a process heap cannot be shared and is refused.
+@var{arguments} are copied into the new process.  @var{name}
+registers the process.  @var{link} and @var{monitor} link the calling
+process to the new one or make it monitor it.  @var{heap} is
+@code{t} for a heap of the process's own, @code{nil} to share the
+global heap, or a list of keyword arguments for
+@code{sb-fiber:make-heap}.  @var{trap-exits} makes exit signals arrive
+as messages.
+
+When @var{function} returns, the process exits with reason
+@code{:normal} and its return values as the exit value.  When it
+signals an unhandled error, the process exits with reason
+@code{(:error @var{condition})}.
+@end deffn
+
+@deffn Function spawn-link function &rest keys
+@deffnx Function spawn-monitor function &rest keys
+@code{spawn} with @code{:link t}, or with @code{:monitor t}.
+@end deffn
+
+@deffn Function self
+@deffnx Function current-process
+The calling process; @code{current-process} returns @code{nil} on a
+thread that is not running one, @code{self} signals
+@code{no-current-process-error}.
+@end deffn
+
+@deffn Function process-alive-p process
+@deffnx Function process-state process
+@deffnx Function process-exit-reason process
+@deffnx Function process-exit-value process
+@deffnx Function process-id process
+@deffnx Function process-name process
+@deffnx Function process-heap process
+@deffnx Function process-info process
+@deffnx Function list-processes
+Accessors.  The state is @code{:new}, @code{:runnable},
+@code{:running}, @code{:waiting} or @code{:exited}.  The exit value is
+the list of the function's return values, copied out of the process's
+heap.  @code{process-info} returns a plist of the above and more.
+@end deffn
+
+@deffn Function exit-process &optional (reason :normal)
+Exit the calling process with @var{reason}.
+@end deffn
+
+@deffn Function signal-exit target reason
+Send an exit signal with @var{reason} to @var{target}, a process or a
+registered name, on behalf of the calling process (if any).  A process
+that traps exits receives it as the message @code{(:exit @var{from}
+@var{reason})}; otherwise it exits with @var{reason} the next time it
+runs, except that a @code{:normal} signal from another process is
+ignored.  @code{:kill} cannot be trapped and makes the target exit with
+reason @code{:killed}.
+@end deffn
+
+@deffn Function trap-exits
+@deffnx Function (setf trap-exits) enable
+Whether the calling process receives exit signals as messages.
+@end deffn
+
+@deffn Function process-yield
+@deffnx Function process-sleep seconds
+Let other processes run; suspend the calling process for
+@var{seconds}.
+@end deffn
+
+@deffn Function join-process process &key timeout
+Wait, on a thread that is not a process, for @var{process} to exit.
+Returns its exit reason, its exit value and @code{t}, or three
+@code{nil}s after @var{timeout} seconds.
+@end deffn
+
+@deffn Function await-process process &key timeout
+Wait in the calling process for @var{process} to exit, by monitoring
+it.  Returns the exit reason and @code{t}, or @code{nil}, @code{nil}
+after @var{timeout} seconds.
+@end deffn
+
+@subsection Messages
+
+@deffn Function send target message
+Send @var{message} to @var{target}, a process or a registered name,
+and return it.  The message is copied into the target's heap.  Sending
+to a process that has exited does nothing; sending to a name that is
+not registered signals @code{unknown-name-error}.  May be called from
+any thread.
+@end deffn
+
+@deffn Macro receive (var &key timeout) &body clauses
+Selective receive.  Each clause is @code{(@var{test} . @var{body})}:
+the oldest message for which some @var{test}, evaluated with @var{var}
+bound to the message, is true is removed from the mailbox, and the
+body of the first clause whose test it satisfies runs with @var{var}
+bound to it.  Messages that match no test stay in the mailbox, in
+order.  A clause @code{(:timeout . @var{body})} runs instead if no
+matching message arrives within @var{timeout} seconds; without such a
+clause a timed-out @code{receive} returns @code{nil}.
+
+@lisp
+(receive (m :timeout 5)
+  ((and (consp m) (eq (car m) :reply)) (cadr m))
+  ((eq m :stop) (exit-process :normal))
+  (:timeout (error "no reply")))
+@end lisp
+@end deffn
+
+@deffn Function receive-message &key timeout
+Return the oldest message and @code{t}, waiting for one; with
+@var{timeout}, return @code{nil}, @code{nil} after that many seconds.
+A timeout of 0 does not wait.
+@end deffn
+
+@deffn Function mailbox-count &optional process
+@deffnx Function flush-mailbox
+The number of messages waiting for @var{process}; discard every
+message waiting for the calling process.
+@end deffn
+
+@deffn Function send-after seconds target message
+@deffnx Function cancel-timer timer
+Send @var{message} to @var{target} after @var{seconds}; returns a
+timer.  @code{cancel-timer} returns @code{t} if the timer had not
+fired yet.
+@end deffn
+
+@subsection Links and monitors
+
+@deffn Function link target
+@deffnx Function unlink target
+Link the calling process and @var{target}, so that when either exits
+the other receives its exit signal (see @code{signal-exit}); undo
+that.  Linking to a process that has exited delivers an exit signal
+with reason @code{:noproc}.
+@end deffn
+
+@deffn Function monitor target
+@deffnx Function demonitor ref &key flush
+Watch @var{target}: when it exits, the calling process receives the
+message @code{(:down @var{ref} @var{process} @var{reason})}.
+@code{monitor} returns @var{ref}.  Monitoring a process that has
+exited delivers the message at once with reason @code{:noproc}.
+@code{demonitor} stops watching; with @var{flush}, it also removes a
+pending @code{:down} message for @var{ref} from the mailbox.
+@end deffn
+
+@deffn Function make-ref
+A fresh reference: a fixnum unique for the life of the image.
+@end deffn
+
+@subsection Registry
+
+@deffn Function register name process
+@deffnx Function unregister name
+@deffnx Function whereis name
+@deffnx Function registered
+Register @var{process} under @var{name}, a symbol, or remove the
+registration; the live process registered as @var{name}, or
+@code{nil}; the registered names.  A name is released when its process
+exits.  Registering a name held by a live process signals
+@code{name-taken-error}.
+@end deffn
+
+@subsection Generic server
+
+A generic server is a process whose behaviour is defined by methods
+specialized on a @dfn{module} designator, typically a symbol, as OTP's
+@code{gen_server} is by a callback module.
+
+@deffn Generic Function init module arguments
+@deffnx Generic Function handle-call module request from state
+@deffnx Generic Function handle-cast module message state
+@deffnx Generic Function handle-info module message state
+@deffnx Generic Function terminate module reason state
+@code{init} returns @code{(values :ok @var{state})} or @code{(values
+:stop @var{reason})}.  @code{handle-call} returns @code{(values :reply
+@var{reply} @var{state})}, @code{(values :noreply @var{state})} when
+the reply will be sent later with @code{reply}, or @code{(values :stop
+@var{reason} @var{reply} @var{state})}.  @code{handle-cast} and
+@code{handle-info} (which receives every other message, such as
+@code{:down} and @code{:exit} messages) return @code{(values :noreply
+@var{state})} or @code{(values :stop @var{reason} @var{state})}.
+@code{terminate} is called before the server exits.  The default
+methods ignore other messages and do nothing on termination.
+@end deffn
+
+@deffn Function start-server module &key arguments name link monitor heap stack-size timeout
+Spawn a server process for @var{module} and return it once
+@code{init} has run with @var{arguments}.  Signals
+@code{server-start-error} if @code{init} returns @code{:stop} or
+fails.  The other keyword arguments are those of @code{spawn}.
+@end deffn
+
+@deffn Function run-server module &key arguments
+Run a server for @var{module} in the calling process.
+@end deffn
+
+@deffn Function call server request &key (timeout 5)
+@deffnx Function cast server message
+@deffnx Function reply from value
+@deffnx Function stop-server server &key reason timeout
+Send @var{request} to @var{server} (a process or a name) and return
+its reply, signaling @code{call-timeout} after @var{timeout} seconds
+and @code{call-failed} if the server exits meanwhile; send
+@var{message} for @code{handle-cast}; reply to a deferred call;
+ask the server to exit after calling @code{terminate}.  @code{call}
+and @code{stop-server} may be used from any thread.
+@end deffn
+
+@lisp
+(defmethod init ((module (eql 'counter)) arguments)
+  (values :ok (or (first arguments) 0)))
+(defmethod handle-call ((module (eql 'counter)) request from state)
+  (declare (ignore from))
+  (ecase request
+    (:get (values :reply state state))
+    (:inc (values :reply (1+ state) (1+ state)))))
+(defmethod handle-cast ((module (eql 'counter)) increment state)
+  (values :noreply (+ state increment)))
+
+(let ((counter (start-server 'counter :arguments '(10) :name 'counter)))
+  (cast 'counter 5)
+  (call counter :inc))  @result{} 16
+@end lisp
+
+@subsection Supervisors
+
+A supervisor is a server (module @code{supervisor}) that starts its
+children from specifications, links to them, traps exits, and restarts
+them when they exit.
+
+@deffn Function make-child-spec id function &key arguments restart shutdown name heap stack-size trap-exits
+Describe a child.  @var{id} identifies it within its supervisor;
+@var{function}, @var{arguments}, @var{name}, @var{heap},
+@var{stack-size} and @var{trap-exits} are as for @code{spawn}.
+@var{restart} is @code{:permanent} (restart always, the default),
+@code{:transient} (only after an abnormal exit) or @code{:temporary}
+(never; the child is dropped).  @var{shutdown} is how many seconds to
+wait for the child to exit after a @code{:shutdown} signal before
+killing it (default 5), or @code{:brutal-kill}.
+@end deffn
+
+@deffn Function start-supervisor children &key strategy intensity period name link heap
+Start a supervisor for @var{children}, a list of child specs, and
+return it once they are running.  @var{strategy} is @code{:one-for-one}
+(restart the child that exited), @code{:one-for-all} (stop the others
+and restart all) or @code{:rest-for-one} (stop and restart those
+started after it).  More than @var{intensity} restarts (default 3)
+within @var{period} seconds (default 5) make the supervisor stop its
+children and exit with reason @code{:shutdown}.
+@end deffn
+
+@deffn Function run-supervisor children &key strategy intensity period
+Run a supervisor in the calling process.  This is the function to give
+a child spec whose child is itself a supervisor.
+@end deffn
+
+@deffn Function stop-supervisor supervisor &key reason timeout
+@deffnx Function which-children supervisor
+@deffnx Function count-children supervisor
+@deffnx Function start-child supervisor spec
+@deffnx Function terminate-child supervisor id
+@deffnx Function restart-child supervisor id
+@deffnx Function delete-child supervisor id
+Stop a supervisor and its children; list its children as plists
+(@code{:id}, @code{:process}, @code{:restarts}, @code{:spec}); count
+them; add and start a child; stop a child, keeping its spec; start a
+stopped child; remove a stopped child's spec.
+@end deffn
+
+@lisp
+(defun worker (name)
+  (loop (receive (m)
+          ((eq m :crash) (error "~A crashed" name))
+          ((eq m :stop) (return)))))
+
+(start-supervisor
+ (list (make-child-spec 'a 'worker :arguments '("a") :name 'a)
+       (make-child-spec 'b 'worker :arguments '("b") :name 'b :restart :transient))
+ :strategy :one-for-all)
+(send 'a :crash)   ; a and b are both restarted
+@end lisp
+
+@subsection Conditions
+
+@deffn Condition process-error
+Base class of the module's errors; reader @code{process-error-process}.
+Subclasses: @code{no-current-process-error} (an operation that needs
+a calling process was called from a plain thread),
+@code{dead-process-error}, @code{unknown-name-error} and
+@code{name-taken-error} (readers @code{unknown-name-error-name},
+@code{name-taken-error-name}), @code{call-timeout},
+@code{call-failed} (reader @code{call-failed-reason}),
+@code{server-start-error} (reader @code{server-start-error-reason})
+and @code{supervisor-error}.
+@end deffn
+
+@deffn Condition process-exit-signal
+Signaled in a process to make it exit; readers
+@code{process-exit-signal-from} and @code{process-exit-signal-reason}.
+It is a @code{serious-condition} but not an @code{error}, so that
+handlers for errors in process code do not intercept it.
+@end deffn
+
+@subsection Notes
+
+@itemize
+@item @strong{Scheduling is cooperative.}  A process is preempted only
+at message operations, sleeps and explicit yields; an exit signal
+reaches a running process at its next such point.  A process in a
+loop with none of them cannot be stopped, and a supervisor that fails
+to stop a child within its shutdown time gives up on it.
+@item @strong{Process heaps.}  With a heap of its own, a process may
+not store a pointer to its objects anywhere global: the store barrier
+of @code{sb-fiber} signals @code{process-heap-store-error}.  Global
+bookkeeping done on behalf of a process, such as a counter in a global
+variable, must run inside @code{sb-fiber:without-heap}.  Closures
+created in a process are process objects and cannot be spawned or sent;
+use named functions and arguments.  Messages are copied, so a large
+message costs a copy; @code{sb-fiber:make-shared-binary} makes a
+payload that is sent by reference.
+@item @strong{Blocking.}  Waiting on a mutex, a semaphore or I/O from a
+process blocks its carrier and every process on it.  Use
+@code{join-process} only from threads that are not processes.
+@item @strong{Names.}  @code{process-p}, @code{process-alive-p} and
+@code{process-error} also name functions in @code{sb-ext} (for
+@code{run-program}); a package that uses both must shadow them, and
+@code{cast} clashes with @code{sb-alien:cast}.
+@item @strong{Images.}  Like fibers, processes do not survive
+@code{save-lisp-and-die}; stop the scheduler before saving.
+@end itemize

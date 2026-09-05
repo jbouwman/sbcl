@@ -965,6 +965,18 @@ NOTE: This interface is experimental and subject to change."
       (car x)
       x))
 
+;;; Run BODY with the global heap installed as the allocation target, so
+;;; that global metadata built on behalf of a process (class
+;;; finalization, compilation, ...) is never owned by the process heap.
+;;; A no-op unless a process heap is installed.
+(defmacro sb-kernel::with-global-heap (&body body)
+  #+(and sb-process-heaps (not sb-xc-host))
+  (with-unique-names (thunk)
+    `(dx-flet ((,thunk () ,@body))
+       (sb-kernel::call-with-global-heap #',thunk)))
+  #-(and sb-process-heaps (not sb-xc-host))
+  `(progn ,@body))
+
 ;;;; utilities for two-VALUES predicates
 
 (defmacro not/type (x)

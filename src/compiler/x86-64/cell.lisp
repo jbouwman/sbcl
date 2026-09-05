@@ -60,7 +60,10 @@
              (emit-code-page-gengc-barrier object val-temp)
              (emit-store (object-slot-ea object offset lowtag) value val-temp)))
           (t
-           (when barrier (emit-gengc-barrier object nil val-temp t))
+           (when barrier
+             (emit-gengc-barrier object nil val-temp t)
+             #+sb-process-heaps
+             (emit-process-heap-store-check object (vop-nth-arg 1 vop) val-temp))
            (emit-store (object-slot-ea object offset lowtag) value val-temp)))))
 
 (define-vop (compare-and-swap-slot)
@@ -324,6 +327,8 @@
   (:generator 1
    (pseudo-atomic (:elide-if (or #-immobile-space t))
     (gcbar)
+    #+sb-process-heaps
+    (emit-process-heap-store-check object (vop-nth-arg 1 vop) temp)
     (storew function object fdefn-fun-slot other-pointer-lowtag)
     (unless (and (sc-is linkage-val immediate) (zerop (tn-value linkage-val)))
       (inst mov (ea linkage-cell) linkage-val))))))
@@ -802,8 +807,13 @@
                        :from (:argument 5) :to (:result 0)) ecx))))
 
   (define-dblcas %cons-cas-pair nil
+    (:vop-var vop)
     (:generator 2
       (emit-gengc-barrier object nil temp)
+      #+sb-process-heaps
+      (progn
+        (emit-process-heap-store-check object (vop-nth-arg 3 vop) temp)
+        (emit-process-heap-store-check object (vop-nth-arg 4 vop) temp))
       (generate-dblcas (ea (- list-pointer-lowtag) object)
                        expected-old-lo expected-old-hi new-lo new-hi
                        eax ebx ecx edx result-lo result-hi)))
@@ -811,10 +821,15 @@
   ;; The CPU requires 16-byte alignment for the memory operand.
   ;; A vector's data portion starts on a 16-byte boundary, so any even numbered index is OK.
   (define-dblcas %vector-cas-pair t
+    (:vop-var vop)
     (:generator 2
       (let ((ea (ea (- (* n-word-bytes vector-data-offset) other-pointer-lowtag)
                     object index (ash n-word-bytes (- n-fixnum-tag-bits)))))
         (emit-gengc-barrier object ea temp)
+        #+sb-process-heaps
+        (progn
+          (emit-process-heap-store-check object (vop-nth-arg 4 vop) temp)
+          (emit-process-heap-store-check object (vop-nth-arg 5 vop) temp))
         (generate-dblcas ea expected-old-lo expected-old-hi new-lo new-hi
                          eax ebx ecx edx result-lo result-hi))))
 
@@ -822,8 +837,13 @@
   ;; An instance's first user-visible slot at index 1 is 16-byte-aligned.
   ;; (Hmm, does the constraint differ by +/- compact-instance-header?)
   (define-dblcas %instance-cas-pair t
+    (:vop-var vop)
     (:generator 2
       (emit-gengc-barrier object nil temp)
+      #+sb-process-heaps
+      (progn
+        (emit-process-heap-store-check object (vop-nth-arg 4 vop) temp)
+        (emit-process-heap-store-check object (vop-nth-arg 5 vop) temp))
       (let ((ea (ea (- (* n-word-bytes instance-slots-offset) instance-pointer-lowtag)
                     object index (ash n-word-bytes (- n-fixnum-tag-bits)))))
         (generate-dblcas ea expected-old-lo expected-old-hi new-lo new-hi

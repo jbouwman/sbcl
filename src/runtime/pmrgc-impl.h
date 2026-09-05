@@ -58,6 +58,21 @@
 #include "genesis/weak-pointer.h"
 #include "globals.h" // for DYNAMIC_SPACE_START
 #include "hopscotch.h"
+
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+/* The weak-object lists built while tracing are reached through these
+ * pointers, which name the global lists except on a thread running a
+ * process heap's local collection, where they name that collection's
+ * own lists (see process-heap-gc.inc).  Local collections on different
+ * threads can then run at the same time. */
+extern _Thread_local struct weak_pointer **current_weak_pointer_chain;
+extern _Thread_local struct cons **current_weak_vectors;
+extern _Thread_local struct hash_table **current_weak_hash_tables;
+extern _Thread_local struct hopscotch_table *current_weak_objects;
+#define weak_pointer_chain (*current_weak_pointer_chain)
+#define weak_vectors (*current_weak_vectors)
+#define weak_hash_tables (*current_weak_hash_tables)
+#endif
 #include <limits.h> // for UINT_MAX
 
 #if N_WORD_BITS == 64
@@ -449,8 +464,10 @@ gc_copy_object_resizing(lispobj object, long nwords, void* region, int page_type
 }
 
 extern sword_t (*const scavtab[256])(lispobj *where, lispobj object);
+#ifndef LISP_FEATURE_SB_PROCESS_HEAPS
 extern struct cons *weak_vectors; /* in gc-common.c */
 extern struct hash_table *weak_hash_tables; /* in gc-common.c */
+#endif
 extern void acquire_gc_page_table_lock(void), release_gc_page_table_lock(void);
 
 void gc_mark_range(lispobj*start, long count);

@@ -32,7 +32,9 @@
   (:gc-barrier 0 1 0)
   (:generator 1
     (when barrier
-      (emit-gengc-barrier object nil tmp-tn t))
+      (emit-gengc-barrier object nil tmp-tn t)
+      #+sb-process-heaps
+      (emit-process-heap-store-check object (vop-nth-arg 1 vop) tmp-tn))
     (storew value object offset lowtag)))
 
 (define-vop (compare-and-swap-slot)
@@ -357,8 +359,11 @@
          (fdefn :scs (descriptor-reg)))
   (:temporary (:scs (non-descriptor-reg)) lip)
   (:temporary (:scs (non-descriptor-reg)) type)
+  (:vop-var vop)
   (:generator 38
     (emit-gengc-barrier fdefn nil lip)
+    #+sb-process-heaps
+    (emit-process-heap-store-check fdefn (vop-nth-arg 0 vop) lip)
     (inst add-sub lip function (- (* simple-fun-insts-offset n-word-bytes)
                                   fun-pointer-lowtag))
     (load-type type function (- fun-pointer-lowtag))

@@ -186,6 +186,11 @@
  ;; low-level fiber primitives support
  ; :sb-fiber
 
+ ;; per-process heaps: independently collectable GC ownership domains
+ ;; inside dynamic space, attached to fibers by sb-fiber.
+ ;; Requires :mark-region-gc.
+ ; :sb-process-heaps
+
  ;; futex support
  ;;
  ;; While on linux we are able to use futexes for our locking

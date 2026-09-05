@@ -15,7 +15,10 @@
                (:file "arm64-vops"
                 :if-feature (:and :sb-fiber :arm64)
                 :depends-on ("package"))
+               (:file "heap"
+                :if-feature :sb-process-heaps
+                :depends-on ("package"))
                (:file "fiber-ffi"
-                :depends-on ("package" "constants"))
+                :depends-on ("package" "constants" "heap"))
                (:file "fiber"
-                :depends-on ("package" "constants" "fiber-ffi"))))
+                :depends-on ("package" "constants" "heap" "fiber-ffi"))))

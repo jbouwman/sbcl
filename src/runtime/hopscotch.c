@@ -159,6 +159,45 @@ void hopscotch_init() // Called once on runtime startup, from gc_init().
     usable_size(cached_alloc[1]) = n_bytes_per_slice - ALLOCATION_OVERHEAD;
 }
 
+/* The cache is shared by the global collector and by the local collections
+ * of process heaps, which run on several threads at once, so its slots are
+ * read and written only with atomic exchanges: a slot holds a free block or
+ * nothing, and a thread touches only blocks it has swapped out of a slot. */
+
+/* Put 'block' into an empty slot.  If there is none, take every cached
+ * block, keep the largest ones and release the rest to the OS. */
+static void cache_block(char* block)
+{
+    for (int i = 0; i < N_CACHED_ALLOCS; i++) {
+        char* expected = 0;
+        if (__atomic_compare_exchange_n(&cached_alloc[i], &expected, block, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return;
+    }
+    char* blocks[N_CACHED_ALLOCS + 1];
+    int n = 0;
+    blocks[n++] = block;
+    for (int i = 0; i < N_CACHED_ALLOCS; i++) {
+        char* taken = __atomic_exchange_n(&cached_alloc[i], 0, __ATOMIC_ACQ_REL);
+        if (taken) blocks[n++] = taken;
+    }
+    // Largest first (n is at most 3).
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && usable_size(blocks[j]) > usable_size(blocks[j-1]); j--) {
+            char* t = blocks[j]; blocks[j] = blocks[j-1]; blocks[j-1] = t;
+        }
+    int next = 0;
+    for (int i = 0; i < N_CACHED_ALLOCS && next < n; i++) {
+        char* expected = 0;
+        if (__atomic_compare_exchange_n(&cached_alloc[i], &expected, blocks[next], 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            next++;
+    }
+    for ( ; next < n; next++)
+        hopscotch_deallocate(blocks[next] - ALLOCATION_OVERHEAD,
+                             usable_size(blocks[next]) + ALLOCATION_OVERHEAD);
+}
+
 /* Return the address of at least 'nbytes' of storage.
  * This is not a general-purpose thing - it's only intended to keep
  * one or perhaps two hopscotch hash tables around during GC,
@@ -168,17 +207,13 @@ void hopscotch_init() // Called once on runtime startup, from gc_init().
  */
 static char* cached_allocate(os_vm_size_t nbytes)
 {
-    // See if either cached allocation is large enough.
-    if (cached_alloc[0] && usable_size(cached_alloc[0]) >= nbytes) {
-        // Yup, just give the consumer the whole thing.
-        char* result = cached_alloc[0];
-        cached_alloc[0] = 0; // Remove from the pool
-        return result;
-    }
-    if (cached_alloc[1] && usable_size(cached_alloc[1]) >= nbytes) {  // Ditto.
-        char* result = cached_alloc[1];
-        cached_alloc[1] = 0;
-        return result;
+    // See if either cached allocation is large enough.  Taking a block
+    // out of its slot makes it ours; one that is too small goes back.
+    for (int i = 0; i < N_CACHED_ALLOCS; i++) {
+        char* block = __atomic_exchange_n(&cached_alloc[i], 0, __ATOMIC_ACQ_REL);
+        if (!block) continue;
+        if (usable_size(block) >= nbytes) return block;
+        cache_block(block);
     }
     // Request more memory, not using malloc().
     // Round up, since the OS will give more than asked if the request is
@@ -195,35 +230,13 @@ static char* cached_allocate(os_vm_size_t nbytes)
 /* Return 'mem' to the cache, first zero-filling to the specified length.
  * Though the memory size is recorded in the header of the memory block,
  * the allocator doesn't know how many bytes were touched by the requestor,
- * which is why the length is specified again.
- * If returning it to the OS and not the cache, then don't bother 0-filling.
+ * which is why the length is specified again.  The fill happens before
+ * the block can be seen by another thread.
  */
 static void cached_deallocate(char* mem, uword_t zero_fill_length)
 {
-    int line = 0;
-    if (!cached_alloc[0]) {
-    } else if (!cached_alloc[1])
-        line = 1;
-    else {
-        // Try to retain whichever 2 blocks are largest (the given one and
-        // cached ones) in the hope of fulfilling future requests from cache.
-        int this_size = usable_size(mem);
-        int cached_size0 = usable_size(cached_alloc[0]);
-        int cached_size1 = usable_size(cached_alloc[1]);
-        if (!(this_size > cached_size0 || this_size > cached_size1)) {
-            // mem is not strictly larger than either cached block. Release it.
-            hopscotch_deallocate(mem - ALLOCATION_OVERHEAD,
-                                 usable_size(mem) + ALLOCATION_OVERHEAD);
-            return;
-        }
-        // Evict and replace the smaller of the two cache entries.
-        if (cached_size1 < cached_size0)
-            line = 1;
-        hopscotch_deallocate(cached_alloc[line] - ALLOCATION_OVERHEAD,
-                             usable_size(cached_alloc[line]) + ALLOCATION_OVERHEAD);
-    }
     memset(mem, 0, zero_fill_length);
-    cached_alloc[line] = mem;
+    cache_block(mem);
 }
 #endif
 

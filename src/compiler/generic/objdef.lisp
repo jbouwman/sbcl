@@ -562,6 +562,9 @@ during backtrace.
   (sprof-enable :special sb-thread::*sprof-enable*) ; = 0 to block SIGPROF
   ;;
   (arena)
+  ;; The installed process heap if its stores are being checked, else 0.
+  ;; Read by the store barrier; see EMIT-PROCESS-HEAP-STORE-CHECK.
+  #+sb-process-heaps (process-heap-check :c-type "struct process_heap *" :pointer t)
   ;; Miscellaneous arch-specific thread-local state for breakpoints.
   (breakpoint-misc :c-type "void *" :pointer t)
 

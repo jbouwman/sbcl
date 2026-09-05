@@ -62,6 +62,8 @@
                          (bitmap (if info (dd-bitmap info) 0))
                          (invalid :uninitialized))
   #+sb-show (declare (optimize (debug 1))) ; workaround for something, I don't know what
+  ;; Layouts are global metadata, never owned by a process heap or arena.
+  (declare (sb-c::tlab :system))
   (let* ((fixed-words (type-dd-length layout))
          (extra-id-words ; count of additional words needed to store ancestors
           (if (logtest flags +structure-layout-flag+)
@@ -312,6 +314,7 @@
 
 (defun %target-defstruct (dd equalp &rest accessors)
   (declare (type defstruct-description dd))
+  (sb-kernel::with-global-heap
 
   (when (dd-doc dd)
     (setf (documentation (dd-name dd) 'structure) (dd-doc dd)))
@@ -351,7 +354,7 @@
       (dolist (fun *defstruct-hooks*)
         (funcall fun classoid))))
 
-  (dd-name dd))
+  (dd-name dd)))
 (defun !target-defstruct-altmetaclass (dd &rest accessors)
   (declare (type defstruct-description dd))
   (let ((classoid (find-classoid (dd-name dd)))

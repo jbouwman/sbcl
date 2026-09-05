@@ -397,13 +397,14 @@
 (setf (fdefinition 'load-defclass) #'real-load-defclass)
 
 (defun ensure-class (name &rest args)
+  (sb-kernel::with-global-heap
   (with-world-lock ()
     (apply #'ensure-class-using-class
            (let ((class (find-class name nil)))
              (when (and class (eq name (class-name class)))
                ;; NAME is the proper name of CLASS, so redefine it
                class))
-           name args)))
+           name args))))
 
 (defun parse-ensure-class-args (class name args)
   (let ((metaclass *the-class-standard-class*)
@@ -963,6 +964,7 @@
 ;;; This is called by :after shared-initialize whenever a class is initialized
 ;;; or reinitialized. The class may or may not be finalized.
 (defun update-class (class finalizep)
+  (sb-kernel::with-global-heap
   (labels ((rec (class finalizep &optional (seen '()))
              (when (find class seen :test #'eq)
                (error "~@<Specified class ~S as a superclass of ~
@@ -986,7 +988,7 @@
                ;; Warning at run-time is not nice, can it be done at compile-time?
                #+nil
                (style-warn-about-duplicate-slots class))))
-    (rec class finalizep)))
+    (rec class finalizep))))
 
 (define-condition cpl-protocol-violation (reference-condition error)
   ((class :initarg :class :reader cpl-protocol-violation-class)

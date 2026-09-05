@@ -52,6 +52,12 @@
     unsigned-long
   (fiber system-area-pointer))
 
+#+sb-process-heaps
+(define-alien-routine ("sb_fiber_set_heap" %fiber-set-heap)
+    int
+  (fiber system-area-pointer)
+  (heap system-area-pointer))
+
 ;;; --- Conditions ---------------------------------------------------------
 
 (define-condition fiber-error (error)
@@ -113,6 +119,41 @@ no fiber bound in *CURRENT-FIBER*.")
 with make-main-fiber or with-fiber-thread"
                      (no-current-fiber-error-operation c)))))
 
+;;; Values crossing a fiber boundary are stored in the (global) fiber
+;;; wrapper, so anything owned by a process heap is copied out first.
+(declaim (inline globalize-values))
+(defun globalize-values (values)
+  (declare (type list values))
+  #+sb-process-heaps (globalize values)
+  #-sb-process-heaps values)
+
+(define-condition heap-fiber-escape (error)
+  ((fiber :initarg :fiber :reader heap-fiber-escape-fiber)
+   (condition-type :initarg :condition-type :reader heap-fiber-escape-condition-type)
+   (message :initarg :message :reader heap-fiber-escape-message))
+  (:documentation
+   "Signaled in the resumer when a fiber with a process heap exits via a
+condition that could not be copied out of its heap.")
+  (:report (lambda (c stream)
+             (format stream "fiber ~S exited via ~S: ~A"
+                     (heap-fiber-escape-fiber c)
+                     (heap-fiber-escape-condition-type c)
+                     (heap-fiber-escape-message c)))))
+
+(defun globalize-condition (fiber condition)
+  (declare (ignorable fiber))
+  #-sb-process-heaps condition
+  #+sb-process-heaps
+  (if (zerop (sb-vm::object-owner condition))
+      condition
+      (without-heap
+        (handler-case (copy-for-transfer condition)
+          (error ()
+            (make-condition 'heap-fiber-escape
+                            :fiber fiber
+                            :condition-type (type-of condition)
+                            :message (princ-to-string condition)))))))
+
 (declaim (inline %fiber-ctx))
 (defun %fiber-ctx (sap)
   (declare (type sb-sys:system-area-pointer sap))
@@ -130,7 +171,9 @@ with make-main-fiber or with-fiber-thread"
 (defstruct (fiber (:constructor %make-fiber)
                   (:print-object %print-fiber))
   (sap (sb-sys:int-sap 0) :type sb-sys:system-area-pointer)
-  (function nil :type (or null function))
+  (function nil :type (or null function symbol))
+  ;; The process heap this fiber owns, or NIL.
+  (%heap nil)
   (pending-condition nil :type (or null condition))
   (escape-condition nil :type (or null condition))
   (escape-throw-tag nil :type symbol)
@@ -206,16 +249,18 @@ the slot); otherwise a no-op."
                        (let ((rv-list
                                (multiple-value-list
                                 (progn (deliver-pending f)
-                                       (funcall (fiber-function f))))))
+                                       (let ((fn (fiber-function f)))
+                                         (funcall (if (symbolp fn) (symbol-function fn) fn)))))))
                          (when (fiber-return-fiber f)
-                           (setf (fiber-value (fiber-return-fiber f)) rv-list)))
+                           (setf (fiber-value (fiber-return-fiber f))
+                                 (globalize-values rv-list))))
                      (error (c)
-                       (setf (fiber-escape-condition f) c)))
+                       (setf (fiber-escape-condition f) (globalize-condition f c))))
                    (return-from done)))
             (macrolet ((with-root-catch (tag &body inner)
                          `(let ((vals (multiple-value-list (catch ,tag ,@inner))))
                             (setf (fiber-escape-throw-tag f) ,tag
-                                  (fiber-escape-throw-values f) vals)
+                                  (fiber-escape-throw-values f) (globalize-values vals))
                             (return-from done))))
               (with-root-catch 'sb-impl::toplevel-catcher
                 (with-root-catch 'sb-impl::%end-of-the-world

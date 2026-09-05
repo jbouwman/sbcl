@@ -13,10 +13,12 @@ fiber-aware synchronization in user application code.
 
 @subsection API
 
-@deffn Function make-fiber function &key name (stack-size 65536) (binding-stack-size 8192)
-Create a new fiber whose entry @var{function} runs when first switched
-to.  @var{name}, if supplied, is a string label used by
-@code{print-object}.  Registered fibers are released automatically at
+@deffn Function make-fiber function &key name (stack-size 65536) (binding-stack-size 8192) heap
+Create a new fiber whose entry @var{function} (a function or the name
+of one) runs when first switched to.  @var{name}, if supplied, is a
+string label used by @code{print-object}.  @var{heap}, if @code{t} or
+a heap from @code{make-heap} that no fiber owns yet, gives the fiber a
+process heap of its own; see the Process heaps section below.  Registered fibers are released automatically at
 thread exit; @code{release-fiber} is only needed if you want to
 reclaim resources sooner.
 
@@ -235,6 +237,272 @@ would block on an fd, it registers with
 @code{poll}/@code{epoll}/@code{kqueue} and yields; the scheduler's
 poll loop wakes it when ready.
 
+@subsection Process heaps
+
+@cindex Process heap
+@cindex Heap, per-process
+
+On builds with the @code{:sb-process-heaps} feature (which requires
+@code{:mark-region-gc}), a fiber can own a @dfn{process heap}: a set
+of 4 KiB blocks of dynamic space that belongs to that fiber alone, in
+the manner of an Erlang/OTP process heap.  A heap that holds only a
+few objects costs two blocks, and several heaps may share a GC page.  Everything the fiber
+allocates while it runs goes to its heap.  The heap is collected on
+its own, without stopping other threads or fibers, and is returned to
+the global free pool in one step when the fiber is released.
+
+The invariant that makes this possible is ownership: an object in a
+process heap may refer to objects in the same heap and to global
+objects, but no global object and no other heap may refer into it.
+Objects therefore move between heaps only by copying
+(@code{send-message} / @code{receive-message}, or
+@code{copy-for-transfer}), and values crossing a fiber boundary
+(@code{switch-fiber} arguments and results, entry-function results,
+escaping conditions) are copied out of a process heap automatically.
+The invariant is enforced by a store barrier: while a heap is installed,
+every compiled pointer store checks that it does not make a global
+object or another heap refer into the installed heap, and signals
+@code{process-heap-store-error} (continuable) when it would.  The
+barrier does not see stores made from C or into objects the compiler
+knows to be freshly allocated by system code, so @code{verify-heap},
+@code{verify-all-heaps} and @code{heap-reference-checking} remain
+available to check the invariant after the fact.  An unchecked
+violation is a bug in the program, as it would be with
+@code{sb-vm:with-arena}: the heap's collector will not see the
+offending reference, and the referenced object may be freed.
+
+Heaps can also be used without fibers, via @code{with-heap}.
+
+@deffn Function make-heap &key name (gc-threshold *default-heap-gc-threshold*) (hard-limit 0) (fullsweep-after 16) (check-stores :error) strict
+Create a process heap.  @var{gc-threshold} is the number of bytes the
+heap may allocate before its young generation is collected
+automatically (at an allocation slow path); 0 disables automatic
+collection.  @var{fullsweep-after} is the number of minor collections
+after which the next one is full; 0 leaves full collections to
+@code{(heap-gc heap t)} and to the old generation doubling in size.
+@var{hard-limit} bounds the heap's total size; when it is reached,
+allocation signals @code{process-heap-exhausted-error} (a
+@code{storage-condition}) with the global heap installed.  0 means
+unbounded.
+
+@var{check-stores} selects what the store barrier does while the heap
+is installed: @code{:error} (the default) signals
+@code{process-heap-store-error}, @code{:record} only records the
+violation (see @code{heap-violations}), @code{nil} does not check at
+all.  Only stores of pointers are checked; storing a fixnum, character
+or other immediate cannot create a reference.  @var{strict}
+additionally makes any pointer store into a global object a
+violation, so that the process can mutate nothing but its own data;
+operations that must touch global state are wrapped in
+@code{without-heap}, which suspends the barrier.  Strict mode applies
+to whatever runs while the heap is installed, including error handlers
+established outside the process: a handler that records the error in
+global state must do so inside @code{without-heap}.
+@end deffn
+
+@deffn Function heap-check-stores heap
+@deffnx Function heap-strict-p heap
+The store-checking mode and strictness of @var{heap}; both setfable.
+@end deffn
+
+@deffn Condition process-heap-store-error
+Signaled by the store barrier, in the storing thread, before the store
+is performed.  Readers @code{process-heap-store-error-object} (the
+object stored into), @code{process-heap-store-error-value} (the value)
+and @code{process-heap-store-error-kind}: @code{:escape} for a
+process-owned value stored into a global object, @code{:cross-heap}
+for a value owned by another heap, @code{:global} for any store into a
+global object under @code{:strict}.  A @code{continue} restart
+performs the store anyway.
+@end deffn
+
+@deffn Function release-heap heap
+Return every block of @var{heap} to the global free pool, along with
+any queued messages, without tracing anything.  Objects that were in
+@var{heap} must not be used afterwards.  A heap owned by a fiber is
+released by @code{release-fiber}.
+@end deffn
+
+@deffn Macro with-heap (heap) &body body
+Execute @var{body} with @var{heap} installed as the allocation target
+of the current thread, restoring the previous heap on exit.  A heap
+can be installed on one thread at a time (@code{heap-in-use-error}
+otherwise).  When a fiber with a heap is switched to, its heap is
+installed automatically.
+@end deffn
+
+@deffn Macro without-heap &body body
+Execute @var{body} with the global heap installed, so that what it
+allocates is shared rather than owned by the current process heap.
+Use it around operations that build global state.
+@end deffn
+
+@deffn Function current-heap
+The heap installed on the current thread, or @code{nil}.
+@end deffn
+
+@deffn Function object-heap object
+The heap that owns @var{object}, or @code{nil} if @var{object} is
+immediate or global.
+@end deffn
+
+@deffn Function fiber-heap fiber
+The heap owned by @var{fiber} (see the @code{:heap} argument to
+@code{make-fiber}), or @code{nil}.
+@end deffn
+
+@deffn Function heap-gc &optional (heap (current-heap)) full
+Collect @var{heap}, which must be installed on the current thread.
+Only its objects are traced and swept; other threads keep running,
+and their own local collections proceed at the same time.
+Roots are the calling thread's control stack, binding stack and
+thread-local values, plus the stacks of suspended fibers on the same
+thread.  Weak pointers and weak hash tables in the heap are honored;
+finalizers are not supported for objects in a process heap.
+
+A heap has two generations.  A minor collection traces only the young
+generation (everything allocated since the previous collection), using
+the old generation's marked cards as additional roots, and promotes
+the survivors.  With @var{full}, or when the heap's policy calls for
+it (see @code{make-heap}), everything is promoted and the old
+generation is collected as well.
+@end deffn
+
+@deffn Function heap-bytes-allocated heap
+@deffnx Function heap-bytes-live heap
+@deffnx Function heap-bytes-since-gc heap
+@deffnx Function heap-page-count heap
+@deffnx Function heap-block-count heap
+@deffnx Function heap-outgoing-count heap
+@deffnx Function heap-global-root-count heap
+@deffnx Function heap-gc-count heap
+@deffnx Function heap-gc-run-time heap
+@deffnx Function heap-bytes-old heap
+@deffnx Function heap-minor-gc-count heap
+@deffnx Function heap-major-gc-count heap
+Statistics: bytes of dynamic space claimed (block granular), bytes
+retained by the last collection, bytes claimed since it, pages on which
+the heap owns a block, blocks owned, global objects in the heap's
+outgoing root summary, objects of the heap walked as roots by the most
+recent global collection, number of collections, microseconds spent
+collecting, bytes in the old generation, and the numbers of minor and
+full collections.
+@end deffn
+
+@deffn Function local-gc-concurrency-peak
+Return the largest number of local collections that have run at the
+same time on different threads since startup.
+@end deffn
+
+A global collection does not walk a heap's old generation.  Each local
+collection records the global objects the heap refers to in an
+@dfn{outgoing root summary}; a global collection marks that summary
+and walks only the heap's young generation and the old objects
+modified since the last local collection, so its cost does not grow
+with the size of the process heaps.  A full local collection rebuilds
+the summary; until then a stale entry can keep a global object alive.
+
+@deffn Function heap-fullsweep-after heap
+The number of minor collections after which @var{heap}'s next
+collection is full; setfable.
+@end deffn
+
+@deffn Function send-message target object
+Copy @var{object} into @var{target}'s mailbox, where @var{target} is
+a heap or a fiber that owns one.  The copy is made with
+@code{copy-for-transfer} into a private fragment which @var{target}
+adopts without further copying when it calls @code{receive-message}.
+May be called from any thread, whether or not a heap is installed.
+Signals @code{dead-heap-error} if @var{target} has been released.
+@end deffn
+
+@deffn Function receive-message &key (heap (current-heap))
+Take the oldest message from @var{heap}'s mailbox; @var{heap} must be
+installed on the current thread.  Returns the message, @code{t}, and
+the sending heap (or @code{nil}); or @code{nil}, @code{nil},
+@code{nil} if the mailbox is empty.  Does not block: schedulers poll
+@code{heap-mailbox-count} or arrange their own wakeups.
+@end deffn
+
+@deffn Function heap-mailbox-count heap
+@deffnx Function heap-mailbox-bytes heap
+Number of queued messages and the bytes they occupy.
+@end deffn
+
+@deffn Function copy-for-transfer object
+Return a copy of @var{object} in which every sub-object owned by a
+process heap has been replaced by a copy allocated in the current
+heap (or the global heap if none is installed).  Global objects are
+shared; cycles and shared structure are preserved.  Conses, arrays,
+strings, numbers, structures, standard objects, conditions and hash
+tables are copied; uninterned symbols are global and hence shared.
+Signals @code{untransferable-object} for closures, weak pointers,
+weak hash tables, foreign pointers, streams, threads, fibers, heaps
+and synchronization objects.
+@end deffn
+
+@deffn Function globalize object
+@var{object} itself if it is global, else a copy of it in the global
+heap.
+@end deffn
+
+@deffn Function make-shared-binary contents-or-length &key (element-type '(unsigned-byte 8))
+@deffnx Function shared-binary-p object
+A @dfn{shared binary} is a specialized simple vector allocated in the
+global heap.  Every process heap may refer to a global object, so a
+shared binary travels in messages without being copied, and a global
+collection reclaims it once no heap refers to it any more; treat it as
+immutable once it has been sent.  @code{make-shared-binary} returns a
+fresh one of the given length or contents; @code{shared-binary-p}
+tells whether @var{object} is one.
+@end deffn
+
+@deffn Function verify-heap &optional (heap (current-heap))
+Check every pointer held by @var{heap}'s objects.  Returns a list of
+@code{(source-object slot-address target-address)} for each pointer
+into another process heap or a freed page.
+@end deffn
+
+@deffn Function verify-all-heaps
+Run a full global collection with reference checking enabled and
+return the violations it found: pointers from global objects into a
+process heap, and pointers between different process heaps.
+@end deffn
+
+@deffn Function heap-reference-checking
+@deffnx Function (setf heap-reference-checking) enable
+@deffnx Function heap-violations
+@deffnx Function reset-heap-violations
+When enabled, every collection (global or local) records ownership
+violations it meets while tracing; @code{heap-violations} returns the
+list recorded so far.
+@end deffn
+
+@subsubsection Rules for code running in a process heap
+
+@itemize
+@item Data structures reachable from global objects must not hold
+process-owned objects.  Storing into a global hash table, a global
+symbol's value or property list, a special variable's global value, a
+closure created outside the process, or a variable captured by such a
+closure, is a violation; the store barrier signals it.  Thread-local
+values (special bindings) are roots of the process and are fine.
+@item Class and generic function definition, method addition,
+compilation and loading run with the global heap installed
+automatically, so the metadata they create is global.  Other
+operations that build global state (interning into packages, creating
+threads, @code{finalize}, pathname interning of process strings) must
+be wrapped in @code{without-heap} or avoided.
+@item @code{make-instance}, structure constructors and ordinary
+allocation follow the installed heap.  Layouts and symbols are always
+global.
+@item A fiber's entry function must be global: a symbol, or a
+function not owned by a process heap.
+@item Do not create threads or use @code{save-lisp-and-die} while
+process heaps exist; the runtime refuses to save a core with live
+heaps.
+@end itemize
+
 @subsection Further Notes
 
 @itemize
@@ -246,4 +514,7 @@ fresh @code{*handler-clusters*} / @code{*restart-clusters*}.
 @code{save-lisp-and-die}; drop wrapper references before saving.
 @item @strong{Garbage collection.}  A suspended fiber's C control stack
 is scanned conservatively even on the otherwise-precise arm64 backend.
+@item @strong{Process heaps.}  Require @code{:sb-process-heaps}, which
+in turn requires the mark-region collector; the global collector does
+not compact while any process heap exists.
 @end itemize

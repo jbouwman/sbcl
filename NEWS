@@ -1,6 +1,20 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
 
 changes in sbcl-2.6.7 relative to sbcl-2.6.6:
+  * new feature: per-process heaps (build option :sb-process-heaps, requires
+    :mark-region-gc). A heap owned by an SB-FIBER fiber is collected on its
+    own without stopping other threads and freed wholesale when the fiber is
+    released; objects move between heaps by copying (SEND-MESSAGE /
+    RECEIVE-MESSAGE). A store barrier signals PROCESS-HEAP-STORE-ERROR when
+    a pointer store would make a global object or another heap refer into
+    the installed heap. Heaps are collected generationally (minor
+    collections of the young generation, full collections on request or by
+    policy) and own 4 KiB blocks rather than whole GC pages, so a small
+    heap or message costs a few kilobytes; a global collection walks a
+    heap's young objects and an outgoing-root summary rather than the whole
+    heap, and local collections on different threads run concurrently.
+    MAKE-SHARED-BINARY allocates a payload that messages share rather than
+    copy. See the sb-fiber manual section.
   * new contrib module: SB-MANUAL contains the SBCL manual in docstrings of
     section definitions, which tie together the docstrings of normal Lisp
     definitions. The manual can thus be explored interactively in the usual

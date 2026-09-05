@@ -2,6 +2,13 @@
 
 (defpackage :sb-fiber
   (:use :cl :sb-alien :sb-ext)
+  #+sb-process-heaps
+  (:import-from :sb-kernel
+                #:process-heap-exhausted-error
+                #:process-heap-store-error
+                #:process-heap-store-error-object
+                #:process-heap-store-error-value
+                #:process-heap-store-error-kind)
   (:export
    #:*current-fiber*
    #:current-fiber
@@ -48,7 +55,74 @@
    #:fiber-state-error-state
    #:fiber-state-error-expected
    #:no-current-fiber-error
-   #:no-current-fiber-error-operation))
+   #:no-current-fiber-error-operation
+   #:heap-fiber-escape
+   #:heap-fiber-escape-fiber
+   #:heap-fiber-escape-condition-type
+   #:heap-fiber-escape-message
+   ;; Process heaps
+   #:heap
+   #:heap-p
+   #:make-heap
+   #:release-heap
+   #:heap-name
+   #:heap-id
+   #:heap-fiber
+   #:heap-alive-p
+   #:heap-released-p
+   #:current-heap
+   #:object-heap
+   #:with-heap
+   #:without-heap
+   #:heap-gc
+   #:heap-check-stores
+   #:heap-strict-p
+   #:heap-bytes-allocated
+   #:heap-bytes-live
+   #:heap-bytes-since-gc
+   #:heap-gc-count
+   #:heap-minor-gc-count
+   #:heap-major-gc-count
+   #:heap-bytes-old
+   #:heap-fullsweep-after
+   #:heap-gc-run-time
+   #:heap-page-count
+   #:heap-block-count
+   #:heap-outgoing-count
+   #:heap-global-root-count
+   #:local-gc-concurrency-peak
+   #:heap-mailbox-count
+   #:heap-mailbox-bytes
+   #:*default-heap-gc-threshold*
+   #:fiber-heap
+   #:copy-for-transfer
+   #:globalize
+   #:make-shared-binary
+   #:shared-binary-p
+   #:send-message
+   #:receive-message
+   #:verify-heap
+   #:verify-all-heaps
+   #:heap-violations
+   #:reset-heap-violations
+   #:heap-reference-checking
+   ;; Heap conditions
+   #:heap-error
+   #:heap-error-heap
+   #:dead-heap-error
+   #:heap-in-use-error
+   #:heap-not-current-error
+   #:no-current-heap-error
+   #:no-current-heap-error-operation
+   #:untransferable-object
+   #:untransferable-object-object
+   #:cross-heap-reference
+   #:cross-heap-reference-object
+   #:process-heap-exhausted-error
+   #:process-heap-store-error
+   #:process-heap-store-error-object
+   #:process-heap-store-error-value
+   #:process-heap-store-error-kind))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (setf (sb-int:system-package-p (find-package "SB-FIBER")) t))

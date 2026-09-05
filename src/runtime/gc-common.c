@@ -76,8 +76,19 @@ int sb_sprof_enabled;
 //    AND all embedded functions.
 static lispobj (*transother[64])(lispobj object);
 sword_t (*sizetab[256])(lispobj *where);
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+#undef weak_pointer_chain
+#undef weak_vectors
 struct weak_pointer *weak_pointer_chain = WEAK_POINTER_CHAIN_END;
 struct cons *weak_vectors;
+_Thread_local struct weak_pointer **current_weak_pointer_chain = &weak_pointer_chain;
+_Thread_local struct cons **current_weak_vectors = &weak_vectors;
+#define weak_pointer_chain (*current_weak_pointer_chain)
+#define weak_vectors (*current_weak_vectors)
+#else
+struct weak_pointer *weak_pointer_chain = WEAK_POINTER_CHAIN_END;
+struct cons *weak_vectors;
+#endif
 
 os_vm_size_t bytes_consed_between_gcs = 12*1024*1024;
 
@@ -1329,8 +1340,18 @@ void smash_weak_pointers(void)
  * processed automatically; only the yougest generation is GC'd by
  * default. On the other hand, all applications will need an
  * occasional full GC anyway, so it's not that bad either.  */
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+#undef weak_hash_tables
 struct hash_table *weak_hash_tables = NULL;
 struct hopscotch_table weak_objects; // other than weak pointers
+_Thread_local struct hash_table **current_weak_hash_tables = &weak_hash_tables;
+_Thread_local struct hopscotch_table *current_weak_objects = &weak_objects;
+#define weak_hash_tables (*current_weak_hash_tables)
+#define weak_objects (*current_weak_objects)
+#else
+struct hash_table *weak_hash_tables = NULL;
+struct hopscotch_table weak_objects; // other than weak pointers
+#endif
 
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME weak_ht_alivep_funs
 static inline bool pointer_survived_gc_yet(lispobj obj) {

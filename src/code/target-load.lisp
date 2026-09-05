@@ -225,6 +225,7 @@
    :EXTERNAL-FORMAT
        The external-format to use when opening the FILENAME. The default is
        :DEFAULT which uses the SB-EXT:*DEFAULT-SOURCE-EXTERNAL-FORMAT*."
+  (sb-kernel::with-global-heap
   (labels ((load-stream (stream faslp)
              (if (and (fd-stream-p stream)
                       (eq (sb-impl::fd-stream-fd-type stream) :directory))
@@ -323,7 +324,7 @@
                  ;; Case 3: Open using the given external format, process as source.
                  (with-open-file (stream pathname :external-format external-format
                                                   :class 'form-tracking-stream)
-                   (load-stream stream nil)))))))))
+                   (load-stream stream nil))))))))))
 
 ;; This implements the defaulting SBCL seems to have inherited from
 ;; CMU.  This routine does not try to perform any loading; all it does

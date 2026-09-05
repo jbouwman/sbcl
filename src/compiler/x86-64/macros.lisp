@@ -476,7 +476,9 @@
                            object index (index-scale n-word-bytes index)))))
            ,@(if barrier
                  `((when barrier
-                     (emit-gengc-barrier object nil val-temp t))
+                     (emit-gengc-barrier object nil val-temp t)
+                     #+sb-process-heaps
+                     (emit-process-heap-store-check object val-ref val-temp))
                    (emit-store ea value val-temp))
                  `((inst mov :qword ea (encode-value-if-immediate value ,tagged)))))))))
 

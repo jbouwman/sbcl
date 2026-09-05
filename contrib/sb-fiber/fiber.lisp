@@ -13,6 +13,9 @@
 (defvar *default-fiber-binding-stack-size* 8192
   "Default binding stack size (bytes) for MAKE-FIBER.")
 
+#-sb-process-heaps
+(defmacro without-heap (&body body) `(progn ,@body))
+
 (defmacro with-fiber-sap ((sap alloc-form) &body body)
   "Bind SAP to ALLOC-FORM.  Signal if the SAP is null; on non-local
 exit from BODY, call %FIBER-RELEASE on SAP."
@@ -41,8 +44,10 @@ and register it with the current thread.  Caller arranges
 (defun make-main-fiber (&key name)
   "Create a fiber representing the current thread's own stack and bind
 *CURRENT-FIBER* to it.  NAME is a string label used by PRINT-OBJECT."
-  (with-fiber-sap (sap (%fiber-create-main (sb-thread:current-thread-sap)))
-    (setf *current-fiber* (%install-fiber sap nil name))))
+  (without-heap
+    (let ((name (and name (copy-seq (string name)))))
+      (with-fiber-sap (sap (%fiber-create-main (sb-thread:current-thread-sap)))
+        (setf *current-fiber* (%install-fiber sap nil name))))))
 
 (defmacro with-fiber-thread ((&key name) &body body)
   "Register a main fiber on the calling thread for the dynamic extent
@@ -56,10 +61,18 @@ of BODY and release it on exit.  A no-op if BODY is reached with
 
 (defun make-fiber (function &key name
                                  (stack-size *default-fiber-stack-size*)
-                              (binding-stack-size
-                               *default-fiber-binding-stack-size*))
-  "Create a fiber that runs FUNCTION (zero-argument) when first
-switched to.  NAME is a string label used by PRINT-OBJECT.
+                                 (binding-stack-size
+                                  *default-fiber-binding-stack-size*)
+                                 heap)
+  "Create a fiber that runs FUNCTION (a zero-argument function or the
+name of one) when first switched to.  NAME is a string label used by
+PRINT-OBJECT.
+
+HEAP, if supplied, gives the fiber a process heap of its own: T creates
+one with MAKE-HEAP, or pass a heap from MAKE-HEAP that no fiber owns
+yet.  Everything the fiber allocates then belongs to that heap, which
+is collected independently and released with the fiber.  FUNCTION must
+not itself be owned by a process heap.
 
 When FUNCTION returns, the fiber is marked DEAD and control switches
 back to its most recent resumer, delivering FUNCTION's return value
@@ -73,8 +86,36 @@ Fibers are auto-released when their owning thread exits; explicit
 RELEASE-FIBER is only needed if you want to reclaim resources sooner."
   (unless *current-fiber*
     (error 'no-current-fiber-error :operation 'make-fiber))
-  (with-fiber-sap (sap (%fiber-create stack-size binding-stack-size))
-    (%install-fiber sap function name)))
+  #-sb-process-heaps
+  (when heap
+    (error "process heaps are not supported in this build"))
+  #+sb-process-heaps
+  (unless (or (symbolp function) (zerop (sb-vm::object-owner function)))
+    (error 'cross-heap-reference :object function))
+  #+sb-process-heaps
+  (when (and (heap-p heap) (heap-fiber heap))
+    (error "~S is already owned by ~S" heap (heap-fiber heap)))
+  ;; The wrapper is shared bookkeeping, never process-owned.
+  (without-heap
+    (let ((name (and name (copy-seq (string name)))))
+      (with-fiber-sap (sap (%fiber-create stack-size binding-stack-size))
+        (let ((fiber (%install-fiber sap function name)))
+          #+sb-process-heaps
+          (when heap
+            (let* ((created (eq heap t))
+                   (heap (if created (make-heap :name name) heap))
+                   (rc (%fiber-set-heap sap (heap-sap-or-lose heap))))
+              (unless (zerop rc)
+                (when created (release-heap heap))
+                (error "could not attach ~S to ~S: ~D" heap fiber rc))
+              (setf (fiber-%heap fiber) heap
+                    (heap-fiber heap) fiber)))
+          fiber)))))
+
+(defun fiber-heap (fiber)
+  "The process heap owned by FIBER, or NIL."
+  (declare (type fiber fiber))
+  (fiber-%heap fiber))
 
 (defun release-fiber (fiber)
   "Release FIBER.  For a worker fiber, unmaps its stacks and frees the
@@ -89,6 +130,13 @@ exits."
       (error 'fiber-state-error
              :fiber fiber :state :running
              :expected '(:new :runnable :dead)))
+    #+sb-process-heaps
+    (let ((heap (fiber-%heap fiber)))
+      (when heap
+        (%fiber-set-heap (fiber-sap fiber) (sb-sys:int-sap 0))
+        (setf (fiber-%heap fiber) nil
+              (heap-fiber heap) nil)
+        (release-heap heap)))
     (%fiber-release (shiftf (fiber-sap fiber) (sb-sys:int-sap 0)))
     (setf (fiber-thread fiber)     nil
           (fiber-released-p fiber) t)
@@ -181,6 +229,7 @@ alone (yield semantics -- preserves TO's prior caller chain)."
          (from-ctx (%fiber-ctx from-sap))
          (to-ctx (%fiber-ctx to-sap)))
     (check-switch from to from-ctx to-ctx)
+    (setf values (globalize-values values))
     (if update-return-p
         (stage-return from to from-sap to-ctx values)
         (setf (fiber-value to) values))
@@ -265,7 +314,7 @@ before its entry function runs)."
            (type condition condition))
   (unless (fiber-alive-p fiber)
     (error 'dead-fiber-error :fiber fiber))
-  (setf (fiber-pending-condition fiber) condition)
+  (setf (fiber-pending-condition fiber) (globalize-condition fiber condition))
   fiber)
 
 (defmacro with-interrupted-fiber ((fiber condition) &body body)
@@ -307,6 +356,20 @@ BODY; SWITCH-FIBER refuses to suspend a pinned fiber.  Pins nest."
        (incf (fiber-pin-count ,f))
        (unwind-protect (progn ,@body)
          (decf (fiber-pin-count ,f))))))
+
+;;; --- Messages ---
+
+#+sb-process-heaps
+(defun send-message (target object)
+  "Copy OBJECT into TARGET's mailbox, where TARGET is a heap or a fiber
+that owns one.  The copy is made with COPY-FOR-TRANSFER; TARGET adopts
+it without further copying when it calls RECEIVE-MESSAGE.  May be
+called from any thread."
+  (%send-to-heap (if (fiber-p target)
+                     (or (fiber-heap target)
+                         (error "~S has no process heap" target))
+                     target)
+                 object))
 
 ;;; --- Cross-thread migration ---
 

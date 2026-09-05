@@ -39,6 +39,7 @@
 
 #include "validate.h"
 #include "gc.h"
+#include "process-heap.h"
 #include "code.h"
 #include "graphvisit.h"
 #include "genesis/instance.h"
@@ -1086,6 +1087,9 @@ void gc_allocate_ptes()
     ++page_table;
     gc_page_pins = calloc(page_table_pages, 1);
     gc_assert(gc_page_pins);
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    process_heap_init(page_table_pages);
+#endif
 #ifdef LISP_FEATURE_DARWIN_JIT
     page_execp = calloc(page_table_pages, 1);
 #endif

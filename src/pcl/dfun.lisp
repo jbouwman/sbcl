@@ -738,6 +738,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
 (defvar *early-p* nil)
 
 (defun make-initial-dfun (gf)
+  (sb-kernel::with-global-heap
   (let ((initial-dfun #'(lambda (&rest args) (initial-dfun gf args))))
     (multiple-value-bind (dfun cache info)
         (if (eq **boot-state** 'complete)
@@ -752,7 +753,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
                       (values (make-early-accessor gf type) nil nil)
                       (make-final-accessor-dfun gf type))
                   (values initial-dfun nil (initial-dfun-info)))))
-      (set-dfun gf dfun cache info))))
+      (set-dfun gf dfun cache info)))))
 
 (defun make-early-accessor (gf type)
   (let* ((methods (early-gf-methods gf))
@@ -778,6 +779,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
                         instance))))))
 
 (defun initial-dfun (gf args)
+  (sb-kernel::with-global-heap
   (dfun-miss (gf args wrappers invalidp nemf ntype nindex)
     (cond (invalidp)
           ((and ntype nindex)
@@ -788,7 +790,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
           (t
            (dfun-update gf #'make-checking-dfun
             ;; nemf is suitable only for caching, have to do this:
-            (cache-miss-values gf args 'checking))))))
+            (cache-miss-values gf args 'checking)))))))
 
 (defun make-final-dfun (gf &optional classes-list)
   (multiple-value-bind (dfun cache info)
@@ -1722,6 +1724,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
            (return t)))))
 
 (defun update-dfun (generic-function &optional dfun cache info)
+  (sb-kernel::with-global-heap
   (let ((early-p (early-gf-p generic-function)))
     (flet ((update ()
              ;; If GENERIC-FUNCTION has a CALL-NEXT-METHOD argument
@@ -1766,7 +1769,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
             ;; where we can end up in a metacircular loop here? In
             ;; case there are, better fetch it while interrupts are
             ;; still enabled...
-            (sb-thread::call-with-recursive-system-lock #'update lock))))))
+            (sb-thread::call-with-recursive-system-lock #'update lock)))))))
 
 ;;; These functions aren't used in SBCL, or documented anywhere that
 ;;; I'm aware of, but they look like they might be useful for

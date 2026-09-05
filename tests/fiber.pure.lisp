@@ -11,6 +11,11 @@
              (not (member :win32 *features*)))
   (invoke-restart 'run-tests::skip-file))
 
+;;; The pure-test runner deletes the packages a file creates once it is
+;;; done with it, but REQUIRE still remembers the module, so reload the
+;;; contrib when an earlier file's copy has been deleted.
+(unless (find-package "SB-FIBER")
+  (setf *modules* (remove "SB-FIBER" *modules* :test #'string=)))
 (require :sb-fiber)
 (use-package :sb-fiber)
 

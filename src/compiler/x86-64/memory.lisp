@@ -48,6 +48,33 @@
 ;;;    be younger than the newly constructed thing.
 ;;; 2. hash-table k/v pair should mark once only.
 ;;;    (the vector elements are certainly on the same card)
+;;; Process heap store barrier; see the arm64 version for the protocol.
+#+sb-process-heaps
+(defun store-check-worthy-tn-p (tn)
+  (sc-is tn descriptor-reg control-stack))
+
+#+sb-process-heaps
+(defun emit-process-heap-store-check (object value-tn-ref scratch-reg)
+  (when (and value-tn-ref
+             (not (eq value-tn-ref t))
+             (do ((ref value-tn-ref (tn-ref-across ref))) ((null ref) nil)
+               (when (store-check-worthy-tn-p (tn-ref-tn ref)) (return t))))
+    (let ((skip (gen-label)))
+      (inst cmp :qword (thread-slot-ea thread-process-heap-check-slot) 0)
+      (inst jmp :e skip)
+      (flet ((encode (x)
+               (sc-case x
+                 (constant (load-constant nil x scratch-reg) scratch-reg)
+                 (t (let ((value (encode-value-if-immediate x)))
+                      (if (integerp value) (constantize value) value))))))
+        (do ((ref value-tn-ref (tn-ref-across ref))) ((null ref))
+          (let ((tn (tn-ref-tn ref)))
+            (when (store-check-worthy-tn-p tn)
+              (inst push (encode object))
+              (inst push (encode tn))
+              (invoke-asm-routine 'call 'process-heap-store-check sb-assem::*current-vop*)))))
+      (emit-label skip))))
+
 (defun emit-gengc-barrier (object cell-address scratch-reg &optional value-tn-ref allocator)
   #-soft-card-marks (declare (ignore object cell-address scratch-reg value-tn-ref allocator))
   #+soft-card-marks
@@ -60,7 +87,9 @@
                (inst lea scratch-reg cell-address)
                ;; OBJECT could be a symbol in immobile space
                (inst mov scratch-reg (encode-value-if-immediate object)))
-           (mark-gc-card scratch-reg))
+           (mark-gc-card scratch-reg)
+           #+sb-process-heaps
+           (emit-process-heap-store-check object value-tn-ref scratch-reg))
           #+debug-gc-barriers
           (t
            (flet ((encode (x)
