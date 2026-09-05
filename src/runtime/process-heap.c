@@ -383,6 +383,11 @@ void process_heap_exhausted(struct process_heap *h, sword_t nbytes)
         ? h->hard_limit - h->bytes_allocated : 0;
     available &= ~(uword_t)LOWTAG_MASK;
     gc_assert(get_pseudo_atomic_atomic(th));
+    /* A local collection request is found through current_heap. H is about
+     * to be switched out, so retract its request before dispatching other
+     * pending work. */
+    bool retract_collection = h->gc_pending;
+    h->gc_pending = 0;
     /* Nothing more can be allocated in H, so the error must be built and
      * signaled with the global heap installed.  Lisp reinstalls H (see
      * process_heap_take_exhausted) if the error is handled inside the
@@ -390,7 +395,16 @@ void process_heap_exhausted(struct process_heap *h, sword_t nbytes)
     process_heap_switch_in_pa(th, NULL);
     thread_extra_data(th)->exhausted_heap = h;
     clear_pseudo_atomic_atomic(th);
-    if (get_pseudo_atomic_interrupted(th))
+    if (retract_collection
+        && read_TLS(GC_PENDING, th) == NIL
+#if THREADS_USING_GCSIGNAL
+        && read_TLS(STOP_FOR_GC_PENDING, th) == NIL
+#endif
+        && !thread_interrupt_data(th).pending_handler)
+        arch_clear_pseudo_atomic_interrupted(th);
+    /* The collection request may also have blocked deferrable signals.
+     * Run the pending handler after retracting it so that state is restored. */
+    if (retract_collection || get_pseudo_atomic_interrupted(th))
         do_pending_interrupt();
     /* Both values are double-word aligned, so they read as fixnums. */
     funcall2(StaticSymbolFunction(PROCESS_HEAP_EXHAUSTED_ERROR),
