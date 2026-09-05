@@ -230,9 +230,10 @@ alone (yield semantics -- preserves TO's prior caller chain)."
          (to-ctx (%fiber-ctx to-sap)))
     (check-switch from to from-ctx to-ctx)
     (setf values (globalize-values values))
-    (if update-return-p
-        (stage-return from to from-sap to-ctx values)
-        (setf (fiber-value to) values))
+    (without-store-checking
+      (if update-return-p
+          (stage-return from to from-sap to-ctx values)
+          (setf (fiber-value to) values)))
     (setf *current-fiber* to)
     (%switch-prep from-sap to-sap)
     (swap-frames th-sap from-ctx to-ctx)

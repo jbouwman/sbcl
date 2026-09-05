@@ -8,6 +8,9 @@
 #+sb-fiber
 (progn
 
+#-sb-process-heaps
+(defmacro without-store-checking (&body body) `(progn ,@body))
+
 (define-alien-routine ("sb_fiber_create" %fiber-create)
     system-area-pointer
   (stack-size unsigned-long)
@@ -252,15 +255,21 @@ the slot); otherwise a no-op."
                                        (let ((fn (fiber-function f)))
                                          (funcall (if (symbolp fn) (symbol-function fn) fn)))))))
                          (when (fiber-return-fiber f)
-                           (setf (fiber-value (fiber-return-fiber f))
-                                 (globalize-values rv-list))))
+                           (let ((values (globalize-values rv-list)))
+                             (without-store-checking
+                               (setf (fiber-value (fiber-return-fiber f))
+                                     values)))))
                      (error (c)
-                       (setf (fiber-escape-condition f) (globalize-condition f c))))
+                       (let ((condition (globalize-condition f c)))
+                         (without-store-checking
+                           (setf (fiber-escape-condition f) condition)))))
                    (return-from done)))
             (macrolet ((with-root-catch (tag &body inner)
                          `(let ((vals (multiple-value-list (catch ,tag ,@inner))))
-                            (setf (fiber-escape-throw-tag f) ,tag
-                                  (fiber-escape-throw-values f) (globalize-values vals))
+                            (let ((values (globalize-values vals)))
+                              (without-store-checking
+                                (setf (fiber-escape-throw-tag f) ,tag
+                                      (fiber-escape-throw-values f) values)))
                             (return-from done))))
               (with-root-catch 'sb-impl::toplevel-catcher
                 (with-root-catch 'sb-impl::%end-of-the-world
