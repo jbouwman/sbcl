@@ -19,6 +19,11 @@
     (unsigned 32)
   (object unsigned))
 
+(define-alien-routine ("process_heap_check_store" %process-heap-check-store)
+    void
+  (value unsigned-long)
+  (object unsigned-long))
+
 (defun object-owner (object)
   "Return the id of the process heap holding OBJECT, or 0 if OBJECT is
 immediate or lives in the global heap."
@@ -26,6 +31,12 @@ immediate or lives in the global heap."
       0
       (with-pinned-objects (object)
         (%process-heap-owner-of (get-lisp-obj-address object)))))
+
+(defun check-process-heap-store (object value)
+  "Apply the active process-heap store policy to storing VALUE in OBJECT."
+  (with-pinned-objects (object value)
+    (%process-heap-check-store (get-lisp-obj-address value)
+                               (get-lisp-obj-address object))))
 
 (defun process-owned-p (object)
   (/= 0 (object-owner object)))

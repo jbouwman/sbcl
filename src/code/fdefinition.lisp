@@ -97,36 +97,40 @@
 
 #-linkage-space (define-load-time-global *fdefn-of-nil* (make-fdefn nil))
 (defun find-or-create-fdefn (name)
-  (cond
-    ((symbolp name)
-     #+linkage-space name
-     #-linkage-space
-     (let ((fdefn (sb-vm::%symbol-fdefn name)))
-       (cond ((and fdefn (neq fdefn 0)) fdefn)
-             ((null name) *fdefn-of-nil*)
-             (t (let* ((new (make-fdefn name))
-                       (actual (sb-vm::cas-symbol-fdefn name 0 new)))
-                  (if (eql actual 0) new (the fdefn actual)))))))
-    ((find-fdefn name))
-    (t
-      ;; We won't reach here if the name was not legal
-      (let (made-new)
-        (dx-flet ((new (name)
-                    (setq made-new t)
-                    (make-fdefn name)))
-          (let ((fdefn (with-globaldb-name (key1 key2) name
-                        :simple (get-info-value-initializing
-                                 :function :definition name (new name))
-                        :hairy (get-fancily-named-fdefn name #'new))))
-            ;; Slot accessors spring into existence as soon as a reference
-            ;; is made to the respective fdefn, but we can't do this in
-            ;; (flet NEW) because ENSURE-ACCESSOR calls (SETF FDEFINITION)
-            ;; which would recurse, as the fdefn would not have been
-            ;; installed yet.
-            (when (and made-new
-                       (typep name '(cons (eql sb-pcl::slot-accessor))))
-              (sb-pcl::ensure-accessor name))
-            fdefn))))))
+  #+sb-process-heaps
+  (when (plusp (sb-vm::object-owner name))
+    (sb-vm::check-process-heap-store 'fdefinition name))
+  (sb-kernel::with-global-heap
+    (cond
+      ((symbolp name)
+       #+linkage-space name
+       #-linkage-space
+       (let ((fdefn (sb-vm::%symbol-fdefn name)))
+         (cond ((and fdefn (neq fdefn 0)) fdefn)
+               ((null name) *fdefn-of-nil*)
+               (t (let* ((new (make-fdefn name))
+                         (actual (sb-vm::cas-symbol-fdefn name 0 new)))
+                    (if (eql actual 0) new (the fdefn actual)))))))
+      ((find-fdefn name))
+      (t
+       ;; We won't reach here if the name was not legal
+       (let (made-new)
+         (dx-flet ((new (name)
+                     (setq made-new t)
+                     (make-fdefn name)))
+           (let ((fdefn (with-globaldb-name (key1 key2) name
+                          :simple (get-info-value-initializing
+                                   :function :definition name (new name))
+                          :hairy (get-fancily-named-fdefn name #'new))))
+             ;; Slot accessors spring into existence as soon as a reference
+             ;; is made to the respective fdefn, but we can't do this in
+             ;; (flet NEW) because ENSURE-ACCESSOR calls (SETF FDEFINITION)
+             ;; which would recurse, as the fdefn would not have been
+             ;; installed yet.
+             (when (and made-new
+                        (typep name '(cons (eql sb-pcl::slot-accessor))))
+               (sb-pcl::ensure-accessor name))
+             fdefn)))))))
 
 ;;; Remove NAME's FTYPE information unless it was explicitly PROCLAIMED.
 ;;; The NEW-FUNCTION argument is presently unused, but could be used
