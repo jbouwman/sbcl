@@ -124,6 +124,25 @@
       (assert (equal *strict-fiber-store-target* '(:unchanged)))
       (release-fiber f))))
 
+(with-test (:name (:process-heap :fiber :hard-limit-signals-in-fiber))
+  (with-fiber-thread ()
+    (let ((f (make-fiber
+              (lambda ()
+                (block exhausted
+                  (handler-bind
+                      ((process-heap-exhausted-error
+                         (lambda (condition)
+                           (declare (ignore condition))
+                           (return-from exhausted :caught))))
+                    (let ((objects nil))
+                      (loop repeat 200000
+                            do (push (make-string 256 :initial-element #\y)
+                                     objects)))
+                    :not-exhausted)))
+              :heap (make-heap :hard-limit (* 4 1024 1024)))))
+      (assert (eq (resume-fiber f) :caught))
+      (release-fiber f))))
+
 (with-test (:name (:process-heap :fiber :interrupt-with-local-condition))
   (with-fiber-thread ()
     (let* ((f (make-fiber (lambda ()
