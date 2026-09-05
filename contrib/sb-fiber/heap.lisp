@@ -213,6 +213,14 @@ Restores the previous heap on exit."
              (unwind-protect (progn ,@body)
                (%switch-heap ,prev)))))))
 
+(defmacro without-store-checking (&body body)
+  "Execute BODY with process-heap store checking suspended. Restore the
+previous checking state on exit."
+  (let ((saved (gensym "SAVED")))
+    `(let ((,saved (sb-vm::%store-check-suspend)))
+       (unwind-protect (progn ,@body)
+         (sb-vm::%store-check-resume ,saved)))))
+
 (defun call-with-heap (heap thunk)
   (declare (function thunk) (dynamic-extent thunk))
   (let ((prev (current-heap-address))

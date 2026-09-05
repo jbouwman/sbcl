@@ -104,6 +104,26 @@
           (assert (search "boom !!!" (princ-to-string c)))))
       (release-fiber f))))
 
+(defvar *strict-fiber-store-target* (list :unchanged))
+
+(with-test (:name (:process-heap :fiber :strict-store-error-can-return))
+  (with-fiber-thread ()
+    (let ((f (make-fiber
+              (lambda ()
+                (block handled
+                  (handler-bind
+                      ((process-heap-store-error
+                         (lambda (condition)
+                           (return-from handled
+                             (list :caught
+                                   (process-heap-store-error-kind condition))))))
+                    (setf (car *strict-fiber-store-target*) (list :written))
+                    :store-succeeded)))
+              :heap (make-heap :strict t))))
+      (assert (equal (resume-fiber f) '(:caught :escape)))
+      (assert (equal *strict-fiber-store-target* '(:unchanged)))
+      (release-fiber f))))
+
 (with-test (:name (:process-heap :fiber :interrupt-with-local-condition))
   (with-fiber-thread ()
     (let* ((f (make-fiber (lambda ()
