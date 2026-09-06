@@ -627,3 +627,30 @@ established first so that establishing it cannot allocate in between."
     (setf stop t)
     (dolist (th senders)
       (assert (member (sb-thread:join-thread th) '(:dead :stopped))))))
+
+;;; --- A global reference into a released heap ---
+
+;;; The store barrier covers stores into objects that already exist, so
+;;; a closure built in the global heap over a process object escapes
+;;; unseen: a closure captures its values when it is built.  Once the
+;;; heap is released its pages are free, and following the stale pointer
+;;; means tracing freed memory.  A global collection has to treat it as
+;;; a leaf, and report it where ownership is being checked.
+
+(defvar *stale-global-reference* (list nil))
+
+(with-test (:name (:process-heap :released :stale-global-reference-is-a-leaf))
+  (let ((h (make-heap :check-stores nil)))
+    (with-heap (h)
+      ;; Large, so the heap owns pages of its own that a small global
+      ;; allocation will not take back before the collection below.
+      (setf (car *stale-global-reference*)
+            (make-array (* 64 1024) :initial-element 7)))
+    (assert (eq (object-heap (car *stale-global-reference*)) h))
+    (release-heap h)
+    ;; The collection must survive the stale pointer, and name it.
+    (let ((violations (verify-all-heaps)))
+      (assert (member *stale-global-reference* violations :key #'first)))
+    (setf (car *stale-global-reference*) nil)
+    (assert (not (member *stale-global-reference* (verify-all-heaps)
+                         :key #'first)))))
