@@ -480,8 +480,38 @@ void process_heap_note_violation(lispobj *source, lispobj *slot, lispobj target)
 
 int process_heap_violation_count(void)
 {
-    int n = nviolations;
+    int n = __atomic_load_n(&nviolations, __ATOMIC_ACQUIRE);
     return n > MAX_VIOLATIONS ? MAX_VIOLATIONS : n;
+}
+
+int process_heap_violation_capacity(void)
+{
+    return MAX_VIOLATIONS;
+}
+
+/* Clear the record and copy out what it held, in one step.  The noter
+ * runs inside collections and takes no lock, so a caller that reads the
+ * record and then resets it loses whatever is noted in between; taking
+ * the count with an exchange means such a note is counted by the next
+ * take instead.  Returns the number noted since the last take, which is
+ * exact and can exceed the number of entries: a burst larger than the
+ * record keeps its first entries.  Sets *NDETAILS to the number copied.
+ *
+ * Entries are copied word by word, so a note landing during the copy
+ * can split one across two violations.  Each word is still one a noter
+ * wrote, which is what matters for handing the source back to Lisp. */
+int process_heap_take_violations(lispobj *out, int capacity, int *ndetails)
+{
+    int n = __atomic_exchange_n(&nviolations, 0, __ATOMIC_ACQ_REL);
+    int ncopy = n < capacity ? n : capacity;
+    if (ncopy > MAX_VIOLATIONS) ncopy = MAX_VIOLATIONS;
+    for (int i = 0; i < ncopy; i++) {
+        out[3 * i]     = violations[i][0];
+        out[3 * i + 1] = violations[i][1];
+        out[3 * i + 2] = violations[i][2];
+    }
+    *ndetails = ncopy;
+    return n;
 }
 
 int process_heap_get_violation(int i, lispobj *out)
@@ -495,7 +525,7 @@ int process_heap_get_violation(int i, lispobj *out)
 
 void process_heap_reset_violations(void)
 {
-    nviolations = 0;
+    __atomic_store_n(&nviolations, 0, __ATOMIC_RELEASE);
 }
 
 /* --- Mailbox --- */

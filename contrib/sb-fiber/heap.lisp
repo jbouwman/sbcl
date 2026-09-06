@@ -60,6 +60,13 @@
   (heap system-area-pointer))
 
 (define-alien-routine ("process_heap_violation_count" %heap-violation-count) int)
+(define-alien-routine ("process_heap_violation_capacity" %heap-violation-capacity) int)
+
+;;; How many violations TAKE-HEAP-VIOLATIONS makes room for.  The
+;;; runtime's own record may be larger or smaller; it copies as many as
+;;; fit and reports the number noted either way, so the two need not
+;;; agree for the count to be exact.
+(defconstant +violation-detail-entries+ 64)
 (define-alien-routine ("process_heap_reset_violations" %heap-reset-violations) void)
 
 (define-alien-routine ("process_heap_seal" %heap-seal) int
@@ -700,6 +707,45 @@ reset, as a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS)."
 (defun reset-heap-violations ()
   (%heap-reset-violations)
   (values))
+
+(defun take-heap-violations ()
+  "Remove and return the ownership violations recorded since the last
+call: a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS), and as a
+second value the number noted, which is exact and may exceed the length
+of the list -- a burst larger than the record keeps its first entries.
+
+Clearing the record and copying it out happen in one step.  Violations
+are noted from collections and from the store barrier on any thread,
+without a lock, so one noted between a HEAP-VIOLATIONS call and a
+RESET-HEAP-VIOLATIONS call is lost: neither call sees it and the reset
+discards it.  Use this wherever violations are drained while other
+threads are running."
+  ;; The buffer is stack-allocated: this runs whenever a process
+  ;; finishes, so it must not allocate per call.  The runtime copies at
+  ;; most as many entries as it is offered room for, and the count it
+  ;; returns is exact whether or not they all fit.
+  ;; 192 words is +VIOLATION-DETAIL-ENTRIES+ entries of three; the array
+  ;; dimension has to be a literal, since the whole file is read as one
+  ;; form before any of it is evaluated.
+  (sb-alien:with-alien ((buffer (sb-alien:array sb-alien:unsigned-long 192))
+                        (ndetails sb-alien:int 0))
+    (let ((total (sb-alien:alien-funcall
+                  (sb-alien:extern-alien
+                   "process_heap_take_violations"
+                   (function sb-alien:int (* sb-alien:unsigned-long)
+                             sb-alien:int (* sb-alien:int)))
+                  (sb-alien:cast buffer (* sb-alien:unsigned-long))
+                  +violation-detail-entries+
+                  (sb-alien:addr ndetails)))
+          (result '()))
+      (without-heap
+        (dotimes (i ndetails)
+          (let ((source (sb-alien:deref buffer (* 3 i))))
+            (push (list (if (zerop source) nil (sb-kernel:%make-lisp-obj source))
+                        (sb-alien:deref buffer (+ (* 3 i) 1))
+                        (sb-alien:deref buffer (+ (* 3 i) 2)))
+                  result)))
+        (values (nreverse result) total)))))
 
 (defun verify-all-heaps ()
   "Run a full global collection with reference checking enabled and
