@@ -143,6 +143,150 @@
       (assert (eq (resume-fiber f) :caught))
       (release-fiber f))))
 
+;;; --- Hard-limit exhaustion and deferred interrupt state ---
+
+;;; The allocation slow path may ask for a local collection of the heap
+;;; it then finds exhausted, in the same call: it sets
+;;; pseudo-atomic-interrupted and blocks deferrable signals until the
+;;; trap at the end of the pseudo-atomic section.  Exhaustion switches
+;;; the heap out, so that request can no longer be found and has to be
+;;; retracted.  What must survive the retraction: deferrable signals end
+;;; up unblocked, pseudo-atomic-interrupted ends up clear, and pending
+;;; work that has nothing to do with the heap still runs when it is due.
+
+(sb-alien:define-alien-routine "deferrables_blocked_p" sb-alien:int
+  (sigset sb-alien:unsigned-long))
+
+(defun deferrable-signals-blocked-p ()
+  ;; A C bool: only the low byte is defined.
+  (logtest #xff (deferrables-blocked-p 0)))
+
+(defun pseudo-atomic-interrupted-p ()
+  (logtest (sb-sys:sap-ref-word (sb-thread:current-thread-sap)
+                                (ash sb-vm::thread-pseudo-atomic-bits-slot
+                                     sb-vm:word-shift))
+           #+arm64 sb-vm::pseudo-atomic-interrupted-flag
+           #-arm64 1))
+
+(defmacro spin-until (form &optional (seconds 10))
+  `(loop with deadline = (+ (get-internal-real-time)
+                            (* ,seconds internal-time-units-per-second))
+         until ,form
+         do (assert (< (get-internal-real-time) deadline) ()
+                    "timed out waiting for ~S" ',form)))
+
+;;; MAKE-STRING is flushable, so a discarded one is deleted outright.
+(declaim (notinline keep-alive))
+(defun keep-alive (object) object)
+
+(defun exhaust-installed-heap ()
+  "Reach the installed heap's hard limit on an allocation that asks for
+a collection of that heap first, and handle the resulting error within
+the heap's dynamic extent.  Returns :CAUGHT.
+
+The sequence is what makes the collection request and the exhaustion
+land in the same slow-path call, which is the case the retraction is
+for.  HEAP-GC leaves nothing claimed since the last collection, so the
+next slow-path allocation asks for nothing and claims a block; the one
+after it is over the threshold, so it asks for a collection -- and is
+also the one that does not fit under the hard limit.  The handler is
+established first so that establishing it cannot allocate in between."
+  (block exhausted
+    (handler-bind ((process-heap-exhausted-error
+                     (lambda (condition)
+                       (declare (ignore condition))
+                       (return-from exhausted :caught))))
+      (heap-gc)
+      (keep-alive (make-string 64 :initial-element #\p))
+      (keep-alive (make-string (* 1024 1024) :initial-element #\x)))
+    :not-exhausted))
+
+(defvar *interruption-ran* nil)
+
+(defun note-interruption ()
+  (setf *interruption-ran* t))
+
+(with-test (:name (:process-heap :hard-limit :retraction-unblocks-deferrables))
+  (with-test-heap (h :gc-threshold 1 :hard-limit (* 1024 1024))
+    (with-heap (h)
+      (assert (eq (exhaust-installed-heap) :caught))
+      (assert (eq (current-heap) h))
+      (assert (not (pseudo-atomic-interrupted-p)))
+      (assert (not (deferrable-signals-blocked-p))))
+    ;; A deferrable signal is still delivered afterwards.
+    (setf *interruption-ran* nil)
+    (let ((self sb-thread:*current-thread*))
+      (sb-thread:join-thread
+       (sb-thread:make-thread
+        (lambda () (sb-thread:interrupt-thread self #'note-interruption)))))
+    (spin-until *interruption-ran*)
+    (assert (not (deferrable-signals-blocked-p)))
+    (assert (not (pseudo-atomic-interrupted-p)))))
+
+(with-test (:name (:process-heap :hard-limit :retraction-keeps-deferred-handler))
+  (with-test-heap (h :gc-threshold 1 :hard-limit (* 1024 1024))
+    (setf *interruption-ran* nil)
+    (let* ((self sb-thread:*current-thread*)
+           (ready (sb-thread:make-semaphore))
+           (interrupter (sb-thread:make-thread
+                         (lambda ()
+                           (sb-thread:wait-on-semaphore ready)
+                           (sb-thread:interrupt-thread self #'note-interruption)))))
+      (sb-sys:without-interrupts
+        (sb-thread:signal-semaphore ready)
+        (spin-until sb-sys:*interrupt-pending*)
+        (assert (not *interruption-ran*))
+        (with-heap (h)
+          (assert (eq (exhaust-installed-heap) :caught))
+          (assert (eq (current-heap) h)))
+        ;; The interruption is still deferred, and nothing is left
+        ;; trapping on every allocation.
+        (assert (not *interruption-ran*))
+        (assert sb-sys:*interrupt-pending*)
+        (assert (not (pseudo-atomic-interrupted-p))))
+      ;; Leaving WITHOUT-INTERRUPTS runs it.
+      (spin-until *interruption-ran*)
+      (assert (not (pseudo-atomic-interrupted-p)))
+      (assert (not (deferrable-signals-blocked-p)))
+      (sb-thread:join-thread interrupter))))
+
+(with-test (:name (:process-heap :hard-limit :retraction-keeps-gc-pending))
+  (with-test-heap (h :gc-threshold 1 :hard-limit (* 1024 1024))
+    (let ((epoch sb-kernel::*gc-epoch*))
+      (sb-sys:without-gcing
+        (sb-ext:gc)
+        (assert sb-kernel:*gc-pending*)
+        (with-heap (h)
+          (assert (eq (exhaust-installed-heap) :caught))
+          (assert (eq (current-heap) h)))
+        (assert sb-kernel:*gc-pending*))
+      ;; Leaving WITHOUT-GCING runs the global collection.
+      (assert (not sb-kernel:*gc-pending*))
+      (assert (not (eq epoch sb-kernel::*gc-epoch*)))
+      (assert (not (pseudo-atomic-interrupted-p)))
+      (assert (not (deferrable-signals-blocked-p))))))
+
+(with-test (:name (:process-heap :hard-limit :retraction-keeps-stop-for-gc-pending))
+  (with-test-heap (h :gc-threshold 1 :hard-limit (* 1024 1024))
+    (let* ((ready (sb-thread:make-semaphore))
+           (collector (sb-thread:make-thread
+                       (lambda ()
+                         (sb-thread:wait-on-semaphore ready)
+                         (sb-ext:gc :full t)
+                         :collected))))
+      (sb-sys:without-gcing
+        (sb-thread:signal-semaphore ready)
+        (spin-until sb-kernel:*stop-for-gc-pending*)
+        (with-heap (h)
+          (assert (eq (exhaust-installed-heap) :caught))
+          (assert (eq (current-heap) h)))
+        (assert sb-kernel:*stop-for-gc-pending*))
+      ;; Leaving WITHOUT-GCING stops this thread for the other's collection.
+      (assert (eq (sb-thread:join-thread collector) :collected))
+      (assert (not sb-kernel:*stop-for-gc-pending*))
+      (assert (not (pseudo-atomic-interrupted-p)))
+      (assert (not (deferrable-signals-blocked-p))))))
+
 (with-test (:name (:process-heap :fiber :interrupt-with-local-condition))
   (with-fiber-thread ()
     (let* ((f (make-fiber (lambda ()

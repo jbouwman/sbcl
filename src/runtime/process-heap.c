@@ -395,12 +395,19 @@ void process_heap_exhausted(struct process_heap *h, sword_t nbytes)
     process_heap_switch_in_pa(th, NULL);
     thread_extra_data(th)->exhausted_heap = h;
     clear_pseudo_atomic_atomic(th);
+    /* Keep the bit set only for work that both needs the trap and clears
+     * the bit itself: a pending global collection, or a stop for another
+     * thread's.  A deferred signal handler needs neither -- when
+     * interrupts are enabled interrupt_handle_pending runs it and clears
+     * the bit on its own, and when they are disabled it cannot run, so
+     * nothing would clear the bit and the check at the end of
+     * interrupt_handle_pending would lose. */
     if (retract_collection
         && read_TLS(GC_PENDING, th) == NIL
 #if THREADS_USING_GCSIGNAL
         && read_TLS(STOP_FOR_GC_PENDING, th) == NIL
 #endif
-        && !thread_interrupt_data(th).pending_handler)
+        )
         arch_clear_pseudo_atomic_interrupted(th);
     /* The collection request may also have blocked deferrable signals.
      * Run the pending handler after retracting it so that state is restored. */
