@@ -654,3 +654,73 @@ established first so that establishing it cannot allocate in between."
     (setf (car *stale-global-reference*) nil)
     (assert (not (member *stale-global-reference* (verify-all-heaps)
                          :key #'first)))))
+
+;;; --- Strict heaps and the runtime's own bookkeeping on exit paths ---
+
+;;; A fiber's exit records its outcome in the fiber structure, which is
+;;; global, and a strict heap counts any store into a global object as a
+;;; violation.  The recording therefore runs with store checking
+;;; suspended.  What each exit path must still deliver is the outcome
+;;; itself -- the value, the condition, or the throw -- rather than a
+;;; store error raised while recording it, and checking must be back on
+;;; afterwards.
+
+(defvar *strict-exit-target* (list :unchanged))
+
+(defun make-strict-fiber (function)
+  (make-fiber function :heap (make-heap :strict t)))
+
+;;; Checking is on for HEAP: a store into a global object still signals,
+;;; and does not go through.
+(defun assert-strict-checking (heap)
+  (with-heap (heap)
+    (assert-error (setf (car *strict-exit-target*) (list :written))
+                  process-heap-store-error))
+  (assert (equal *strict-exit-target* '(:unchanged))))
+
+(with-test (:name (:process-heap :strict :normal-completion-delivers-value))
+  (with-fiber-thread ()
+    (let* ((f (make-strict-fiber (lambda () (list :done 1 2))))
+           (h (fiber-heap f)))
+      (assert (equal (resume-fiber f) '(:done 1 2)))
+      (assert (not (fiber-alive-p f)))
+      (assert-strict-checking h)
+      (release-fiber f))))
+
+(with-test (:name (:process-heap :strict :uncaught-condition-escapes))
+  (with-fiber-thread ()
+    (let* ((f (make-strict-fiber
+               (lambda () (error "escaping ~A" (list :strict)))))
+           (h (fiber-heap f)))
+      (handler-case (progn (resume-fiber f) (error "no condition escaped"))
+        (process-heap-store-error (c)
+          (error "recording the escape signalled ~A" c))
+        (simple-error (c)
+          ;; The original condition, copied out of the heap that is
+          ;; about to go away.
+          (assert (search "escaping (STRICT)" (princ-to-string c)))
+          (assert (null (object-heap c)))))
+      (assert (not (fiber-alive-p f)))
+      (assert-strict-checking h)
+      (release-fiber f))))
+
+(with-test (:name (:process-heap :strict :throw-escapes-root-frame))
+  (with-fiber-thread ()
+    (let* ((f (make-strict-fiber
+               (lambda ()
+                 (throw 'sb-thread::%return-from-thread (list :thrown :out)))))
+           (h (fiber-heap f))
+           (result
+             (handler-case
+                 (catch 'sb-thread::%return-from-thread
+                   (resume-fiber f)
+                   :no-throw)
+               (process-heap-store-error (c)
+                 (error "recording the throw signalled ~A" c)))))
+      (assert (equal result '(:thrown :out)))
+      ;; The thrown values are copies: the heap that held them is about
+      ;; to be released.
+      (assert (null (object-heap result)))
+      (assert (not (fiber-alive-p f)))
+      (assert-strict-checking h)
+      (release-fiber f))))
