@@ -724,3 +724,78 @@ established first so that establishing it cannot allocate in between."
       (assert (not (fiber-alive-p f)))
       (assert-strict-checking h)
       (release-fiber f))))
+
+;;; --- Draining the violation record while it is being written ---
+
+;;; The record is written from collections and from the store barrier on
+;;; any thread, with an atomic increment and no lock.  Reading it and
+;;; then resetting it therefore drops whatever is noted in between: the
+;;; read did not see it and the reset discards it.  TAKE-HEAP-VIOLATIONS
+;;; does both in one step, so every note is accounted for by exactly one
+;;; caller.
+
+(defvar *violation-sink* (list :sink))
+(defvar *draining* nil)
+
+(defun note-violations (start n)
+  "Note N escape violations: a store of this heap's object into a global
+one, under a heap that records rather than signals."
+  (let ((h (make-heap :check-stores :record)))
+    (unwind-protect
+         (with-heap (h)
+           (let ((mine (list :owned)))
+             (sb-thread:wait-on-semaphore start)
+             (dotimes (i n)
+               (sb-vm::check-process-heap-store *violation-sink* mine))))
+      (release-heap h)))
+  :noted)
+
+(defun drain-violations ()
+  "Drain in a loop until the noters are done, returning the total count
+drained."
+  (let ((total 0))
+    (loop while *draining*
+          do (incf total (nth-value 1 (take-heap-violations))))
+    total))
+
+(with-test (:name (:process-heap :violations :take-is-atomic))
+  (let* ((nthreads 4)
+         (per-thread 2000)
+         (expected (* nthreads per-thread))
+         (start (sb-thread:make-semaphore)))
+    (reset-heap-violations)
+    (setf *draining* t)
+    (let* ((noters (loop for i below nthreads
+                         collect (sb-thread:make-thread
+                                  #'note-violations
+                                  :arguments (list start per-thread)
+                                  :name (format nil "noter-~D" i))))
+           (drainer (sb-thread:make-thread #'drain-violations :name "drainer")))
+      (sb-thread:signal-semaphore start nthreads)
+      (dolist (th noters)
+        (assert (eq (sb-thread:join-thread th) :noted)))
+      (setf *draining* nil)
+      ;; Everything noted is drained exactly once, however the drains
+      ;; interleaved with the notes.
+      (let ((total (+ (sb-thread:join-thread drainer)
+                      (nth-value 1 (take-heap-violations)))))
+        (assert (= total expected) ()
+                "drained ~D violations, ~D were noted" total expected))
+      (assert (zerop (nth-value 1 (take-heap-violations)))))))
+
+(with-test (:name (:process-heap :violations :take-returns-details))
+  (reset-heap-violations)
+  (let ((h (make-heap :check-stores :record)))
+    (unwind-protect
+         (with-heap (h)
+           (sb-vm::check-process-heap-store *violation-sink* (list :escapee)))
+      (release-heap h))
+    (multiple-value-bind (details total) (take-heap-violations)
+      (assert (= total 1))
+      (assert (= (length details) 1))
+      (assert (eq (first (first details)) *violation-sink*))
+      (assert (null (object-heap (first details)))))
+    ;; Taking clears the record.
+    (multiple-value-bind (details total) (take-heap-violations)
+      (assert (null details))
+      (assert (zerop total)))))

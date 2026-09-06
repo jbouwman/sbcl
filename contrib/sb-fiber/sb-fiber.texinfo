@@ -478,6 +478,18 @@ violations it meets while tracing; @code{heap-violations} returns the
 list recorded so far.
 @end deffn
 
+@deffn Function take-heap-violations
+Remove and return the violations recorded since the last call, and as a
+second value the number noted, which is exact and may exceed the length
+of the list: a burst larger than the record keeps its first entries.
+
+Violations are noted from collections and from the store barrier on any
+thread, without a lock, so one noted between a @code{heap-violations}
+call and a @code{reset-heap-violations} call is lost.  This clears the
+record and copies it out in one step, and is what to use wherever
+violations are drained while other threads are running.
+@end deffn
+
 @subsubsection Rules for code running in a process heap
 
 @itemize

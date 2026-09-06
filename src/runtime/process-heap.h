@@ -227,7 +227,9 @@ void process_heap_materialize(struct process_heap *h);
 int  process_heap_verify(struct process_heap *h);
 void process_heap_note_violation(lispobj *source, lispobj *slot, lispobj target);
 int  process_heap_violation_count(void);
+int  process_heap_violation_capacity(void);
 int  process_heap_get_violation(int i, lispobj *out);
+int  process_heap_take_violations(lispobj *out, int capacity, int *ndetails);
 void process_heap_reset_violations(void);
 
 /* Mailbox: fragments are process heaps of kind FRAGMENT. */
