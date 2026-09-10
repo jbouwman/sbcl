@@ -105,6 +105,7 @@
    #:verify-all-heaps
    #:heap-violations
    #:reset-heap-violations
+   #:take-heap-violations
    #:heap-reference-checking
    ;; Heap conditions
    #:heap-error
