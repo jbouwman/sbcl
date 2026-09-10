@@ -25,6 +25,8 @@
 #include "tiny-lock.h"
 #include "gc-thread-pool.h"
 #include "queue-suballocator.h"
+#include "print.h"
+#include "genesis/closure.h"
 #include "process-heap.h"
 
 #include "genesis/cons.h"
@@ -573,13 +575,27 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
         }
         return;
       }
+      /* A pointer into a freed page is stale by construction: releasing
+       * a heap frees its pages, so a global object that still refers
+       * into one held a reference no store barrier ever saw -- a
+       * closure captures its values when it is built, and the barrier
+       * covers stores into existing objects only.  Tracing it would
+       * follow freed memory, so treat it as a leaf and record it where
+       * the ownership check would have.  A process-owned source is
+       * excluded for the same reason its other edges are ambiguous
+       * below: it may itself be dead. */
+      if (target == 0 && page_free_p(page)) {
+        if (process_heap_check_refs && source_object
+            && !process_heap_owner_of_native(source_object))
+          process_heap_note_violation(source_object, where, object);
+        return;
+      }
       /* Every allocated process object is walked as a root of a global
        * collection, dead ones included, and a dead object may still
        * point at global memory that was freed and reused since.  Treat
        * such edges as ambiguous: only mark an actual object start. */
       if (target == 0 && source_object
           && process_heap_owner_of_native(source_object)) {
-        if (page_free_p(page)) return;
         lispobj *found = find_object(object, DYNAMIC_SPACE_START);
         if (found != native_pointer(object)) return;
       }
@@ -599,12 +615,31 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
                   source_object ? process_heap_owner_of_native(source_object) : 0,
                   target, gc_active_p);
           if (source_object) {
-            fprintf(stderr, "  source header %lx size %ld page %d type %x line %x alloc %d\n",
-                    (unsigned long)*source_object, (long)object_size(source_object),
+            sword_t nwords = object_size(source_object);
+            fprintf(stderr, "  source header %lx widetag %x size %ld slot %ld page %d type %x line %x alloc %d\n",
+                    (unsigned long)*source_object, widetag_of(source_object),
+                    (long)nwords, (long)(where - source_object),
                     (int)find_page_index(source_object),
                     page_table[find_page_index(source_object)].type,
                     line_bytemap[address_line(source_object)],
                     allocation_bit_marked(source_object));
+            for (sword_t w = 0; w < nwords && w < 8; w++)
+              fprintf(stderr, "    [%ld] %lx\n", (long)w, (unsigned long)source_object[w]);
+            if (widetag_of(source_object) == CLOSURE_WIDETAG) {
+              struct iochannel io = { stderr, stdin };
+              lispobj tagged_fun =
+                ((struct closure*)source_object)->fun - FUN_RAW_ADDR_OFFSET;
+              struct simple_fun *sf = (struct simple_fun*)native_pointer(tagged_fun);
+              lispobj name =
+                debug_function_name_from_pc(fun_code_header(sf), (char*)(2 + (lispobj*)sf));
+              fprintf(stderr, "  closure name: ");
+              print_to_iochan(name, &io);
+              for (sword_t w = 2; w < nwords; w++)
+                if (is_lisp_pointer(source_object[w]) && w != (where - source_object)) {
+                  fprintf(stderr, "  closure info[%ld]: ", (long)(w - 2));
+                  brief_print(source_object[w], &io);
+                }
+            }
           }
           lose("bad object marked");
         }

@@ -627,3 +627,175 @@ established first so that establishing it cannot allocate in between."
     (setf stop t)
     (dolist (th senders)
       (assert (member (sb-thread:join-thread th) '(:dead :stopped))))))
+
+;;; --- A global reference into a released heap ---
+
+;;; The store barrier covers stores into objects that already exist, so
+;;; a closure built in the global heap over a process object escapes
+;;; unseen: a closure captures its values when it is built.  Once the
+;;; heap is released its pages are free, and following the stale pointer
+;;; means tracing freed memory.  A global collection has to treat it as
+;;; a leaf, and report it where ownership is being checked.
+
+(defvar *stale-global-reference* (list nil))
+
+(with-test (:name (:process-heap :released :stale-global-reference-is-a-leaf))
+  (let ((h (make-heap :check-stores nil)))
+    (with-heap (h)
+      ;; Large, so the heap owns pages of its own that a small global
+      ;; allocation will not take back before the collection below.
+      (setf (car *stale-global-reference*)
+            (make-array (* 64 1024) :initial-element 7)))
+    (assert (eq (object-heap (car *stale-global-reference*)) h))
+    (release-heap h)
+    ;; The collection must survive the stale pointer, and name it.
+    (let ((violations (verify-all-heaps)))
+      (assert (member *stale-global-reference* violations :key #'first)))
+    (setf (car *stale-global-reference*) nil)
+    (assert (not (member *stale-global-reference* (verify-all-heaps)
+                         :key #'first)))))
+
+;;; --- Strict heaps and the runtime's own bookkeeping on exit paths ---
+
+;;; A fiber's exit records its outcome in the fiber structure, which is
+;;; global, and a strict heap counts any store into a global object as a
+;;; violation.  The recording therefore runs with store checking
+;;; suspended.  What each exit path must still deliver is the outcome
+;;; itself -- the value, the condition, or the throw -- rather than a
+;;; store error raised while recording it, and checking must be back on
+;;; afterwards.
+
+(defvar *strict-exit-target* (list :unchanged))
+
+(defun make-strict-fiber (function)
+  (make-fiber function :heap (make-heap :strict t)))
+
+;;; Checking is on for HEAP: a store into a global object still signals,
+;;; and does not go through.
+(defun assert-strict-checking (heap)
+  (with-heap (heap)
+    (assert-error (setf (car *strict-exit-target*) (list :written))
+                  process-heap-store-error))
+  (assert (equal *strict-exit-target* '(:unchanged))))
+
+(with-test (:name (:process-heap :strict :normal-completion-delivers-value))
+  (with-fiber-thread ()
+    (let* ((f (make-strict-fiber (lambda () (list :done 1 2))))
+           (h (fiber-heap f)))
+      (assert (equal (resume-fiber f) '(:done 1 2)))
+      (assert (not (fiber-alive-p f)))
+      (assert-strict-checking h)
+      (release-fiber f))))
+
+(with-test (:name (:process-heap :strict :uncaught-condition-escapes))
+  (with-fiber-thread ()
+    (let* ((f (make-strict-fiber
+               (lambda () (error "escaping ~A" (list :strict)))))
+           (h (fiber-heap f)))
+      (handler-case (progn (resume-fiber f) (error "no condition escaped"))
+        (process-heap-store-error (c)
+          (error "recording the escape signalled ~A" c))
+        (simple-error (c)
+          ;; The original condition, copied out of the heap that is
+          ;; about to go away.
+          (assert (search "escaping (STRICT)" (princ-to-string c)))
+          (assert (null (object-heap c)))))
+      (assert (not (fiber-alive-p f)))
+      (assert-strict-checking h)
+      (release-fiber f))))
+
+(with-test (:name (:process-heap :strict :throw-escapes-root-frame))
+  (with-fiber-thread ()
+    (let* ((f (make-strict-fiber
+               (lambda ()
+                 (throw 'sb-thread::%return-from-thread (list :thrown :out)))))
+           (h (fiber-heap f))
+           (result
+             (handler-case
+                 (catch 'sb-thread::%return-from-thread
+                   (resume-fiber f)
+                   :no-throw)
+               (process-heap-store-error (c)
+                 (error "recording the throw signalled ~A" c)))))
+      (assert (equal result '(:thrown :out)))
+      ;; The thrown values are copies: the heap that held them is about
+      ;; to be released.
+      (assert (null (object-heap result)))
+      (assert (not (fiber-alive-p f)))
+      (assert-strict-checking h)
+      (release-fiber f))))
+
+;;; --- Draining the violation record while it is being written ---
+
+;;; The record is written from collections and from the store barrier on
+;;; any thread, with an atomic increment and no lock.  Reading it and
+;;; then resetting it therefore drops whatever is noted in between: the
+;;; read did not see it and the reset discards it.  TAKE-HEAP-VIOLATIONS
+;;; does both in one step, so every note is accounted for by exactly one
+;;; caller.
+
+(defvar *violation-sink* (list :sink))
+(defvar *draining* nil)
+
+(defun note-violations (start n)
+  "Note N escape violations: a store of this heap's object into a global
+one, under a heap that records rather than signals."
+  (let ((h (make-heap :check-stores :record)))
+    (unwind-protect
+         (with-heap (h)
+           (let ((mine (list :owned)))
+             (sb-thread:wait-on-semaphore start)
+             (dotimes (i n)
+               (sb-vm::check-process-heap-store *violation-sink* mine))))
+      (release-heap h)))
+  :noted)
+
+(defun drain-violations ()
+  "Drain in a loop until the noters are done, returning the total count
+drained."
+  (let ((total 0))
+    (loop while *draining*
+          do (incf total (nth-value 1 (take-heap-violations))))
+    total))
+
+(with-test (:name (:process-heap :violations :take-is-atomic))
+  (let* ((nthreads 4)
+         (per-thread 2000)
+         (expected (* nthreads per-thread))
+         (start (sb-thread:make-semaphore)))
+    (reset-heap-violations)
+    (setf *draining* t)
+    (let* ((noters (loop for i below nthreads
+                         collect (sb-thread:make-thread
+                                  #'note-violations
+                                  :arguments (list start per-thread)
+                                  :name (format nil "noter-~D" i))))
+           (drainer (sb-thread:make-thread #'drain-violations :name "drainer")))
+      (sb-thread:signal-semaphore start nthreads)
+      (dolist (th noters)
+        (assert (eq (sb-thread:join-thread th) :noted)))
+      (setf *draining* nil)
+      ;; Everything noted is drained exactly once, however the drains
+      ;; interleaved with the notes.
+      (let ((total (+ (sb-thread:join-thread drainer)
+                      (nth-value 1 (take-heap-violations)))))
+        (assert (= total expected) ()
+                "drained ~D violations, ~D were noted" total expected))
+      (assert (zerop (nth-value 1 (take-heap-violations)))))))
+
+(with-test (:name (:process-heap :violations :take-returns-details))
+  (reset-heap-violations)
+  (let ((h (make-heap :check-stores :record)))
+    (unwind-protect
+         (with-heap (h)
+           (sb-vm::check-process-heap-store *violation-sink* (list :escapee)))
+      (release-heap h))
+    (multiple-value-bind (details total) (take-heap-violations)
+      (assert (= total 1))
+      (assert (= (length details) 1))
+      (assert (eq (first (first details)) *violation-sink*))
+      (assert (null (object-heap (first details)))))
+    ;; Taking clears the record.
+    (multiple-value-bind (details total) (take-heap-violations)
+      (assert (null details))
+      (assert (zerop total)))))
