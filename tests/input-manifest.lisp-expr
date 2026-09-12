@@ -48,6 +48,9 @@
  ("fcb-threads.impure.lisp" "tests/fcb-threads.so")
  ("fiber.pure.lisp" "contrib/sb-fiber.fasl")
  ("fiber.impure.lisp" "contrib/sb-fiber.fasl")
+ ("process-heap.pure.lisp" "contrib/sb-fiber.fasl")
+ ("process-heap.impure.lisp" "contrib/sb-fiber.fasl")
+ ("process.impure.lisp" "contrib/sb-fiber.fasl" "contrib/sb-process.fasl")
  ("fifo-slow.impure.lisp" "contrib/sb-posix.fasl")
  ("filecompile.impure.lisp"
   "tests/data/wonky1.lisp"

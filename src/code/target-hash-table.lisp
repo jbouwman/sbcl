@@ -1817,7 +1817,10 @@ multiple threads accessing the same hash-table without locking."
   ;;
   ;; The read-only vector is an optimization reducing the size of
   ;; never-used tables down to the absolute minimum.
-  `(if (dynamic-space-obj-p ,hash-table)
+  `(if (and (dynamic-space-obj-p ,hash-table)
+            #+sb-process-heaps
+            (not (zerop (sb-sys:sap-int
+                         (sb-vm::current-thread-offset-sap sb-vm::thread-arena-slot)))))
        (locally (declare (sb-c::tlab :system))
          ,@body)
        (progn ,@body)))

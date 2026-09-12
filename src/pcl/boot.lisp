@@ -2503,6 +2503,7 @@ bootstrapping.
 
   (defun real-ensure-gf-using-class--generic-function
       (existing fun-name &rest options &key &allow-other-keys)
+  (sb-kernel::with-global-heap
     (multiple-value-bind
           (generic-function-class lambda-list lambda-list-p initargs)
         (apply #'normalize-options options)
@@ -2510,11 +2511,12 @@ bootstrapping.
         (change-class existing generic-function-class))
       (prog1
           (apply #'reinitialize-instance existing initargs)
-        (note-gf-signature fun-name lambda-list-p lambda-list))))
+        (note-gf-signature fun-name lambda-list-p lambda-list)))))
 
   (defun real-ensure-gf-using-class--null
       (existing fun-name &rest options &key &allow-other-keys)
     (declare (ignore existing))
+  (sb-kernel::with-global-heap
     (multiple-value-bind
           (generic-function-class lambda-list lambda-list-p initargs)
         (apply #'normalize-options options)
@@ -2522,7 +2524,7 @@ bootstrapping.
           (setf (fdefinition fun-name)
                 (apply #'make-instance generic-function-class
                        :name fun-name initargs))
-        (note-gf-signature fun-name lambda-list-p lambda-list)))))
+        (note-gf-signature fun-name lambda-list-p lambda-list))))))
 
 (defun safe-gf-arg-info (generic-function)
   (if (eq (class-of generic-function) *the-class-standard-generic-function*)

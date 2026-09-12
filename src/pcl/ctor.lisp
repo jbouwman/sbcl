@@ -226,10 +226,11 @@
 
 ;;; Keep this a separate function for testing.
 (defun make-ctor (function-name class-name initargs safe-p)
+  (sb-kernel::with-global-heap
   (let ((ctor (%make-ctor 'ctor class-name nil initargs nil safe-p)))
     (install-initial-constructor ctor t)
     (setf (gethash function-name *all-ctors*) ctor)
-    ctor))
+    ctor)))
 
 (defun ensure-allocator (function-name class-name)
   (with-world-lock ()
@@ -587,6 +588,7 @@
                (return-from pushnew-in-ctors)))
            (setf (plist-value class 'ctors) (cons (make-weak-pointer ctor) weakptrs)))))
 (defun install-optimized-constructor (ctor)
+  (sb-kernel::with-global-heap
   (with-world-lock ()
     (let* ((class-or-name (ctor-class-or-name ctor))
            (class (ensure-class-finalized
@@ -609,9 +611,11 @@
                        (pcl-compile `(lambda ,names ,form)
                                     (if (ctor-safe-p ctor)
                                         :safe
-                                        :unsafe)))
+                                        :unsafe)
+                                    :tlab #+sb-process-heaps :user
+                                          #-sb-process-heaps :system))
                      locations)
-              (ctor-state ctor) (if optimizedp 'optimized 'fallback))))))
+              (ctor-state ctor) (if optimizedp 'optimized 'fallback)))))))
 
 (defun install-optimized-allocator (ctor)
   (with-world-lock ()
@@ -633,7 +637,9 @@
           (allocator-function-form ctor)
         (setf (%funcallable-instance-fun ctor)
               (let ((*compiling-optimized-constructor* t))
-                (pcl-compile form :unsafe))
+                (pcl-compile form :unsafe
+                             :tlab #+sb-process-heaps :user
+                                   #-sb-process-heaps :system))
               (ctor-state ctor) (if optimizedp 'optimized 'fallback))))))
 ) ; end FLET
 

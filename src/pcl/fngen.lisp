@@ -23,7 +23,11 @@
 
 (in-package "SB-PCL")
 
-(defun pcl-compile (expr safety)
+;;; TLAB says which allocation buffer the generated code allocates from:
+;;; :SYSTEM (the default) keeps PCL's own metadata out of arenas and
+;;; process heaps; :USER is for constructors, whose instances belong to
+;;; the caller.
+(defun pcl-compile (expr safety &key (tlab :system))
   (labels ((strictly-heap-p (x)
              (or (atom x)
                  (and (heap-allocated-p x) (strictly-heap-p (cdr x)))))
@@ -67,7 +71,7 @@
               (list (cons (sb-kernel:find-classoid 'style-warning) 'muffle-warning)
                     (cons (sb-kernel:find-classoid 'compiler-note) 'muffle-warning))
               nil nil nil
-              '((:declare sb-c::tlab :system)))))
+              `((:declare sb-c::tlab ,tlab)))))
        (sb-c:compile-in-lexenv (maybe-copy-expr) lexenv nil nil nil nil nil)))))
 
 ;;; GET-FUN is the main user interface to this code. It is like

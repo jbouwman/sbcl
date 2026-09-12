@@ -45,6 +45,14 @@
 
 
 (defun allocate-standard-instance (wrapper)
+  ;; Instances belong to whoever asked for them, which with process heaps
+  ;; may be a process; metaobjects are created with the global heap
+  ;; installed (see WITH-GLOBAL-HEAP in the definitional entry points).
+  ;; This function itself keeps using the system TLAB, as arenas expect.
+  #+sb-process-heaps
+  (when (sb-vm::process-heap-active-p)
+    (return-from allocate-standard-instance
+      (sb-vm::allocate-process-instance wrapper (layout-length wrapper) +slot-unbound+)))
   (let* ((instance (%new-instance wrapper (1+ sb-vm:instance-data-start)))
          (slots (make-array (layout-length wrapper) :initial-element +slot-unbound+)))
     (%instance-set instance sb-vm:instance-data-start slots)

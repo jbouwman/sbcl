@@ -9,6 +9,7 @@
 #include "genesis/symbol.h"
 #include "genesis/static-symbols.h"
 #include "lispobj.h"
+#include "process-heap.h"
 #include <sys/mman.h>
 #include <string.h>
 #include <assert.h>
@@ -65,6 +66,12 @@ void gc_scav_fiber_binding_stacks(struct thread *th)
 
 static void fiber_free(struct sb_fiber_ctx *f)
 {
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    if (f->heap) {
+        process_heap_release_internal(f->heap, 1);
+        f->heap = f->active_heap = NULL;
+    }
+#endif
     if (f->stack_base && f->stack_base != MAP_FAILED)
         munmap(f->stack_base, f->stack_alloc_size);
     if (f->binding_stack_base)
@@ -164,6 +171,12 @@ void sb_fiber_register(struct thread *th, struct sb_fiber_ctx *fiber)
 {
     assert(fiber->owner == NULL);
     fiber->owner = th;
+    if (fiber->state == FIBER_RUNNING) {
+        thread_extra_data(th)->current_fiber = fiber;
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+        fiber->active_heap = thread_extra_data(th)->current_heap;
+#endif
+    }
     fiber->next = thread_extra_data(th)->fiber_list;
     __atomic_store_n(&thread_extra_data(th)->fiber_list,
                      fiber, __ATOMIC_RELEASE);
@@ -171,6 +184,8 @@ void sb_fiber_register(struct thread *th, struct sb_fiber_ctx *fiber)
 
 void sb_fiber_unregister(struct thread *th, struct sb_fiber_ctx *fiber)
 {
+    if (thread_extra_data(th)->current_fiber == fiber)
+        thread_extra_data(th)->current_fiber = NULL;
     struct sb_fiber_ctx **pp = &thread_extra_data(th)->fiber_list;
     while (*pp) {
         if (*pp == fiber) {
@@ -418,6 +433,12 @@ void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to)
     struct thread *th = get_sb_vm_thread();
     sb_fiber_enter_pa(th);
 
+    thread_extra_data(th)->current_fiber = to;
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+    /* Park FROM's allocation regions and install TO's. */
+    process_heap_switch_in_pa(th, to->active_heap);
+#endif
+
     from->binding_stack_pointer = get_binding_stack_pointer(th);
 
     sb_fiber_lisp_stack_suspend(from, th);
@@ -430,6 +451,21 @@ void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to)
         swap_bindings_forward(th, to->binding_stack_base,
                               to->binding_stack_pointer);
 }
+
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+/* Attach heap H to F, which must not be running. */
+int sb_fiber_set_heap(struct sb_fiber_ctx *f, struct process_heap *h)
+{
+    if (f->state == FIBER_RUNNING) return -1;
+    if (h && h->installed_on) return -2;
+    f->heap = h;
+    f->active_heap = h;
+    return 0;
+}
+
+void *sb_fiber_heap(struct sb_fiber_ctx *f) { return f->heap; }
+void *sb_fiber_active_heap(struct sb_fiber_ctx *f) { return f->active_heap; }
+#endif
 
 static inline void sb_fiber_enter_pa(struct thread *th)
 {

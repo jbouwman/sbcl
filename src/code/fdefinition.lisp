@@ -104,12 +104,14 @@
      (let ((fdefn (sb-vm::%symbol-fdefn name)))
        (cond ((and fdefn (neq fdefn 0)) fdefn)
              ((null name) *fdefn-of-nil*)
-             (t (let* ((new (make-fdefn name))
-                       (actual (sb-vm::cas-symbol-fdefn name 0 new)))
-                  (if (eql actual 0) new (the fdefn actual)))))))
+             (t (sb-kernel::with-global-heap
+                  (let* ((new (make-fdefn name))
+                         (actual (sb-vm::cas-symbol-fdefn name 0 new)))
+                    (if (eql actual 0) new (the fdefn actual))))))))
     ((find-fdefn name))
     (t
       ;; We won't reach here if the name was not legal
+      (sb-kernel::with-global-heap
       (let (made-new)
         (dx-flet ((new (name)
                     (setq made-new t)
@@ -126,7 +128,7 @@
             (when (and made-new
                        (typep name '(cons (eql sb-pcl::slot-accessor))))
               (sb-pcl::ensure-accessor name))
-            fdefn))))))
+            fdefn)))))))
 
 ;;; Remove NAME's FTYPE information unless it was explicitly PROCLAIMED.
 ;;; The NEW-FUNCTION argument is presently unused, but could be used

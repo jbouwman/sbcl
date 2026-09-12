@@ -83,6 +83,10 @@ ifndef LISP_FEATURE_WIN32
 COMMON_SRC += run-program.c sprof.c
 endif
 
+ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+COMMON_SRC += process-heap.c
+endif
+
 C_SRC = $(COMMON_SRC) ${ARCH_SRC} ${OS_SRC} ${GC_SRC}
 
 SRCS = $(C_SRC) ${ASSEM_SRC}

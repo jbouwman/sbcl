@@ -150,6 +150,36 @@
         (map-pairs ldp nsp-tn 64 nl-registers :post-index 80 :delta -16)
         (inst ret))
 
+      ;; Store barrier slow path: (object, value) were pushed on the control
+      ;; stack, value last.  Same frame discipline as CHECK-BARRIER.
+      #+sb-process-heaps
+      (define-assembly-routine (process-heap-store-check (:return-style :none))
+          ((:temp nl0 unsigned-reg nl0-offset)
+           (:temp nl1 unsigned-reg nl1-offset)
+           (:temp nl3 unsigned-reg nl3-offset))
+        (map-pairs stp nsp-tn 0 nl-registers :pre-index -80)
+        (pseudo-atomic (nl3)
+          (inst ldr nl0 (@ csp-tn (- n-word-bytes) :pre-index)) ; value
+          (inst ldr nl1 (@ csp-tn (- n-word-bytes) :pre-index)) ; object
+          (inst add csp-tn csp-tn (+ 32 80))
+          (inst stp cfp-tn lr-tn (@ csp-tn -112))
+          (map-pairs stp csp-tn -80 lisp-registers)
+          ;; Unlike CHECK-BARRIER, the C function may call back into Lisp
+          ;; (to signal an error) and return, so the saved registers must
+          ;; lie below the control stack pointer the callback starts from.
+          (inst stp cfp-tn csp-tn (@ thread-tn (* thread-control-frame-pointer-slot n-word-bytes)))
+          (map-pairs stp nsp-tn 0 float-registers :pre-index -512 :delta 32)
+
+          (invoke-foreign-routine "process_heap_check_store" nl3)
+
+          (map-pairs ldp nsp-tn 480 float-registers :post-index 512 :delta -32)
+          (map-pairs ldp csp-tn -16 lisp-registers :delta -16)
+          (inst ldr lr-tn (@ csp-tn -104))
+          (inst sub csp-tn csp-tn (+ 32 80))
+          (inst str zr-tn (@ thread-tn (* thread-control-stack-pointer-slot n-word-bytes))))
+        (map-pairs ldp nsp-tn 64 nl-registers :post-index 80 :delta -16)
+        (inst ret))
+
       (define-assembly-routine (switch-to-arena (:return-style :none))
           ((:temp nl3 unsigned-reg nl3-offset))
         (map-pairs stp nsp-tn 0 nl-registers :pre-index -80)

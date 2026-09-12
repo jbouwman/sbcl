@@ -529,6 +529,7 @@
            (sb-c::ftype-from-definition name)))))
 
 (defun real-add-method (generic-function method &optional skip-dfun-update-p)
+  (sb-kernel::with-global-heap
   (flet ((similar-lambda-lists-p (old-method new-lambda-list)
            (binding* (((a-llks a-nreq a-nopt)
                        (analyze-lambda-list (method-lambda-list old-method)))
@@ -631,9 +632,10 @@
                                                   dep 'add-method method)))))
         (serious-condition (c)
           (error c)))))
-  generic-function)
+  generic-function))
 
 (defun real-remove-method (generic-function method)
+  (sb-kernel::with-global-heap
   (when (eq generic-function (method-generic-function method))
     (flush-effective-method-cache generic-function)
     (let ((lock (gf-lock generic-function)))
@@ -658,7 +660,7 @@
                           (lambda (dep)
                             (update-dependent generic-function
                                               dep 'remove-method method)))))))
-  generic-function)
+  generic-function))
 
 (defun compute-applicable-methods-function (generic-function arguments)
   (values (compute-applicable-methods-using-types

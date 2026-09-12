@@ -43,6 +43,7 @@
 #include "genesis/sbcl.h"
 
 #include "fiber.h"
+#include "process-heap.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1056,6 +1057,23 @@ interrupt_handle_pending(os_context_t *context)
              * here? */
             lose("Trapping to run pending handler while GC in progress.");
         }
+
+#ifdef LISP_FEATURE_SB_PROCESS_HEAPS
+        /* An allocation slow path asked for a collection of the current
+         * process heap. Same protocol as a pending global GC above. */
+        if (process_heap_gc_pending_p(thread)) {
+            if (data->pending_handler) {
+                bind_variable(ALLOW_WITH_INTERRUPTS, NIL, thread);
+                bind_variable(INTERRUPTS_ENABLED, NIL, thread);
+            }
+            arch_clear_pseudo_atomic_interrupted(thread);
+            process_heap_run_pending_gc(context);
+            if (data->pending_handler) {
+                unbind(thread);
+                unbind(thread);
+            }
+        }
+#endif
 
         assert_blockables_blocked();
 

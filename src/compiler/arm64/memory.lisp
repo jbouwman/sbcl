@@ -12,11 +12,47 @@
 
 (in-package "SB-VM")
 
+;;; Process heap store barrier.  When the thread's PROCESS-HEAP-CHECK slot
+;;; holds a heap, every pointer store of a possibly-heap-allocated VALUE
+;;; into OBJECT calls the PROCESS-HEAP-STORE-CHECK assembly routine, which
+;;; classifies the store against the heap ownership rules.  Costs one load
+;;; and one branch per barriered store when no heap is installed.
+#+sb-process-heaps
+(defun store-check-worthy-tn-p (tn)
+  (sc-is tn descriptor-reg control-stack))
+
+#+sb-process-heaps
+(defun emit-process-heap-store-check (object value-tn-ref temp)
+  (when (and value-tn-ref
+             (not (eq value-tn-ref t))
+             (not (sc-is object immediate))
+             (do ((ref value-tn-ref (tn-ref-across ref))) ((null ref) nil)
+               (when (store-check-worthy-tn-p (tn-ref-tn ref)) (return t))))
+    (let ((skip (gen-label)))
+      (loadw temp thread-tn thread-process-heap-check-slot)
+      (inst cbz temp skip)
+      (labels ((encode (x)
+                 (sc-case x
+                   (constant (load-constant nil x temp) temp)
+                   (control-stack (load-stack-tn temp x) temp)
+                   (t x)))
+               (stack-push (x)
+                 (inst str (encode x) (@ csp-tn n-word-bytes :post-index))))
+        (do ((ref value-tn-ref (tn-ref-across ref))) ((null ref))
+          (let ((tn (tn-ref-tn ref)))
+            (when (store-check-worthy-tn-p tn)
+              (stack-push object)
+              (stack-push tn)
+              (invoke-asm-routine 'process-heap-store-check temp)))))
+      (emit-label skip))))
+
 (defun emit-gengc-barrier (object cell-address temp &optional value-tn-ref allocator)
   (cond ((or (eq value-tn-ref t)
              (require-gengc-barrier-p object value-tn-ref allocator))
          (inst ubfm temp (or cell-address object) gencgc-card-shift (make-fixup nil :card-table-index-mask))
-         (inst strb zr-tn (@ cardtable-tn temp)))
+         (inst strb zr-tn (@ cardtable-tn temp))
+         #+sb-process-heaps
+         (emit-process-heap-store-check object value-tn-ref temp))
         #+debug-gc-barriers
         (t
          (labels ((encode (x)
@@ -155,10 +191,15 @@
             (result2 :scs (any-reg descriptor-reg)))
   (:result-types * *)
   (:policy :fast-safe)
+  (:vop-var vop)
   (:generator 3
     (inst add lip object (lsl index (- word-shift n-fixnum-tag-bits)))
     (inst add-sub lip lip (- (* vector-data-offset n-word-bytes) other-pointer-lowtag))
     (emit-gengc-barrier object lip tmp t)
+    #+sb-process-heaps
+    (progn
+      (emit-process-heap-store-check object (vop-nth-arg 4 vop) tmp)
+      (emit-process-heap-store-check object (vop-nth-arg 5 vop) tmp))
     (move oldpair-first old1)
     (move oldpair-second old2)
     (move newpair-first new1)
