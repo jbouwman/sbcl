@@ -28,6 +28,7 @@
 #include "genesis/split-ordered-list.h"
 #include "thread.h"
 #include "fiber.h"
+#include "local-heap.h"
 #include "sys_mmap.inc"
 
 /* forward declarations */
@@ -1123,6 +1124,9 @@ collect_garbage(generation_index_t last_gen)
     remset_transfer_list = 0;
 #endif
     ensure_region_closed(code_region, PAGE_TYPE_CODE);
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    local_heaps_before_global_gc();
+#endif
     if (gencgc_verbose > 2) fprintf(stderr, "[%d] BEGIN gc(%d)\n", n_lisp_gcs, last_gen);
 
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -1382,6 +1386,13 @@ lisp_alloc(__attribute__((unused)) int flags,
     if (page_type != PAGE_TYPE_CODE && thread->arena && !(flags & SYSTEM_ALLOCATION_FLAG))
         return handle_arena_alloc(thread, region, page_type, nbytes);
 #endif
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    /* User allocations while a local heap is installed claim that
+     * heap's pages. System allocations always go to the global heap. */
+    struct local_heap *local_heap =
+        (page_type != PAGE_TYPE_CODE && !(flags & SYSTEM_ALLOCATION_FLAG))
+        ? thread_extra_data(thread)->current_heap : NULL;
+#endif
 
     ++thread->slow_path_allocs;
     if ((os_vm_size_t) nbytes > large_allocation)
@@ -1399,6 +1410,11 @@ lisp_alloc(__attribute__((unused)) int flags,
       gc_memclear(page_type, region->start_addr, addr_diff(region->end_addr, region->start_addr));
       return region->start_addr;
     }
+
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    if (local_heap)
+        return local_heap_alloc_slow(thread, local_heap, region, nbytes, page_type);
+#endif
 
     /* We don't want to count nbytes against auto_gc_trigger unless we
      * have to: it speeds up the tenuring of objects and slows down

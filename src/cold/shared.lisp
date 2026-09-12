@@ -398,6 +398,14 @@
           ":SB-FIBER requires :X86-64 or :ARM64")
          ("(and sb-fiber win32)"
           ":SB-FIBER is not supported on :WIN32")
+         ("(and sb-local-heaps (not mark-region-gc))"
+          ":SB-LOCAL-HEAPS requires :MARK-REGION-GC")
+         ("(and sb-local-heaps (not sb-thread))"
+          ":SB-LOCAL-HEAPS requires :SB-THREAD")
+         ("(and sb-local-heaps sb-safepoint)"
+          ":SB-LOCAL-HEAPS and :SB-SAFEPOINT are incompatible")
+         ("(and sb-local-heaps win32)"
+          ":SB-LOCAL-HEAPS is not supported on :WIN32")
          ("(not (or elf mach-o win32))"
           "No execute object file format feature defined")
          ("(and cons-profiling (not sb-thread))" ":CONS-PROFILING requires :SB-THREAD")

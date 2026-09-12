@@ -1834,6 +1834,7 @@ WARNING occur during the compilation, and NIL otherwise.
 Tertiary value is true if any conditions of type ERROR, or WARNING that are
 not STYLE-WARNINGs occur during compilation, and NIL otherwise.
 "
+  (sb-kernel::with-global-heap
   (binding*
       (((start-sec start-nsec) (get-thread-virtual-time))
        ((compiled-definition warnings-p failure-p)
@@ -1869,7 +1870,7 @@ not STYLE-WARNINGs occur during compilation, and NIL otherwise.
                   ((unbound-marker-p compiled-definition) definition)
                   (t compiled-definition))
             warnings-p
-            failure-p)))
+            failure-p))))
 
 ;;; Open some files and call SUB-COMPILE-FILE. If something unwinds
 ;;; out of the compile, then abort the writing of the output file, so
