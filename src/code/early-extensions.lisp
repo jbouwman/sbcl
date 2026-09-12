@@ -965,6 +965,33 @@ NOTE: This interface is experimental and subject to change."
       (car x)
       x))
 
+;;; Run BODY with the global heap installed as the allocation target, so
+;;; that global metadata built on behalf of a process (class
+;;; finalization, compilation, ...) is never owned by the local heap.
+;;; A no-op unless a local heap is installed.
+(defmacro sb-kernel::with-global-heap (&body body)
+  #+(and sb-local-heaps (not sb-xc-host))
+  (with-unique-names (thunk)
+    `(dx-flet ((,thunk () ,@body))
+       (sb-kernel::call-with-global-heap #',thunk)))
+  #-(and sb-local-heaps (not sb-xc-host))
+  `(progn ,@body))
+
+;;; Run BODY with the store barrier's checking suspended.  For a store the
+;;; runtime makes into a global object on a thread's behalf -- the wait
+;;; mark on the thread struct itself -- which is bookkeeping rather than
+;;; the program's store, and so is not charged to a strict local heap.
+;;; The value stored is what the thread is waiting on, referenced from
+;;; its own stack for as long as the mark stands.
+(defmacro sb-kernel::without-store-checking (&body body)
+  #+(and sb-local-heaps (not sb-xc-host))
+  (with-unique-names (saved)
+    `(let ((,saved (sb-vm::%store-check-suspend)))
+       (unwind-protect (progn ,@body)
+         (sb-vm::%store-check-resume ,saved))))
+  #-(and sb-local-heaps (not sb-xc-host))
+  `(progn ,@body))
+
 ;;;; utilities for two-VALUES predicates
 
 (defmacro not/type (x)

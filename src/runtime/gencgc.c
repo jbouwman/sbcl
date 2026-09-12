@@ -3932,6 +3932,9 @@ collect_garbage(generation_index_t last_gen)
     SYMBOL(DYNSPACE_CODEBLOB_TREE)->value = NIL;
 
     scrub_control_stacks();
+#ifdef LISP_FEATURE_SB_FIBER
+    sb_fiber_note_global_gc();
+#endif
 
     page_index_t initial_nfp = next_free_page;
     if (gc_mark_only) {

@@ -203,42 +203,103 @@
 #+mark-region-gc
 (progn
 (define-alien-variable "allocation_bitmap" (* unsigned-char))
-(defun map-objects-in-discontiguous-range (fun start end generation-mask)
+(define-alien-variable "line_bytemap" (* unsigned-char))
+#+sb-local-heaps
+(define-alien-variable "ph_process_page" (* unsigned-char))
+
+;;; A small-object page is divided into lines.  Each line has a byte in
+;;; LINE_BYTEMAP holding its generation plus one, a mark bit (16) and a
+;;; fresh bit (32), and a byte in ALLOCATION_BITMAP with a bit for each
+;;; two-word position at which an object starts.  A GC sets the
+;;; allocation bits of the objects it keeps and clears the fresh bits.
+;;; Lines claimed by the allocator since then are fresh and have no
+;;; allocation bits; the allocator zeroes them when it claims them and
+;;; fills them contiguously from the first line of the span.
+(defun map-objects-in-small-page (fun page generation-mask walk-fresh)
+  "Call FUN with each object on the small-object page PAGE whose
+generation is in GENERATION-MASK.  Objects on fresh lines are visited
+only when WALK-FRESH, which the caller passes when no allocation region
+is open on PAGE."
   (declare (type function fun)
-           (type fixnum start end))
+           (type (unsigned-byte 7) generation-mask))
   (declare (dynamic-extent fun))
-  ;; START/END are passed as fixnum-encoded raw words to ensure no boxing
-  (let* ((start (get-lisp-obj-address start))
-         (end (get-lisp-obj-address end))
-         (first-byte (floor (- start dynamic-space-start)
-                           (ash 8 n-lowtag-bits)))
-        (last-byte (ceiling (- end dynamic-space-start n-lowtag-bits)
-                            (ash 8 n-lowtag-bits))))
-    (loop for byte from first-byte to last-byte
-          do (dotimes (bit 8)
-               (when (logbitp bit (deref allocation-bitmap byte))
-                 (let ((position (+ dynamic-space-start
-                                    (ash (+ (* byte 8) bit) n-lowtag-bits))))
-                   (when (and (<= start position) (< position end))
-                     ;; As in MAP-OBJECTS-IN-RANGE.
-                     (binding*
-                         ((widetag (widetag@baseptr (int-sap position)))
-                          (obj (lispobj@baseptr (int-sap position) widetag))
+  (let* ((line-bytes (ash 8 n-lowtag-bits))
+         (lines-per-page (floor gencgc-page-bytes line-bytes))
+         (first-line (* page lines-per-page))
+         (end-line (+ first-line lines-per-page))
+         (cons-page (= (logand (slot (deref page-table page) 'flags) 7) 5)))
+    (declare (type index first-line end-line))
+    (labels ((line-address (line)
+               (+ dynamic-space-start (* line line-bytes)))
+             (line-generation (byte)
+               ;; As gc_gen_of: a fresh line with no generation is gen 0.
+               (let ((gen (logand byte 15)))
+                 (cond ((/= gen 0) (1- gen))
+                       ((logtest byte 32) 0))))
+             (visit (address limit)
+               ;; Call FUN on the object at ADDRESS and return its size, or
+               ;; return NIL without calling FUN if it would end past LIMIT.
+               (binding* ((sap (int-sap address))
+                          (widetag (widetag@baseptr sap))
+                          (obj (lispobj@baseptr sap widetag))
                           ((typecode size)
                            (if (listp obj)
                                (values list-pointer-lowtag (* 2 n-word-bytes))
                                (values widetag (primitive-object-size obj)))))
-                       (aver (not (logtest (the fixnum size) lowtag-mask)))
-                       ;; TODO: Each line has exactly one generation; should
-                       ;; check that in the outer loop instead.
-                       ;; This code SHOULD work but does not:
-                       ;;   (let ((gen (the (not null) (generation-of obj))))
-                       ;;    (when (logbitp gen generation-mask)
-                       ;; So it was using the 'default' arg to gc_gen_of.
-                       ;; But why??? We're in a generational space aren't we?
-                       (let ((gen (generation-of obj)))
-                         (when (and gen (logbitp gen generation-mask))
-                           (funcall fun obj typecode size))))))))))))
+                 (declare (type index size))
+                 (aver (not (logtest size lowtag-mask)))
+                 (when (<= (+ address size) limit)
+                   (funcall fun obj typecode size)
+                   size))))
+      (do ((line first-line)) ((>= line end-line))
+        (declare (type index line))
+        (let* ((byte (deref line-bytemap line))
+               (gen (line-generation byte)))
+          (cond ((null gen)
+                 ;; A free line.  Any allocation bit left on it is stale.
+                 (incf line))
+                ((logtest byte 32)
+                 (let ((span-end (1+ line)))
+                   (declare (type index span-end))
+                   (loop while (and (< span-end end-line)
+                                    (logtest (deref line-bytemap span-end) 32))
+                         do (incf span-end))
+                   (when (and walk-fresh (logbitp gen generation-mask))
+                     (let ((where (line-address line))
+                           (limit (line-address span-end)))
+                       (declare (type word where limit))
+                       (loop while (< where limit)
+                             do (let* ((sap (int-sap where))
+                                       (word (sap-ref-word sap 0)))
+                                  (cond ((if cons-page
+                                             (and (zerop word)
+                                                  (zerop (sap-ref-word sap n-word-bytes)))
+                                             (zerop word))
+                                         ;; Zeroed space the allocator did not use.
+                                         (incf where (* 2 n-word-bytes)))
+                                        ((= (logand word widetag-mask) filler-widetag)
+                                         (incf where (ash (filler-nwords word) word-shift)))
+                                        ((= word most-positive-word)
+                                         ;; As in MAP-OBJECTS-IN-RANGE: the insignificant
+                                         ;; sign word removed from a bignum.
+                                         (incf where (* 2 n-word-bytes)))
+                                        (t
+                                         (let ((size (visit where limit)))
+                                           (if size
+                                               (incf where size)
+                                               (return)))))))))
+                   (setq line span-end)))
+                (t
+                 (let ((bits (deref allocation-bitmap line)))
+                   (when (and (/= bits 0) (logbitp gen generation-mask))
+                     (let ((base (line-address line))
+                           (limit (+ dynamic-space-start
+                                     (* (1+ page) gencgc-page-bytes))))
+                       (dotimes (bit 8)
+                         (when (logbitp bit bits)
+                           (visit (+ base (ash bit n-lowtag-bits)) limit))))))
+                 (incf line))))))))
+)
 
 ;;; Access to the GENCGC page table for better precision in
 ;;; MAP-ALLOCATED-OBJECTS
@@ -339,6 +400,7 @@ We could try a few things to mitigate this:
 ;;; and free_pages_lock, that this can be made reliable (both crash-free and
 ;;; guaranteed to visit all chosen objects) despite other threads running.
 ;;; As things are it is only "maybe" reliable, regardless of the parameters.
+#-mark-region-gc
 (defun walk-dynamic-space (fun generation-mask
                                page-type-mask page-type-constraint)
   (declare (function fun)
@@ -399,7 +461,6 @@ We could try a few things to mitigate this:
           ;; type restriction on the first argument to LOGBITP.
           ;; Masking it to 3 bits fixes that, and allows using the other 5 bits
           ;; for something potentially.
-          #-mark-region-gc
           (when (and (logbitp (logand (slot (deref page-table start-page) 'gen) 7)
                               generation-mask)
                      (= (logand flags page-type-mask) page-type-constraint))
@@ -409,17 +470,41 @@ We could try a few things to mitigate this:
              fun
              (%make-lisp-obj (sap-int start))
              (%make-lisp-obj (sap-int end))
-             (< start-page initial-next-free-page)))
-          ;; Generations of pages are basically meaningless (except
-          ;; for pseudo-static pages) so we test generations of lines.
-          #+mark-region-gc
-          (when (= (logand flags page-type-mask) page-type-constraint)
-            (map-objects-in-discontiguous-range
-             fun
-             (%make-lisp-obj (sap-int start))
-             (%make-lisp-obj (sap-int end))
-             generation-mask)))))
+             (< start-page initial-next-free-page))))))
     (setq start-page (1+ end-page))))
+
+;;; Under mark-region, WORDS-USED of a small-object page counts its used
+;;; lines rather than giving a high-water mark, so each page is walked to
+;;; its end.  Only a large object spans pages, and it starts a page.
+#+mark-region-gc
+(defun walk-dynamic-space (fun generation-mask
+                               page-type-mask page-type-constraint)
+  (declare (function fun)
+           (type (unsigned-byte 7) generation-mask)
+           (type (unsigned-byte 5) page-type-mask page-type-constraint))
+  (close-thread-alloc-region)
+  (dotimes (page next-free-page)
+    (let ((flags (slot (deref page-table page) 'flags)))
+      (when (and (/= (ash (slot (deref page-table page) 'words-used*) -1) 0)
+                 (= (logand flags page-type-mask) page-type-constraint))
+        (if (logtest flags 16)          ; SINGLE_OBJECT_FLAG
+            (when (and (= (slot (deref page-table page) 'start) 0)
+                       (logbitp 0 (deref allocation-bitmap
+                                         (* page (floor gencgc-page-bytes
+                                                        (ash 8 n-lowtag-bits)))))
+                       (logbitp (logand (slot (deref page-table page) 'gen) 7)
+                                generation-mask))
+              (let* ((sap (int-sap (+ dynamic-space-start (* page gencgc-page-bytes))))
+                     (widetag (widetag@baseptr sap))
+                     (obj (lispobj@baseptr sap widetag)))
+                (funcall fun obj widetag (primitive-object-size obj))))
+            (map-objects-in-small-page
+             fun page generation-mask
+             ;; Another thread may be allocating into an open region.  The
+             ;; lines of a page of local heaps can belong to regions of
+             ;; several heaps, and the page carries no open flag.
+             (and (not (logtest flags 32)) ; OPEN_REGION_PAGE_FLAG
+                  #+sb-local-heaps (zerop (deref ph-process-page page)))))))))
 
 ;; Users are often surprised to learn that a just-consed object can't
 ;; necessarily be seen by MAP-ALLOCATED-OBJECTS, so close the region

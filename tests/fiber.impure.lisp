@@ -69,6 +69,66 @@
         (when (zerop (mod i 50)) (sb-ext:gc :full t)))
       (mapc #'release-fiber fibers))))
 
+;;; On arm64 the words above a suspended fiber's stack pointer are zeroed
+;;; when it resumes after a collection that could have freed what they
+;;; refer to, and left alone otherwise.  The fiber writes a fixnum into
+;;; the dead part of its stack before each suspend and reads it back after
+;;; the resume.
+(defun stale-word-probe (fiber-body-before-writing)
+  (let ((marker (ash 12345 sb-vm:n-fixnum-tag-bits)))
+    (lambda ()
+      (funcall fiber-body-before-writing)
+      (let ((sap (sb-sys:sap+ (sb-kernel:current-sp) 4096))
+            (seen '()))
+        (dotimes (i 3)
+          (setf (sb-sys:sap-ref-word sap 0) marker)
+          (yield-fiber)
+          (push (if (= (sb-sys:sap-ref-word sap 0) marker) :kept :zeroed) seen))
+        (nreverse seen)))))
+
+(defun run-stale-word-probe (fiber-body-before-writing between-resumes)
+  ;; Start with an empty nursery, so that no collection other than the
+  ;; ones BETWEEN-RESUMES make happens during the probe.
+  (sb-ext:gc)
+  (with-fiber-thread ()
+    (let ((f (make-fiber (stale-word-probe fiber-body-before-writing)
+                         :stack-size (* 256 1024))))
+      (unwind-protect
+           (progn (resume-fiber f)
+                  (loop for step in between-resumes
+                        for result = (progn (funcall step) (resume-fiber f))
+                        finally (return result)))
+        (release-fiber f)))))
+
+#+arm64
+(with-test (:name (:fiber :stack-scrub :after-a-global-collection))
+  (assert (equal (run-stale-word-probe
+                  (lambda ())
+                  (list (lambda ())
+                        (lambda () (sb-ext:gc))
+                        (lambda ())))
+                 '(:kept :zeroed :kept))))
+
+#+(and arm64 sb-local-heaps)
+(with-test (:name (:fiber :stack-scrub :after-a-collection-of-a-heap-it-installed))
+  (let ((used (make-heap))
+        (other (make-heap)))
+    (unwind-protect
+         (flet ((collect (heap) (lambda () (with-heap (heap) (heap-gc heap)))))
+           ;; A fiber that installed a heap other than its own is scrubbed
+           ;; after any local collection.
+           (assert (equal (run-stale-word-probe
+                           (lambda () (with-heap (used) (list 1)) nil)
+                           (list (collect other) (lambda ()) (collect used)))
+                          '(:zeroed :kept :zeroed)))
+           ;; One that never did is not.
+           (assert (equal (run-stale-word-probe
+                           (lambda ())
+                           (list (collect other) (collect used) (lambda ())))
+                          '(:kept :kept :kept))))
+      (release-heap used)
+      (release-heap other))))
+
 (with-test (:name (:fiber :trampoline-vs-gc-stop))
   (let ((done (sb-thread:make-semaphore))
         (stop-gc nil))
@@ -517,8 +577,7 @@
 
 ;;; --- Cross-thread migration ---
 
-(with-test (:name (:fiber :migrate :metadata-only)
-            :skipped-on (not :sb-thread))
+(with-test (:name (:fiber :migrate :metadata-only))
   (let* ((fiber-cell (list nil))
          (a-installed (sb-thread:make-semaphore :name "metaonly-installed"))
          (a-released  (sb-thread:make-semaphore :name "metaonly-released"))
@@ -556,8 +615,7 @@
       (sb-thread:signal-semaphore a-released)
       (sb-thread:join-thread a-thread))))
 
-(with-test (:name (:fiber :migrate :runnable-runs-on-dest)
-            :skipped-on (not :sb-thread))
+(with-test (:name (:fiber :migrate :runnable-runs-on-dest))
   (let* ((fiber-cell (list nil))
          (a-installed (sb-thread:make-semaphore :name "a-installed"))
          (a-released  (sb-thread:make-semaphore :name "a-released"))
@@ -607,8 +665,7 @@
       (sb-thread:signal-semaphore a-released)
       (sb-thread:join-thread a-thread))))
 
-(with-test (:name (:fiber :migrate :rejects-released)
-            :skipped-on (not :sb-thread))
+(with-test (:name (:fiber :migrate :rejects-released))
   (let* ((other (sb-thread:make-thread
                  (lambda () (sb-thread:thread-yield) :ok)
                  :name "migrate-validate-dest"))
@@ -623,6 +680,45 @@
                (error "expected DEAD-FIBER-ERROR; none signaled"))
       (dead-fiber-error () :ok))
     (sb-thread:join-thread other)))
+
+(with-test (:name (:fiber :migrate :concurrent-with-destination-list-changes))
+  (let* ((count 20000)
+         (lock (sb-thread:make-mutex :name "migrate-race"))
+         (inbox nil)
+         (done nil)
+         (failures 0)
+         (a-thread sb-thread:*current-thread*)
+         (b-thread
+           (sb-thread:make-thread
+            (lambda ()
+              (with-main-fiber (b-main)
+                (loop
+                  (release-fiber (make-fiber (lambda ()) :stack-size 65536))
+                  (multiple-value-bind (f finished)
+                      (sb-thread:with-mutex (lock)
+                        (values (pop inbox) done))
+                    (cond (f
+                           (handler-case (fiber-migrate f a-thread)
+                             (fiber-state-error () (incf failures))))
+                          (finished (return)))))))
+            :name "migrate-race-dest")))
+    (with-main-fiber (a-main)
+      (let ((fibers nil))
+        (dotimes (i count)
+          (let ((f (make-fiber (lambda () (loop (yield-fiber)))
+                               :stack-size 65536)))
+            (resume-fiber f)
+            (fiber-migrate f b-thread)
+            (sb-thread:with-mutex (lock) (push f inbox))
+            (push f fibers)))
+        (sb-thread:with-mutex (lock) (setf done t))
+        (sb-thread:join-thread b-thread)
+        (dolist (f fibers)
+          (when (eq (fiber-thread f) a-thread)
+            (release-fiber f)))
+        (assert (zerop failures) ()
+                "~D of ~D fibers migrated into a busy thread were missing ~
+                 from its fiber list" failures count)))))
 
 ;;; --- Current-fiber storage ---
 
@@ -747,3 +843,40 @@
       (assert (eq n seen-in-n))
       (release-fiber n)
       (release-fiber w))))
+
+;;; A fiber parked in the handler of an internal error keeps its interrupt
+;;; context: the context index is a special binding that travels with the
+;;; fiber's binding stack, and the contexts it indexes are saved with the
+;;; fiber rather than overwritten by another fiber's error on the thread.
+(defun fiber-context-probe (x) (length x))
+(declaim (notinline fiber-context-probe))
+
+(defun current-interrupt-context-address ()
+  (sb-sys:sap-int
+   (sb-alien:alien-sap
+    (sb-di::nth-interrupt-context (1- sb-di::*free-interrupt-context-index*)))))
+
+(with-test (:name (:fiber :interrupt-context :kept-across-switch))
+  (with-fiber-thread ()
+    (flet ((erring ()
+             (block erring
+               (handler-bind
+                   ((type-error
+                      (lambda (c)
+                        (declare (ignore c))
+                        (let ((before (current-interrupt-context-address)))
+                          (yield-fiber :parked)
+                          (return-from erring
+                            (list before (current-interrupt-context-address)))))))
+                 (fiber-context-probe (make-hash-table))))))
+      (let ((a (make-fiber #'erring :name "context a"))
+            (b (make-fiber #'erring :name "context b")))
+        (assert (eq :parked (resume-fiber a)))
+        (assert (eq :parked (resume-fiber b)))
+        (let ((ra (resume-fiber a))
+              (rb (resume-fiber b)))
+          (assert (= (first ra) (second ra)))
+          (assert (= (first rb) (second rb)))
+          (assert (/= (first ra) (first rb))))
+        (release-fiber a)
+        (release-fiber b)))))

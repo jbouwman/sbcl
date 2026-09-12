@@ -302,6 +302,26 @@
        (%make-node :name (coerce info 'string)
                    :debug-info info)))))
 
+(defun frame-name (info)
+  "The name the reports give the frame INFO, a debug-info object from a
+trace."
+  (if info (node-name (make-node info)) "unknown"))
+
+(defun harvest-traces (function)
+  (let ((function (sb-kernel:%coerce-callable-to-fun function))
+        (serialno-to-code (build-serialno-to-code-map))
+        (saved-sigprof-mask (sb-toggle-sigprof (int-sap 0) 1)))
+    (unwind-protect
+         (call-with-each-profile-buffer
+          (lambda (sap thread memusage)
+            (declare (ignore memusage))
+            (loop for (locs multiplicity . tag) in (extract-traces sap serialno-to-code)
+                  do (funcall function tag thread multiplicity
+                              (loop for i from (- (length locs) 2) downto 0 by 2
+                                    collect (frame-name (aref locs i)))))))
+      (sb-toggle-sigprof (int-sap 0) saved-sigprof-mask))
+    nil))
+
 (defvar *name->node*)
 
 (defmacro with-lookup-tables (() &body body)

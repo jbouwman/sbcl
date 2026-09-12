@@ -69,6 +69,15 @@ auto-return flow, which runs in C and can't use the VOP's exit.
 `extra_thread_data->fiber_list` enumerates every registered fiber on
 a thread: GC walks it.
 
+`extra_thread_data->fiber_list_lock` serialises changes to the list:
+registration, release, and `sb_fiber_migrate`, which takes the source
+and destination locks in address order, so a fiber can be migrated
+from any thread while its owner creates and releases fibers.  A local
+collection holds its own thread's lock while it scans the list.
+Holders are pseudo-atomic, or have the blockable signals blocked, so
+a holder is never stopped for GC or interrupted into another list
+operation; a global collection walks the lists without the lock.
+
 Suspended fibers marked runnable or new have their saved SP range
 `[ctx.sp .. stack_end)` and their callee-saved registers
 conservatively pinned.  On arm64 the separate Lisp control stack
@@ -78,17 +87,26 @@ conservatively pinned.  On arm64 the separate Lisp control stack
 On arm64, a conservative scanner walks `[base, CSP_save)` on a
 suspended fiber and pins anything pointer-shaped.
 
-`sb_fiber_lisp_stack_suspend` maintains a `dirty_high` per fiber: the
-address such that `[dirty_high, usable_end)` is known clean.  On each
-suspend:
+The words above a fiber's `CSP` are left over from returned frames.
+A frame pushed later can expose them to the precise scan of the
+running stack before it writes its slots, so they must not refer to
+memory a collection has freed since they were written.  The
+collectors zero the running stack above its `CSP`
+(`scrub_thread_control_stack`); a suspended fiber's stack is zeroed
+from `CSP` to `usable_end` by `sb_fiber_lisp_stack_resume`, before
+the fiber runs again, if since it last ran
 
-- `CSP == dirty_high` (tight yield loop): no scrub.
-- `CSP < dirty_high` (fiber returned to a shallower depth): scrub
-  `[CSP, dirty_high)`.
-- `CSP > dirty_high` (fiber grew above prior clean boundary):
-  scrub all the way to `usable_end`.
+- a global collection has run,
+- its own heap has been collected, or
+- any local collection has run and the fiber has installed a heap
+  other than its own.
 
-Tight-yield fibers pay zero scrub cost after the first suspend.
+A fiber resumed with no such collection in between pays nothing,
+whatever depth it suspended at, and a new fiber's stack, fresh from
+`mmap`, is not zeroed before its first run.  The extent of the words
+to zero is not recorded: a fiber can call deeper than any point it
+suspends at, and a frame's unwritten slots are zero, so neither the
+suspend depth nor a run of zero words bounds them.
 
 ## Trampoline
 
@@ -107,12 +125,23 @@ swap because the C auto-return path does not write the slot.
 
 ## Current fiber
 
-A switch is the only operation that makes a worker current.
-`make-main-fiber` and `with-current-fiber` install a main fiber by
-writing the thread slot, and only while the thread has no current
-fiber, so that the code runs on the stack the main fiber stands for.
-A main fiber installed over a running worker would have the worker's
-stack pointers saved into it by the next switch.
+The current fiber is recorded twice: the Lisp wrapper in
+`struct thread`'s `current_fiber`, which `current-fiber` reads, and
+the `sb_fiber_ctx` in `extra_thread_data`'s `current_fiber`, which
+the runtime uses to find the fiber a heap switch applies to
+(`local_heap_switch_in_pa` keeps the running fiber's `active_heap`
+up to date).  A switch writes both.  Registering a fiber writes
+neither; `sb_fiber_set_current`, called by `make-main-fiber` and
+`with-current-fiber`, writes the runtime's and copies the installed
+heap into the fiber, since heap switches made while the fiber was
+not current were not recorded on it.  Writing only the Lisp slot
+leaves the runtime pointing at a different fiber, which is then
+resumed with that fiber's heap.
+
+Only a main fiber is installed without a switch, and only while the
+thread has no current fiber.  A main fiber installed over a running
+worker would have the worker's stack pointers saved into it by the
+next switch.
 
 ## Image survival
 

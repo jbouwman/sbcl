@@ -217,6 +217,7 @@ Can be applied to the arguments passed by @code{map-trace-pc-locs} and
 
 EXPERIMENTAL: Interface subject to change.
 @end deffn
+
 @anchor{Function sb-sprof report}
 @ffindex @sortas{report sb-sprof} report [sb-sprof]
 @deffn{Function} sb-sprof:report &key type max min-percent call-graph sort-by sort-order stream show-progress

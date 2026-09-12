@@ -6,6 +6,7 @@
 #ifdef LISP_FEATURE_SB_FIBER
 
 #include "genesis/thread.h"
+#include "genesis/sbcl.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -52,7 +53,13 @@ struct sb_fiber_ctx {
     lispobj *control_stack_pointer;
     lispobj *control_frame_pointer;
     size_t   control_stack_alloc_size;
-    lispobj *dirty_high;
+    /* Whether the words above CONTROL_STACK_POINTER must be zeroed
+     * before the fiber runs again; see sb_fiber_lisp_stack_resume. */
+    uword_t  gc_epoch_seen;        /* sb_fiber_gc_epoch at the last suspend */
+    uword_t  local_gc_epoch_seen;  /* sb_fiber_local_gc_epoch at the last resume */
+    uword_t  heap_gc_count_seen;   /* HEAP's collection count at the last suspend */
+    unsigned char stack_dirty;     /* has run since its stack was last zeroed */
+    unsigned char ran_other_heap;  /* has installed a heap other than HEAP */
 #endif
 
     /* Saved thread-struct fields. */
@@ -67,8 +74,22 @@ struct sb_fiber_ctx {
 
     struct sb_fiber_ctx *return_fiber;  /* auto-return target */
 
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    /* The heap this fiber owns (released with the fiber), and the heap
+     * that is installed whenever the fiber runs: normally the same, but
+     * WITH-GLOBAL-HEAP can suspend a fiber with the global heap active. */
+    struct local_heap *heap;
+    struct local_heap *active_heap;
+#endif
+
     unsigned char cs_guard_protected;
     unsigned char bs_guard_protected;
+
+    /* The thread's interrupt contexts while this fiber is switched out.
+     * The index into them is a special binding, which the fiber's binding
+     * stack carries, but the contexts are a per-thread array. */
+    void *sigcontexts[MAX_INTERRUPTS];
+    int n_sigcontexts;
 };
 
 /* Lifecycle */
@@ -79,6 +100,7 @@ void                 sb_fiber_release(struct sb_fiber_ctx *fiber);
 /* GC registration */
 void sb_fiber_register  (struct thread *th, struct sb_fiber_ctx *fiber);
 void sb_fiber_unregister(struct thread *th, struct sb_fiber_ctx *fiber);
+void sb_fiber_set_current(struct thread *th, struct sb_fiber_ctx *fiber);
 
 /* Cross-thread migration */
 int  sb_fiber_migrate(struct sb_fiber_ctx *fiber, struct thread *dest);
@@ -95,6 +117,12 @@ void sb_fiber_reset_bs_guard(struct sb_fiber_ctx *f);
 int sb_fiber_handle_bs_fault(void *context, void *addr, struct thread *th);
 
 void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to);
+
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+int   sb_fiber_set_heap(struct sb_fiber_ctx *f, struct local_heap *h);
+void *sb_fiber_heap(struct sb_fiber_ctx *f);
+void *sb_fiber_active_heap(struct sb_fiber_ctx *f);
+#endif
 void sb_fiber_exit_pa    (struct thread *th);
 
 /* Arch-specific helpers */
@@ -110,6 +138,28 @@ int   sb_fiber_gc_regs(const struct sb_fiber_ctx *f, lispobj *out, int max);
  * functions; the shared scanners call them by name. */
 void gc_scan_fiber_stacks         (struct thread *th);
 void gc_scav_fiber_binding_stacks (struct thread *th);
+
+/* TH's fiber list lock.  Every change to a thread's fiber list, and every
+ * walk of it made while the world runs, holds it: registration, release,
+ * migration off or onto the thread, and a local collection's scan.  The
+ * holder must not be stoppable for GC or interruptible while it holds the
+ * lock -- pseudo-atomic, or with the blockable signals blocked -- since
+ * another thread may spin on it pseudo-atomic, and a global collection
+ * walks the lists without it once every thread has left pseudo-atomic. */
+void sb_fiber_list_lock  (struct thread *th);
+void sb_fiber_list_unlock(struct thread *th);
+
+/* Collection counts that decide when a suspended fiber's stack is zeroed
+ * (arm64; see sb_fiber_lisp_stack_resume).  The global collector bumps
+ * the first with the world stopped, a local collection the second. */
+extern uword_t sb_fiber_gc_epoch;
+extern uword_t sb_fiber_local_gc_epoch;
+void sb_fiber_note_global_gc(void);
+void sb_fiber_note_local_gc(void);
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+/* Called when H is installed on TH. */
+void sb_fiber_note_heap_installed(struct thread *th, struct local_heap *h);
+#endif
 
 /* Per-fiber Lisp control stack hooks */
 int  sb_fiber_lisp_stack_alloc       (struct sb_fiber_ctx *f, size_t size);

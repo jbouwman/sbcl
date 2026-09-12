@@ -169,7 +169,10 @@
     #+win32 sb-kernel::handle-win32-exception
     #+sb-safepoint sb-thread::run-interruption
     enter-alien-callback
-    #+sb-thread sb-thread::enter-foreign-callback)
+    #+sb-thread sb-thread::enter-foreign-callback
+    #+sb-local-heaps local-heap-collect-pending
+    #+sb-local-heaps sb-kernel::local-heap-exhausted-error
+    #+sb-local-heaps sb-kernel::heap-store-error)
   #'equal)
 
 ;;; (potentially) static symbols that C code must be able to set/get
