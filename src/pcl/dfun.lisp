@@ -701,12 +701,24 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
   (unless applicable (setq applicable (gensym)))
   `(multiple-value-bind (,nemf ,applicable ,wrappers ,invalidp
                          ,@(when type `(,type ,index)))
-       (cache-miss-values ,gf ,args ',(cond (caching-p 'caching)
-                                            (type 'accessor)
-                                            (t 'checking)))
-    (when (and ,applicable (not (memq ,gf *dfun-miss-gfs-on-stack*)))
-      (let ((*dfun-miss-gfs-on-stack* (cons ,gf *dfun-miss-gfs-on-stack*)))
-        ,@body))
+       (sb-kernel::with-global-heap
+         (multiple-value-bind (,nemf ,applicable ,wrappers ,invalidp
+                              ,@(when type `(,type ,index)))
+             (cache-miss-values ,gf ,args ',(cond (caching-p 'caching)
+                                                (type 'accessor)
+                                                (t 'checking)))
+           (when (and ,applicable (not (memq ,gf *dfun-miss-gfs-on-stack*)))
+             (let ((*dfun-miss-gfs-on-stack* (cons ,gf *dfun-miss-gfs-on-stack*)))
+               ,@body))
+           (values ,nemf ,applicable ,wrappers ,invalidp
+                   ,@(when type `(,type ,index)))))
+    ;; Dispatch metadata is global; the effective method runs in the
+    ;; caller's heap, including on the first call and every cache miss.
+    ;; The accessor cases below dispatch on TYPE and NEMF alone, so the
+    ;; outer INDEX has no reader; the warm build on x86-64 escalates the
+    ;; resulting style warning to an error.
+    (declare (ignore ,applicable ,wrappers ,invalidp
+                     ,@(when type (list index))))
     ,(if type
          ;; Munge the EMF so that INVOKE-EMF can do the right thing:
          ;; BOUNDP and MAKUNBOUND get a structure, WRITER the logical
@@ -738,6 +750,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
 (defvar *early-p* nil)
 
 (defun make-initial-dfun (gf)
+  (sb-kernel::with-global-heap
   (let ((initial-dfun #'(lambda (&rest args) (initial-dfun gf args))))
     (multiple-value-bind (dfun cache info)
         (if (eq **boot-state** 'complete)
@@ -752,7 +765,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
                       (values (make-early-accessor gf type) nil nil)
                       (make-final-accessor-dfun gf type))
                   (values initial-dfun nil (initial-dfun-info)))))
-      (set-dfun gf dfun cache info))))
+      (set-dfun gf dfun cache info)))))
 
 (defun make-early-accessor (gf type)
   (let* ((methods (early-gf-methods gf))
@@ -1722,6 +1735,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
            (return t)))))
 
 (defun update-dfun (generic-function &optional dfun cache info)
+  (sb-kernel::with-global-heap
   (let ((early-p (early-gf-p generic-function)))
     (flet ((update ()
              ;; If GENERIC-FUNCTION has a CALL-NEXT-METHOD argument
@@ -1766,7 +1780,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
             ;; where we can end up in a metacircular loop here? In
             ;; case there are, better fetch it while interrupts are
             ;; still enabled...
-            (sb-thread::call-with-recursive-system-lock #'update lock))))))
+            (sb-thread::call-with-recursive-system-lock #'update lock)))))))
 
 ;;; These functions aren't used in SBCL, or documented anywhere that
 ;;; I'm aware of, but they look like they might be useful for

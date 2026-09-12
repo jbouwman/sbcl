@@ -107,12 +107,23 @@ swap because the C auto-return path does not write the slot.
 
 ## Current fiber
 
-A switch is the only operation that makes a worker current.
-`make-main-fiber` and `with-current-fiber` install a main fiber by
-writing the thread slot, and only while the thread has no current
-fiber, so that the code runs on the stack the main fiber stands for.
-A main fiber installed over a running worker would have the worker's
-stack pointers saved into it by the next switch.
+The current fiber is recorded twice: the Lisp wrapper in
+`struct thread`'s `current_fiber`, which `current-fiber` reads, and
+the `sb_fiber_ctx` in `extra_thread_data`'s `current_fiber`, which
+the runtime uses to find the fiber a heap switch applies to
+(`local_heap_switch_in_pa` keeps the running fiber's `active_heap`
+up to date).  A switch writes both.  Registering a fiber writes
+neither; `sb_fiber_set_current`, called by `make-main-fiber` and
+`with-current-fiber`, writes the runtime's and copies the installed
+heap into the fiber, since heap switches made while the fiber was
+not current were not recorded on it.  Writing only the Lisp slot
+leaves the runtime pointing at a different fiber, which is then
+resumed with that fiber's heap.
+
+Only a main fiber is installed without a switch, and only while the
+thread has no current fiber.  A main fiber installed over a running
+worker would have the worker's stack pointers saved into it by the
+next switch.
 
 ## Image survival
 

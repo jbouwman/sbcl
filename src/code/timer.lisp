@@ -459,6 +459,12 @@ triggers."
 ;;; Called from the signal handler. We loop until all the expired timers
 ;;; have been run.
 (defun run-expired-timers ()
+  ;; The schedule and the timers on it are global; the signal can arrive on
+  ;; a thread with a local heap installed, which neither the queue updates
+  ;; nor the timer functions belong to.
+  (sb-kernel::with-global-heap (%run-expired-timers)))
+
+(defun %run-expired-timers ()
   (loop
     (let ((now (get-internal-real-time))
           (timers nil))
@@ -471,7 +477,7 @@ triggers."
                 ;; No more timers to run for now, reset the system timer.
                 do (run-timers)
                    (set-system-timer)
-                   (return-from run-expired-timers nil)
+                   (return-from %run-expired-timers nil)
                 else
                 do (aver (eq timer (priority-queue-extract-maximum *schedule*)))
                    (push timer timers)))

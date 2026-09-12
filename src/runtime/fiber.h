@@ -67,6 +67,14 @@ struct sb_fiber_ctx {
 
     struct sb_fiber_ctx *return_fiber;  /* auto-return target */
 
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    /* The heap this fiber owns (released with the fiber), and the heap
+     * that is installed whenever the fiber runs: normally the same, but
+     * WITH-GLOBAL-HEAP can suspend a fiber with the global heap active. */
+    struct local_heap *heap;
+    struct local_heap *active_heap;
+#endif
+
     unsigned char cs_guard_protected;
     unsigned char bs_guard_protected;
 };
@@ -79,6 +87,7 @@ void                 sb_fiber_release(struct sb_fiber_ctx *fiber);
 /* GC registration */
 void sb_fiber_register  (struct thread *th, struct sb_fiber_ctx *fiber);
 void sb_fiber_unregister(struct thread *th, struct sb_fiber_ctx *fiber);
+void sb_fiber_set_current(struct thread *th, struct sb_fiber_ctx *fiber);
 
 /* Cross-thread migration */
 int  sb_fiber_migrate(struct sb_fiber_ctx *fiber, struct thread *dest);
@@ -95,6 +104,12 @@ void sb_fiber_reset_bs_guard(struct sb_fiber_ctx *f);
 int sb_fiber_handle_bs_fault(void *context, void *addr, struct thread *th);
 
 void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to);
+
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+int   sb_fiber_set_heap(struct sb_fiber_ctx *f, struct local_heap *h);
+void *sb_fiber_heap(struct sb_fiber_ctx *f);
+void *sb_fiber_active_heap(struct sb_fiber_ctx *f);
+#endif
 void sb_fiber_exit_pa    (struct thread *th);
 
 /* Arch-specific helpers */

@@ -237,6 +237,16 @@
   (inst pop rax-tn)
   (error-call nil 'undefined-alien-fun-error rbx-tn))
 
+;;; Store barrier slow path: (object, value) were pushed, value last.
+;;; Unlike CHECK-BARRIER, the C function may call back into Lisp (to
+;;; signal an error), so the floating-point registers are preserved
+;;; too, which also aligns the stack for the C call.
+#+sb-local-heaps
+(define-assembly-routine (local-heap-store-check (:return-style :none)) ()
+  (with-registers-preserved (c)
+    (call-c "local_heap_check_store" (ea 16 rbp-tn) (ea 24 rbp-tn)))
+  (inst ret 16))
+
 #+debug-gc-barriers
 (define-assembly-routine (check-barrier (:return-style :none)) ()
   (inst push rax-tn)

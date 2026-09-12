@@ -548,12 +548,17 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
        ;; in places where interrupts should already be disabled.
        (unwind-protect
             (progn
-              (setf (thread-waiting-for ,n-thread) ,new)
+              ;; The mark is the runtime's bookkeeping on the thread, a
+              ;; global object; a caller under a strict local heap is not
+              ;; charged for it.
+              (sb-kernel::without-store-checking
+                (setf (thread-waiting-for ,n-thread) ,new))
               (barrier (:memory))
               ,@forms)
          ;; Interrupt handlers and GC save and restore any
          ;; previous wait marks using WITHOUT-THREAD-WAITING-FOR
-         (setf (thread-waiting-for ,n-thread) nil)
+         (sb-kernel::without-store-checking
+           (setf (thread-waiting-for ,n-thread) nil))
          (barrier (:memory))))))
 
 ;;;; Mutexes
@@ -621,7 +626,8 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
       (when (mutex-p origin)
         (let ((chain (detect-deadlock origin 10)))
           (when (consp chain)
-            (setf (thread-waiting-for self) nil)
+            (sb-kernel::without-store-checking
+              (setf (thread-waiting-for self) nil))
             (sb-thread:barrier (:memory))
             (release-cas-lock **deadlock-lock**)
             (with-interrupts
@@ -1086,7 +1092,8 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
 #+(and sb-thread (not sb-futex))
 (progn
   (defun %waitqueue-enqueue (thread queue)
-    (setf (thread-waiting-for thread) queue)
+    (sb-kernel::without-store-checking
+      (setf (thread-waiting-for thread) queue))
     (let ((head (waitqueue-%head queue))
           (tail (waitqueue-%tail queue))
           (new (list thread)))
@@ -1097,7 +1104,8 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
       (setf (waitqueue-%tail queue) new)
       nil))
   (defun %waitqueue-drop (thread queue)
-    (setf (thread-waiting-for thread) nil)
+    (sb-kernel::without-store-checking
+      (setf (thread-waiting-for thread) nil))
     (let ((head (waitqueue-%head queue)))
       (do ((list head (cdr list))
            (prev nil list))
@@ -1968,8 +1976,9 @@ session."
                ;; as doing so requires grabbing the per-thread mutex which we currently own.
                ;; Deferrable signals are masked at this point, but it is best to tidy up
                ;; any stray data such as captured closure values.
-               (setf (thread-interruptions thread) nil
-                     (thread-primitive-thread thread) 0)
+               (sb-kernel::without-store-checking
+                 (setf (thread-interruptions thread) nil
+                       (thread-primitive-thread thread) 0))
                (setf *sprof-enable* 0)
                ;; Take ownership of sb-sprof profile, and nullify the data slot.
                ;; This doesn't need to synchronize with the signal handler, which is
@@ -2346,8 +2355,11 @@ The default behavior is to use FUNCALL.")
 ;;; Called from the signal handler.
 #-(or sb-safepoint win32)
 (defun run-interruption ()
+  ;; The queue is the runtime's bookkeeping on the thread, a global object;
+  ;; an interruption delivered inside a strict local heap is not charged for it.
   (let ((interruption (with-tls-lock (*current-thread*)
-                        (pop (thread-interruptions *current-thread*)))))
+                        (sb-kernel::without-store-checking
+                          (pop (thread-interruptions *current-thread*))))))
     ;; If there is more to do, then resignal and let the normal
     ;; interrupt deferral mechanism take care of the rest. From the
     ;; OS's point of view the signal we are in the handler for is no
@@ -2366,7 +2378,8 @@ The default behavior is to use FUNCALL.")
 (defun run-interruption (*current-internal-error-context*)
   (in-interruption () ;the non-thruption code does this in the signal handler
     (let ((interruption (with-tls-lock (*current-thread*)
-                          (pop (thread-interruptions *current-thread*)))))
+                          (sb-kernel::without-store-checking
+                            (pop (thread-interruptions *current-thread*))))))
       (when interruption
         (without-interrupts (allow-with-interrupts (funcall interruption)))
         ;; I tried implementing this function as an explicit LOOP, because
@@ -2451,13 +2464,21 @@ Short version: be careful out there."
 ;;; "If an application attempts to use a thread ID whose lifetime has ended,
 ;;;  the behavior is undefined."
 ;;; so we use the TLS lock to keep the thread alive, unless it already isn't.
-(defun %interrupt-thread (thread function &aux (tail (list function)))
+(defun %interrupt-thread (thread function
+                          ;; The queue lives on the target thread, a global
+                          ;; object, so its cells are allocated globally even
+                          ;; when the interrupter runs in a local heap.
+                          &aux (tail (sb-kernel::with-global-heap (list function))))
   (with-tls-lock (thread c-thread)
     (when (/= c-thread 0)
       ;; Append to the end of the interruptions queue. It's
       ;; O(N), but it does not hurt to slow interruptors down a
-      ;; bit when the queue gets long.
-      (setf (thread-interruptions thread) (nconc (thread-interruptions thread) tail))
+      ;; bit when the queue gets long. The append runs with the global
+      ;; heap installed: a strict interrupter is not refused the
+      ;; runtime's store, and a FUNCTION owned by a local heap is still
+      ;; reported as an escape.
+      (sb-kernel::with-global-heap
+        (setf (thread-interruptions thread) (nconc (thread-interruptions thread) tail)))
       ;; We use SIGURG because it satisfies a lot of requirements that
       ;; other people have thought about more than we have.
       ;; See https://golang.org/src/runtime/signal_unix.go where they describe

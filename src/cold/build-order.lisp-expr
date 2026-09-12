@@ -565,6 +565,7 @@
  ("src/code/debug-int" :not-host)
  ("src/code/gc"                :not-host)
  #+system-tlabs ("src/code/arena" :not-host)
+ ("src/code/local-heap"      :not-host)
 
  ("src/code/interr" :not-host)
 

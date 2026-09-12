@@ -87,7 +87,7 @@
            ;; though I don't think they should all be public.
            :MSAN :UBSAN
            :SB-SAFEPOINT
-           :SB-THREAD :SB-UNICODE :SB-FIBER
+           :SB-THREAD :SB-UNICODE :SB-FIBER :SB-LOCAL-HEAPS
            ;; Things which (I think) at least one person has requested be kept around
            :SB-LDB
            ;; We keep the :SB-PACKAGE-LOCKS feature despite it no longer
@@ -445,6 +445,14 @@ Please check that all strings which were not recognizable to the compiler
                             ,@(or #+(and sb-fiber (or x86-64 arm64))
                                   '(sb-vm::emit-save-fiber-regs
                                     sb-vm::emit-restore-fiber-regs))
+                            ;; used by contrib/sb-fiber's heap API
+                            ,@(or #+sb-local-heaps
+                                  '(sb-vm::object-owner
+                                    sb-vm::locally-owned-p
+                                    sb-vm::current-local-heap-sap
+                                    sb-vm::current-local-heap-address
+                                    sb-vm::%switch-local-heap
+                                    sb-vm::local-heap-collect))
                             ,@(or #+(or arm64 x86 x86-64)
                                   '(sb-vm::%vector-cas-pair
                                     sb-vm::%instance-cas-pair

@@ -132,8 +132,20 @@ static void release_pages_impl()
 
 static struct cons* private_cons_recycle_list;
 
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+/* A local heap's local collection, which runs while other threads
+ * allocate, keeps its own conses; see local-heap-gc.inc. */
+extern bool local_heap_private_cons(uword_t car, uword_t cdr, uword_t *result);
+extern bool local_heap_private_free(struct cons *list);
+extern bool local_heap_dispose_private(void);
+#endif
+
 uword_t gc_private_cons(uword_t car, uword_t cdr)
 {
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    uword_t result;
+    if (local_heap_private_cons(car, cdr, &result)) return result;
+#endif
     struct cons* cons = private_cons_recycle_list;
     if (cons)
         private_cons_recycle_list = (struct cons*)cons->cdr;
@@ -150,6 +162,9 @@ uword_t gc_private_cons(uword_t car, uword_t cdr)
 /* Push all the conses in 'list' onto the recycle list. */
 void gc_private_free(struct cons* list)
 {
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    if (local_heap_private_free(list)) return;
+#endif
 #if PRIVATE_CONS_DEBUG
     { int n = 0; struct cons* tail = list; while(tail) ++n, tail = (void*)tail->cdr;
       if (n>1) fprintf(stderr, "private_free(%p){%d}\n", list, n); }
@@ -165,6 +180,9 @@ void gc_private_free(struct cons* list)
  * to either the GC allocator or the malloc implementation. */
 void gc_dispose_private_pages()
 {
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    if (local_heap_dispose_private()) return;
+#endif
     private_cons_recycle_list = 0;
     release_pages_impl();
 }

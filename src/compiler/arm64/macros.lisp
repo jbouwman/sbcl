@@ -413,6 +413,8 @@
                     ;; Calculate the exact cell address to ensure the right card is marked
                     (inst add ea ea (- (ash vector-data-offset word-shift) other-pointer-lowtag))))
                  (emit-gengc-barrier object ea tmp-tn t)
+                 #+sb-local-heaps
+                 (emit-local-heap-store-check object (vop-nth-arg 2 vop) tmp-tn)
                  (storew value ea 0 0))
                 (t
                  (sc-case index
@@ -443,7 +445,9 @@
         (:generator 2
           ,@(when barrierp
               '((when barrier
-                  (emit-gengc-barrier object nil tmp-tn t))))
+                  (emit-gengc-barrier object nil tmp-tn t)
+                  #+sb-local-heaps
+                  (emit-local-heap-store-check object (vop-nth-arg 2 vop) tmp-tn))))
           ,@(case el-type
               ((double-float complex-single-float)
                '((when (sc-is value fp-immediate)

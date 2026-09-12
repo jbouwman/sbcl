@@ -33,13 +33,29 @@
                `(combine-directives
                  (%tokenize-control-string string 0 (length string) nil)
                  t)))
-    (if (test-header-data-bit string
-                              ;; shareable = readonly
-                              (ash (logior sb-vm:+vector-shareable+
-                                           sb-vm:+vector-shareable-nonstd+)
-                                   sb-vm:array-flags-data-position))
+    (if (and (test-header-data-bit string
+                                   ;; shareable = readonly
+                                   (ash (logior sb-vm:+vector-shareable+
+                                                sb-vm:+vector-shareable-nonstd+)
+                                        sb-vm:array-flags-data-position))
+             ;; Never memoize from under a local heap: the tokenized list,
+             ;; the cache line holding it and the cache vector itself would
+             ;; all be allocated in that heap, while the cache is reached
+             ;; from a global symbol -- an escape the store barrier cannot
+             ;; see, and a dangling entry once the heap collects, read back
+             ;; by a later caller as a CASE-FAILURE in the format
+             ;; interpreter. The caller still gets its tokenization.
+             #+sb-local-heaps
+             (zerop (sb-vm::current-local-heap-address)))
         (memoize (compute-it))
-        (compute-it))))
+        ;; Under a local heap the list is not memoized, but it is still
+        ;; built with the global heap installed: its conses are allocated
+        ;; there in any case, and finishing it stores into them, which a
+        ;; strict local heap would otherwise refuse as a mutation of a
+        ;; global object.  The caller gets a global list its heap may
+        ;; refer to.
+        #+sb-local-heaps (sb-kernel::with-global-heap (compute-it))
+        #-sb-local-heaps (compute-it))))
 
 ;;; If at some point I can figure out how to *CORRECTLY* utilize
 ;;; non-simple strings, then the INDEX and END will bound the parse.

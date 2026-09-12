@@ -13,6 +13,9 @@
 (defvar *default-fiber-binding-stack-size* 8192
   "Default binding stack size (bytes) for MAKE-FIBER.")
 
+#-sb-local-heaps
+(defmacro without-heap (&body body) `(progn ,@body))
+
 (defmacro with-fiber-sap ((sap alloc-form) &body body)
   "Bind SAP to ALLOC-FORM.  Signal if the SAP is null; on non-local
 exit from BODY, call %FIBER-RELEASE on SAP."
@@ -38,6 +41,14 @@ and register it with the current thread.  Caller arranges
     (%fiber-register (sb-thread:current-thread-sap) sap)
     f))
 
+(defun %set-current-fiber (fiber)
+  "Make FIBER, or no fiber if NIL, the calling thread's current fiber, in
+the runtime as well as in the slot CURRENT-FIBER reads."
+  (declare (type (or null fiber) fiber))
+  (%fiber-set-current (sb-thread:current-thread-sap)
+                      (if fiber (fiber-sap fiber) (sb-sys:int-sap 0)))
+  (setf (%current-fiber) fiber))
+
 (defun make-main-fiber (&key name (current t))
   "Create a fiber representing the current thread's own stack and
 register it with the thread.  If CURRENT is true, the default, the
@@ -51,11 +62,13 @@ the code is then running on that fiber's stack, not the thread's."
     (when existing
       (error 'current-fiber-error
              :fiber existing :operation 'make-main-fiber)))
-  (with-fiber-sap (sap (%fiber-create-main (sb-thread:current-thread-sap)))
-    (let ((fiber (%install-fiber sap nil name)))
-      (when current
-        (setf (%current-fiber) fiber))
-      fiber)))
+  (without-heap
+    (let ((name (and name (copy-seq (string name)))))
+      (with-fiber-sap (sap (%fiber-create-main (sb-thread:current-thread-sap)))
+        (let ((fiber (%install-fiber sap nil name)))
+          (when current
+            (%set-current-fiber fiber))
+          fiber)))))
 
 (defun %enter-current-fiber (fiber)
   "Check that FIBER can be made current and make it so.  Return true if
@@ -77,7 +90,7 @@ it was not current already."
                   :fiber fiber :state (fiber-state fiber)
                   :expected '(:running)))
           (t
-           (setf (%current-fiber) fiber)
+           (%set-current-fiber fiber)
            t))))
 
 (defmacro with-current-fiber ((fiber) &body body)
@@ -86,7 +99,12 @@ of BODY, and leave the thread with no current fiber on exit.  FIBER must
 be a main fiber of this thread, such as one made by MAKE-MAIN-FIBER with
 :CURRENT NIL, and the thread must have no current fiber, so that BODY
 runs on the stack FIBER stands for; CURRENT-FIBER-ERROR is signalled
-otherwise.  A no-op if FIBER is already current."
+otherwise.  A no-op if FIBER is already current.
+
+The runtime's record of the running fiber is updated along with
+CURRENT-FIBER, which is why a library that keeps a main fiber
+registered between uses should install it with this macro rather
+than by writing the thread slot."
   (let ((f (gensym "FIBER"))
         (installed (gensym "INSTALLED")))
     `(let* ((,f ,fiber)
@@ -94,7 +112,7 @@ otherwise.  A no-op if FIBER is already current."
        (unwind-protect (progn ,@body)
          ;; Unless BODY released it, which leaves no current fiber.
          (when (and ,installed (eq (current-fiber) ,f))
-           (setf (%current-fiber) nil))))))
+           (%set-current-fiber nil))))))
 
 (defmacro with-fiber-thread ((&key name) &body body)
   "Register a main fiber on the calling thread for the dynamic extent
@@ -107,10 +125,18 @@ current fiber.  NAME is forwarded to MAKE-MAIN-FIBER."
 
 (defun make-fiber (function &key name
                                  (stack-size *default-fiber-stack-size*)
-                              (binding-stack-size
-                               *default-fiber-binding-stack-size*))
-  "Create a fiber that runs FUNCTION (zero-argument) when first
-switched to.  NAME is a string label used by PRINT-OBJECT.
+                                 (binding-stack-size
+                                  *default-fiber-binding-stack-size*)
+                                 heap)
+  "Create a fiber that runs FUNCTION (a zero-argument function or the
+name of one) when first switched to.  NAME is a string label used by
+PRINT-OBJECT.
+
+HEAP, if supplied, gives the fiber a local heap of its own: T creates
+one with MAKE-HEAP, or pass a heap from MAKE-HEAP that no fiber owns
+yet.  Everything the fiber allocates then belongs to that heap, which
+is collected independently and released with the fiber.  FUNCTION must
+not itself be owned by a local heap.
 
 When FUNCTION returns, the fiber is marked DEAD and control switches
 back to its most recent resumer, delivering FUNCTION's return value
@@ -124,8 +150,36 @@ Fibers are auto-released when their owning thread exits; explicit
 RELEASE-FIBER is only needed if you want to reclaim resources sooner."
   (unless (current-fiber)
     (error 'no-current-fiber-error :operation 'make-fiber))
-  (with-fiber-sap (sap (%fiber-create stack-size binding-stack-size))
-    (%install-fiber sap function name)))
+  #-sb-local-heaps
+  (when heap
+    (error "local heaps are not supported in this build"))
+  #+sb-local-heaps
+  (unless (or (symbolp function) (zerop (sb-vm::object-owner function)))
+    (error 'cross-heap-reference :object function))
+  #+sb-local-heaps
+  (when (and (heap-p heap) (heap-fiber heap))
+    (error "~S is already owned by ~S" heap (heap-fiber heap)))
+  ;; The wrapper is shared bookkeeping, never locally-owned.
+  (without-heap
+    (let ((name (and name (copy-seq (string name)))))
+      (with-fiber-sap (sap (%fiber-create stack-size binding-stack-size))
+        (let ((fiber (%install-fiber sap function name)))
+          #+sb-local-heaps
+          (when heap
+            (let* ((created (eq heap t))
+                   (heap (if created (make-heap :name name) heap))
+                   (rc (%fiber-set-heap sap (heap-sap-or-lose heap))))
+              (unless (zerop rc)
+                (when created (release-heap heap))
+                (error "could not attach ~S to ~S: ~D" heap fiber rc))
+              (setf (fiber-%heap fiber) heap
+                    (heap-fiber heap) fiber)))
+          fiber)))))
+
+(defun fiber-heap (fiber)
+  "The local heap owned by FIBER, or NIL."
+  (declare (type fiber fiber))
+  (fiber-%heap fiber))
 
 (defun release-fiber (fiber)
   "Release FIBER.  For a worker fiber, unmaps its stacks and frees the
@@ -140,9 +194,20 @@ exits."
       (error 'fiber-state-error
              :fiber fiber :state :running
              :expected '(:new :runnable :dead)))
-    (%fiber-release (shiftf (fiber-sap fiber) (sb-sys:int-sap 0)))
-    (setf (fiber-thread fiber)     nil
-          (fiber-released-p fiber) t)
+    #+sb-local-heaps
+    (let ((heap (fiber-%heap fiber)))
+      (when heap
+        (%fiber-set-heap (fiber-sap fiber) (sb-sys:int-sap 0))
+        (setf (fiber-%heap fiber) nil
+              (heap-fiber heap) nil)
+        (release-heap heap)))
+    ;; The wrapper is global, and the SAP stored into it is boxed: with a
+    ;; local heap installed it would be owned by that heap.  The fiber's
+    ;; own heap is released and uninstalled by now, so it is not restored.
+    (without-heap
+      (%fiber-release (shiftf (fiber-sap fiber) (sb-sys:int-sap 0)))
+      (setf (fiber-thread fiber)     nil
+            (fiber-released-p fiber) t))
     (when (eq (current-fiber) fiber)
       (setf (%current-fiber) nil))))
 
@@ -225,9 +290,12 @@ alone (yield semantics -- preserves TO's prior caller chain)."
          (from-ctx (%fiber-ctx from-sap))
          (to-ctx (%fiber-ctx to-sap)))
     (check-switch from to from-ctx to-ctx)
-    (if update-return-p
-        (stage-return from to from-sap to-ctx values)
-        (setf (fiber-value to) values))
+    (setf values (globalize-values values))
+    ;; The fiber struct is global; a strict heap would refuse the store.
+    (without-store-checking
+      (if update-return-p
+          (stage-return from to from-sap to-ctx values)
+          (setf (fiber-value to) values)))
     (setf (%current-fiber) to)
     (%switch-prep from-sap to-sap)
     (swap-frames th-sap from-ctx to-ctx)
@@ -308,7 +376,7 @@ before its entry function runs)."
            (type condition condition))
   (unless (fiber-alive-p fiber)
     (error 'dead-fiber-error :fiber fiber))
-  (setf (fiber-pending-condition fiber) condition)
+  (setf (fiber-pending-condition fiber) (globalize-condition fiber condition))
   fiber)
 
 (defmacro with-interrupted-fiber ((fiber condition) &body body)
@@ -350,6 +418,20 @@ BODY; SWITCH-FIBER refuses to suspend a pinned fiber.  Pins nest."
        (incf (fiber-pin-count ,f))
        (unwind-protect (progn ,@body)
          (decf (fiber-pin-count ,f))))))
+
+;;; --- Messages ---
+
+#+sb-local-heaps
+(defun send-message (target object)
+  "Copy OBJECT into TARGET's mailbox, where TARGET is a heap or a fiber
+that owns one.  The copy is made with COPY-FOR-TRANSFER; TARGET adopts
+it without further copying when it calls RECEIVE-MESSAGE.  May be
+called from any thread."
+  (%send-to-heap (if (fiber-p target)
+                     (or (fiber-heap target)
+                         (error "~S has no local heap" target))
+                     target)
+                 object))
 
 ;;; --- Cross-thread migration ---
 
