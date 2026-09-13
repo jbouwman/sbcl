@@ -379,6 +379,34 @@ or :ERROR.  Setfable."
                    (%heap-flags (heap-check-stores heap) strict))
   strict)
 
+;;; Names from before the process-heap to local-heap rename, kept so a
+;;; consumer written against that API loads unchanged (issue #45).
+;;; WITHOUT-STORE-CHECKING wraps the two SB-VM primitives the runtime's
+;;; own HEAP-STORE-ERROR handler uses; the condition and its readers are
+;;; the current objects under the old name.
+
+(defmacro without-store-checking (&body body)
+  "Run BODY with the store barrier's checking suspended on this thread
+and restored on exit, for a bookkeeping store the barrier would report
+as an escape. The store is still made, and is still unsafe if what it
+stores outlives the heap that owns it."
+  (let ((saved (gensym "SAVED")))
+    `(let ((,saved (sb-vm::%store-check-suspend)))
+       (unwind-protect (progn ,@body)
+         (sb-vm::%store-check-resume ,saved)))))
+
+(deftype process-heap-store-error () 'heap-store-error)
+
+(declaim (inline process-heap-store-error-object
+                 process-heap-store-error-value
+                 process-heap-store-error-kind))
+(defun process-heap-store-error-object (condition)
+  (heap-store-error-object condition))
+(defun process-heap-store-error-value (condition)
+  (heap-store-error-value condition))
+(defun process-heap-store-error-kind (condition)
+  (heap-store-error-kind condition))
+
 (defun (setf heap-fullsweep-after) (count heap)
   (declare (type (integer 0) count))
   (%heap-set-fullsweep-after (heap-sap-or-lose heap) count)

@@ -122,7 +122,13 @@
    #:heap-store-error
    #:heap-store-error-object
    #:heap-store-error-value
-   #:heap-store-error-kind))
+   #:heap-store-error-kind
+   ;; Pre-rename names, aliases of the above (issue #45)
+   #:without-store-checking
+   #:process-heap-store-error
+   #:process-heap-store-error-object
+   #:process-heap-store-error-value
+   #:process-heap-store-error-kind))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (setf (sb-int:system-package-p (find-package "SB-FIBER")) t))
