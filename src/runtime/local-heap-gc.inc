@@ -505,6 +505,17 @@ lispobj *local_heap_alloc_slow(struct thread *th, struct local_heap *h,
     gc_assert(h->installed_on == th);
     ensure_region_closed(region, page_type);
 
+    /* The hard limit is checked before a collection is requested: an
+     * allocation that exhausts H switches H out and signals, and a
+     * request armed here for H would then be invisible to
+     * interrupt_handle_pending, which looks for one through the current
+     * heap, while the pseudo-atomic-interrupted flag it set would
+     * outlive the handling and trip the check at its end (issue #47). */
+    bool largep = nbytes >= LARGE_OBJECT_SIZE && page_type != PAGE_TYPE_CONS;
+    uword_t claim = largep ? ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) : ALIGN_UP(nbytes, PH_BLOCK_BYTES);
+    if (h->hard_limit && h->bytes_allocated + claim > h->hard_limit)
+        local_heap_exhausted(h, nbytes);
+
     /* Arrange for a local collection at the end of this pseudo-atomic
      * section when the heap has grown enough since the last one. */
     if (h->gc_pending) {
@@ -513,11 +524,6 @@ lispobj *local_heap_alloc_slow(struct thread *th, struct local_heap *h,
         h->gc_pending = 1;
         ph_request_collection(th, h);
     }
-
-    bool largep = nbytes >= LARGE_OBJECT_SIZE && page_type != PAGE_TYPE_CONS;
-    uword_t claim = largep ? ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) : ALIGN_UP(nbytes, PH_BLOCK_BYTES);
-    if (h->hard_limit && h->bytes_allocated + claim > h->hard_limit)
-        local_heap_exhausted(h, nbytes);
 
     void *new_obj;
     acquire_gc_page_table_lock();

@@ -1072,6 +1072,11 @@ interrupt_handle_pending(os_context_t *context)
                 unbind(thread);
                 unbind(thread);
             }
+        } else if (local_heap_withdraw_exhausted_gc_request(thread)) {
+            /* The request was for a heap local_heap_exhausted switched out
+             * before trapping here; nothing is left to collect, only the
+             * flag the request raised (issue #47). */
+            arch_clear_pseudo_atomic_interrupted(thread);
         }
 #endif
 

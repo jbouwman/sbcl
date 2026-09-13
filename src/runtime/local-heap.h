@@ -213,6 +213,7 @@ int  local_heap_collect_impl(struct local_heap *h, void *approx_sp, int full);
 void local_heap_set_fullsweep_after(struct local_heap *h, uword_t n);
 int  local_heap_collect_pending(void);
 bool local_heap_gc_pending_p(struct thread *th);
+bool local_heap_withdraw_exhausted_gc_request(struct thread *th);
 void local_heap_run_pending_gc(os_context_t *context);
 void local_heap_thread_exit(struct thread *th);
 uword_t local_heap_concurrency_peak(void);

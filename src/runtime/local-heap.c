@@ -353,6 +353,19 @@ bool local_heap_gc_pending_p(struct thread *th)
     return h && h->gc_pending;
 }
 
+/* A collection request left on a heap that local_heap_exhausted has
+ * switched out.  The request cannot be serviced through the current
+ * heap any more and H can allocate nothing further, so the request is
+ * dropped; the caller clears the pseudo-atomic-interrupted flag it
+ * raised.  Returns true when there was one to drop. */
+bool local_heap_withdraw_exhausted_gc_request(struct thread *th)
+{
+    struct local_heap *h = thread_extra_data(th)->exhausted_heap;
+    if (!h || !h->gc_pending) return false;
+    h->gc_pending = 0;
+    return true;
+}
+
 int local_heap_collect_pending(void)
 {
     struct thread *th = get_sb_vm_thread();
