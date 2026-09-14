@@ -548,12 +548,17 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
        ;; in places where interrupts should already be disabled.
        (unwind-protect
             (progn
-              (setf (thread-waiting-for ,n-thread) ,new)
+              ;; The mark is the runtime's bookkeeping on the thread, a
+              ;; global object; a caller under a strict local heap is not
+              ;; charged for it.
+              (sb-kernel::without-store-checking
+                (setf (thread-waiting-for ,n-thread) ,new))
               (barrier (:memory))
               ,@forms)
          ;; Interrupt handlers and GC save and restore any
          ;; previous wait marks using WITHOUT-THREAD-WAITING-FOR
-         (setf (thread-waiting-for ,n-thread) nil)
+         (sb-kernel::without-store-checking
+           (setf (thread-waiting-for ,n-thread) nil))
          (barrier (:memory))))))
 
 ;;;; Mutexes
@@ -621,7 +626,8 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
       (when (mutex-p origin)
         (let ((chain (detect-deadlock origin 10)))
           (when (consp chain)
-            (setf (thread-waiting-for self) nil)
+            (sb-kernel::without-store-checking
+              (setf (thread-waiting-for self) nil))
             (sb-thread:barrier (:memory))
             (release-cas-lock **deadlock-lock**)
             (with-interrupts
@@ -1086,7 +1092,8 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
 #+(and sb-thread (not sb-futex))
 (progn
   (defun %waitqueue-enqueue (thread queue)
-    (setf (thread-waiting-for thread) queue)
+    (sb-kernel::without-store-checking
+      (setf (thread-waiting-for thread) queue))
     (let ((head (waitqueue-%head queue))
           (tail (waitqueue-%tail queue))
           (new (list thread)))
@@ -1097,7 +1104,8 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
       (setf (waitqueue-%tail queue) new)
       nil))
   (defun %waitqueue-drop (thread queue)
-    (setf (thread-waiting-for thread) nil)
+    (sb-kernel::without-store-checking
+      (setf (thread-waiting-for thread) nil))
     (let ((head (waitqueue-%head queue)))
       (do ((list head (cdr list))
            (prev nil list))

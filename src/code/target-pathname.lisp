@@ -301,6 +301,15 @@
 ;;; This constructor is used to make an instance of the correct type
 ;;; from parsed arguments.
 (defun intern-pathname (host device directory name type version)
+  ;; The pathname, its parts and the entries that intern them are global
+  ;; whoever asks for them (%INTERN-PATHNAME allocates in the system
+  ;; TLAB), and building them stores into those fresh objects and into
+  ;; the tables.  Run with the global heap installed, so a caller under a
+  ;; strict local heap is not charged for the runtime's own stores.
+  (sb-kernel::with-global-heap
+    (%intern-pathname host device directory name type version)))
+
+(defun %intern-pathname (host device directory name type version)
   ;; We canonicalize logical pathname components to uppercase. ANSI
   ;; doesn't strictly require this, leaving it up to the implementor;
   ;; but the arguments given in the X3J13 cleanup issue
