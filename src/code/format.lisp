@@ -48,7 +48,14 @@
              #+sb-local-heaps
              (zerop (sb-vm::current-local-heap-address)))
         (memoize (compute-it))
-        (compute-it))))
+        ;; Under a local heap the list is not memoized, but it is still
+        ;; built with the global heap installed: its conses are allocated
+        ;; there in any case, and finishing it stores into them, which a
+        ;; strict local heap would otherwise refuse as a mutation of a
+        ;; global object.  The caller gets a global list its heap may
+        ;; refer to.
+        #+sb-local-heaps (sb-kernel::with-global-heap (compute-it))
+        #-sb-local-heaps (compute-it))))
 
 ;;; If at some point I can figure out how to *CORRECTLY* utilize
 ;;; non-simple strings, then the INDEX and END will bound the parse.

@@ -555,3 +555,35 @@ drained."
   (with-test-heap (heap :check-stores :error :strict t)
     (assert (eq (with-heap (heap) (strict-cached-package))
                 (find-package "SB-FIBER")))))
+
+;;; The runtime's own stores on a thread's behalf are not the program's,
+;;; and a strict heap does not refuse them: printing a condition report
+;;; tokenizes its control string, interning a pathname fills the pathname
+;;; tables, and a contended mutex marks the thread as waiting.
+(with-test (:name (:local-heap :strict :condition-report-tokenizes))
+  (with-test-heap (heap :check-stores :error :strict t)
+    (let ((report (with-heap (heap)
+                    (handler-case (error "Strict tokenizer ~S probe ~D" :x 1)
+                      (simple-error (e) (princ-to-string e))))))
+      (assert (search "Strict tokenizer :X probe 1" report)))))
+
+(with-test (:name (:local-heap :strict :pathname-interning))
+  (with-test-heap (heap :check-stores :error :strict t)
+    (let ((name (format nil "/strict-heap-~D/probe.txt" (random 1000000000))))
+      (with-heap (heap)
+        (assert (equal "probe" (pathname-name (pathname name))))
+        (assert (probe-file "/"))))))
+
+(with-test (:name (:local-heap :strict :contended-mutex-wait-mark))
+  (let* ((mutex (sb-thread:make-mutex))
+         (held (sb-thread:make-semaphore))
+         (holder (sb-thread:make-thread
+                  (lambda ()
+                    (sb-thread:with-mutex (mutex)
+                      (sb-thread:signal-semaphore held)
+                      (sleep 0.3))))))
+    (sb-thread:wait-on-semaphore held)
+    (with-test-heap (heap :check-stores :error :strict t)
+      (assert (eq :held (with-heap (heap)
+                          (sb-thread:with-mutex (mutex) :held)))))
+    (sb-thread:join-thread holder)))
