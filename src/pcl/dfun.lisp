@@ -701,12 +701,20 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
   (unless applicable (setq applicable (gensym)))
   `(multiple-value-bind (,nemf ,applicable ,wrappers ,invalidp
                          ,@(when type `(,type ,index)))
-       (cache-miss-values ,gf ,args ',(cond (caching-p 'caching)
-                                            (type 'accessor)
-                                            (t 'checking)))
-    (when (and ,applicable (not (memq ,gf *dfun-miss-gfs-on-stack*)))
-      (let ((*dfun-miss-gfs-on-stack* (cons ,gf *dfun-miss-gfs-on-stack*)))
-        ,@body))
+       (sb-kernel::with-global-heap
+         (multiple-value-bind (,nemf ,applicable ,wrappers ,invalidp
+                              ,@(when type `(,type ,index)))
+             (cache-miss-values ,gf ,args ',(cond (caching-p 'caching)
+                                                (type 'accessor)
+                                                (t 'checking)))
+           (when (and ,applicable (not (memq ,gf *dfun-miss-gfs-on-stack*)))
+             (let ((*dfun-miss-gfs-on-stack* (cons ,gf *dfun-miss-gfs-on-stack*)))
+               ,@body))
+           (values ,nemf ,applicable ,wrappers ,invalidp
+                   ,@(when type `(,type ,index)))))
+    ;; Dispatch metadata is global; the effective method runs in the
+    ;; caller's heap, including on the first call and every cache miss.
+    (declare (ignore ,applicable ,wrappers ,invalidp))
     ,(if type
          ;; Munge the EMF so that INVOKE-EMF can do the right thing:
          ;; BOUNDP and MAKUNBOUND get a structure, WRITER the logical
@@ -779,7 +787,6 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
                         instance))))))
 
 (defun initial-dfun (gf args)
-  (sb-kernel::with-global-heap
   (dfun-miss (gf args wrappers invalidp nemf ntype nindex)
     (cond (invalidp)
           ((and ntype nindex)
@@ -790,7 +797,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
           (t
            (dfun-update gf #'make-checking-dfun
             ;; nemf is suitable only for caching, have to do this:
-            (cache-miss-values gf args 'checking)))))))
+            (cache-miss-values gf args 'checking))))))
 
 (defun make-final-dfun (gf &optional classes-list)
   (multiple-value-bind (dfun cache info)

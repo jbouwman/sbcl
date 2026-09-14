@@ -517,3 +517,41 @@ drained."
     (multiple-value-bind (details total) (take-heap-violations)
       (assert (null details))
       (assert (zerop total)))))
+
+;;; Generic dispatch may update global caches, but effective methods must
+;;; retain the caller's heap on first calls and subsequent cache misses.
+(defgeneric strict-dispatch-owner (value))
+(defmethod strict-dispatch-owner ((value integer))
+  (sb-vm::object-owner (list value)))
+(defmethod strict-dispatch-owner ((value string))
+  (sb-vm::object-owner (list value)))
+(defmethod strict-dispatch-owner ((value cons))
+  (sb-vm::object-owner (list value)))
+
+(with-test (:name (:local-heap :strict :generic-dispatch-allocation))
+  (with-test-heap (heap :check-stores :error :strict t)
+    (dolist (value '(1 2 "new specializer" "warm" (third) (warm)))
+      (let ((owner (with-heap (heap) (strict-dispatch-owner value))))
+        (assert (= owner (sb-fiber::heap-id heap)))))))
+
+(defvar *strict-dispatch-target* (make-hash-table))
+(defgeneric strict-dispatch-store (value))
+(defmethod strict-dispatch-store ((value integer))
+  (setf (gethash :escaped *strict-dispatch-target*) (list value)))
+(defmethod strict-dispatch-store ((value string))
+  (setf (gethash :escaped *strict-dispatch-target*) (list value)))
+
+(with-test (:name (:local-heap :strict :generic-method-store-rejected))
+  (with-test-heap (heap :check-stores :error :strict t)
+    (dolist (value '(1 2 "new specializer" "warm"))
+      (assert
+       (handler-case
+           (with-heap (heap) (strict-dispatch-store value) nil)
+         (heap-store-error () t)))
+      (assert (zerop (hash-table-count *strict-dispatch-target*))))))
+
+(defun strict-cached-package () (find-package "SB-FIBER"))
+(with-test (:name (:local-heap :strict :cold-package-cache))
+  (with-test-heap (heap :check-stores :error :strict t)
+    (assert (eq (with-heap (heap) (strict-cached-package))
+                (find-package "SB-FIBER")))))
