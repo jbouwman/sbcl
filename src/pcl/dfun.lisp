@@ -714,7 +714,11 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
                    ,@(when type `(,type ,index)))))
     ;; Dispatch metadata is global; the effective method runs in the
     ;; caller's heap, including on the first call and every cache miss.
-    (declare (ignore ,applicable ,wrappers ,invalidp))
+    ;; The accessor cases below dispatch on TYPE and NEMF alone, so the
+    ;; outer INDEX has no reader; the warm build on x86-64 escalates the
+    ;; resulting style warning to an error.
+    (declare (ignore ,applicable ,wrappers ,invalidp
+                     ,@(when type (list index))))
     ,(if type
          ;; Munge the EMF so that INVOKE-EMF can do the right thing:
          ;; BOUNDP and MAKUNBOUND get a structure, WRITER the logical
