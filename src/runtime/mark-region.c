@@ -1275,6 +1275,16 @@ void mr_preserve_leaf(lispobj obj) {
 void mr_preserve_object(lispobj obj) {
   page_index_t p = find_page_index(native_pointer(obj));
   if (p != -1) {
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    /* A saved register or pin can outlive the heap its object lived in:
+     * a frame that released the heap may still hold one of its objects.
+     * The released memory can be free or reused, so trace only an
+     * allocated object containing the address, as an ambiguous root. */
+    lispobj *found = find_object(obj, DYNAMIC_SPACE_START);
+    if (!found) return;
+    obj = compute_lispobj(found);
+    p = find_page_index(found);
+#endif
     mark(obj, NULL, SOURCE_NORMAL);
     gc_page_pins[p] = 0xFF;
   }

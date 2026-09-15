@@ -634,3 +634,29 @@ drained."
                           :finished)
                       (sb-ext:timeout () :timed-out)))))
       (sb-ext:unschedule-timer timer))))
+
+;;; A frame can still hold an object of a heap it has released. A global
+;;; collection that finds that stale root must not trace the memory the
+;;; release gave back.
+(defstruct stale-root-record message fields)
+
+(defun collect-after-release-in-same-frame (n)
+  (let ((retained '()))
+    (dotimes (i n)
+      (let ((heap (make-heap :check-stores :error :strict t))
+            (record nil))
+        (unwind-protect
+             (with-heap (heap)
+               (setf record (make-stale-root-record
+                             :message (format nil "request ~D" i)
+                             :fields (list (copy-seq "a") (vector 1 2 3))))
+               (without-heap (push (globalize record) retained)))
+          (release-heap heap))
+        (sb-ext:gc :full t)))
+    retained))
+
+(with-test (:name (:local-heap :full-gc-after-release-with-stale-root))
+  (let ((retained (collect-after-release-in-same-frame 50)))
+    (assert (= 50 (length retained)))
+    (assert (every (lambda (r) (search "request" (stale-root-record-message r)))
+                   retained))))
