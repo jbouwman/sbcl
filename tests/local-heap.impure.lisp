@@ -617,3 +617,20 @@ drained."
     (assert (sb-thread:wait-on-semaphore ran :timeout 5))
     (sb-thread:signal-semaphore stop)
     (sb-thread:join-thread target)))
+
+;;; A timer's signal can arrive on a thread with a strict heap installed; the
+;;; schedule it updates and the timer it runs are global.
+(with-test (:name (:local-heap :strict :timer-expires))
+  (with-test-heap (heap :check-stores :error :strict t)
+    (let ((timer (sb-kernel::with-global-heap
+                   (sb-ext:make-timer (lambda () (sb-impl::timeout-cerror))
+                                      :thread sb-thread:*current-thread*))))
+      (assert (eq :timed-out
+                  (with-heap (heap)
+                    (handler-case
+                        (progn
+                          (sb-kernel::with-global-heap (sb-ext:schedule-timer timer 0.2))
+                          (sleep 3)
+                          :finished)
+                      (sb-ext:timeout () :timed-out)))))
+      (sb-ext:unschedule-timer timer))))
