@@ -587,3 +587,33 @@ drained."
       (assert (eq :held (with-heap (heap)
                           (sb-thread:with-mutex (mutex) :held)))))
     (sb-thread:join-thread holder)))
+
+;;; A thread's interruption queue is the runtime's bookkeeping on the thread
+;;; struct: delivering an interruption to a thread inside a strict heap pops
+;;; it, and interrupting from inside one appends to the target's queue.
+(with-test (:name (:local-heap :strict :interruption-delivered))
+  (let* ((ready (sb-thread:make-semaphore))
+         (worker (sb-thread:make-thread
+                  (lambda ()
+                    (with-test-heap (heap :check-stores :error :strict t)
+                      (with-heap (heap)
+                        (sb-thread:signal-semaphore ready)
+                        (sleep 0.5)))
+                    :done))))
+    (sb-thread:wait-on-semaphore ready)
+    ;; The worker only returns :DONE if the interruption did not signal.
+    (sb-thread:interrupt-thread worker (lambda () nil))
+    (assert (eq :done (sb-thread:join-thread worker)))))
+
+(with-test (:name (:local-heap :strict :interruption-sent))
+  (let* ((stop (sb-thread:make-semaphore))
+         (ran (sb-thread:make-semaphore))
+         (target (sb-thread:make-thread
+                  (lambda () (sb-thread:wait-on-semaphore stop))))
+         (action (lambda () (sb-thread:signal-semaphore ran))))
+    (with-test-heap (heap :check-stores :error :strict t)
+      (with-heap (heap)
+        (sb-thread:interrupt-thread target action)))
+    (assert (sb-thread:wait-on-semaphore ran :timeout 5))
+    (sb-thread:signal-semaphore stop)
+    (sb-thread:join-thread target)))
