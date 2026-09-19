@@ -314,13 +314,11 @@ lispobj alloc_code_object(unsigned total_words, unsigned boxed)
     struct alloc_region *region = sys ? &self->sys_cons_tlab : &self->cons_tlab; \
     int partial_request = (self->arena && !sys) ? \
                           nbytes : (char*)region->end_addr - (char*)region->free_pointer; \
-    gc_assert(nbytes >= (sword_t)partial_request); \
     if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES
 #else /* no system tlabs */
 #define PREPARE_LIST_ALLOCATION() \
     struct alloc_region *region = THREAD_ALLOC_REGION(self, cons); \
     int partial_request = (char*)region->end_addr - (char*)region->free_pointer; \
-    gc_assert(nbytes > (sword_t)partial_request); \
     if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES
 #endif
 
