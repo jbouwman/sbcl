@@ -825,9 +825,9 @@ static void ph_scan_thread_roots(struct thread *th, void *approx_sp)
 #endif
     (void)approx_sp;
 
-    scav_binding_stack((lispobj*)th->binding_stack_start,
-                       (lispobj*)get_binding_stack_pointer(th),
-                       mr_preserve_object);
+    bindingstack_vals_visit((lispobj*)th->binding_stack_start,
+                            (lispobj*)get_binding_stack_pointer(th),
+                            mr_preserve_object);
     lispobj *from = &th->lisp_thread;
     lispobj *to = (lispobj*)(SymbolValue(FREE_TLS_INDEX, 0) + (char*)th);
     mr_preserve_range(from, to - from);
