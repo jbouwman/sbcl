@@ -15,7 +15,8 @@
 
 ;;; 0 the trace start marker (trace-start . END-INDEX)
 ;;; 1 the current thread, an SB-THREAD:THREAD instance
-(defconstant +elements-per-trace-start+ 2)
+;;; 2 the thread's SAMPLE-TAG when the trace was sampled, a fixnum
+(defconstant +elements-per-trace-start+ 3)
 
 ;;; Encapsulate all the information about a sampling run
 (defstruct (samples (:constructor make-samples (mode sample-interval)))
@@ -47,7 +48,8 @@ The signature of FUNCTION must be compatible with (thread trace).
 
 FUNCTION is called once for each trace where THREAD is the
 SB-THREAD:THREAD instance that was sampled to produce TRACE, and TRACE
-is an opaque object to be passed to MAP-TRACE-PC-LOCS.
+is an opaque object to be passed to MAP-TRACE-PC-LOCS.  TRACE-TAG
+returns the SAMPLE-TAG the thread had when TRACE was sampled.
 
 EXPERIMENTAL: Interface subject to change."
   (let ((function (sb-kernel:%coerce-callable-to-fun function))
@@ -61,6 +63,22 @@ EXPERIMENTAL: Interface subject to change."
             do (let ((trace (list vector start end)))
                  (funcall function thread trace))
             while (< end index)))))
+
+(defun trace-tag (trace)
+  "The SAMPLE-TAG the sampled thread had when TRACE, an object passed to
+the function given to MAP-TRACES, was sampled."
+  (destructuring-bind (samples start end) trace
+    (declare (ignore end))
+    (aref samples (+ start 2))))
+
+(declaim (inline sample-tag (setf sample-tag)))
+(defun sample-tag ()
+  "The fixnum the profiler records with each sample taken on the current
+thread, 0 unless set."
+  sb-thread::*sprof-tag*)
+(defun (setf sample-tag) (tag)
+  (declare (type fixnum tag))
+  (setq sb-thread::*sprof-tag* tag))
 
 ;;; Call FUNCTION on each PC location in TRACE.
 ;;; The signature of FUNCTION must be compatible with (info pc-or-offset).
@@ -212,6 +230,12 @@ EXPERIMENTAL: Interface subject to change."
 (defun trace-len (trace)
   #+64-bit (logand (sap-ref-64 trace 8) #xffffffff)
   #-64-bit (sap-ref-32 trace 8))
+;;; The tag is the raw word of a fixnum.
+(defun trace-raw-tag (trace)
+  (let ((word (sap-ref-word trace 16)))
+    (if (zerop (logand word sb-vm:fixnum-tag-mask))
+        (ash (sb-c::mask-signed-field sb-vm:n-word-bits word) (- sb-vm:n-fixnum-tag-bits))
+        0)))
 
 ;;; Pseudo-functions for marking questionable parts of the stack trace
 (defun unavailable-frames ())
@@ -231,6 +255,25 @@ EXPERIMENTAL: Interface subject to change."
        (let ((serial (sb-kernel:%code-serialno x)))
          (unless (eql serial 0)
            (setf (gethash serial ht) x)))))
+    ;; Under the mark-region collector the heap walk above misses code
+    ;; allocated since startup, which then reports as "Unknown fn".  The code
+    ;; of every global function is found through its name as well.
+    #+mark-region-gc
+    (flet ((add (fun)
+             (let ((simple (typecase fun
+                             (sb-kernel:closure (sb-kernel:%closure-fun fun))
+                             (sb-kernel:simple-fun fun))))
+               (when simple
+                 (let* ((code (sb-kernel:fun-code-header simple))
+                        (serial (sb-kernel:%code-serialno code)))
+                   (unless (eql serial 0)
+                     (setf (gethash serial ht) code)))))))
+      (do-all-symbols (symbol)
+        (when (fboundp symbol)
+          (add (ignore-errors (fdefinition symbol))))
+        (let ((setter (list (quote setf) symbol)))
+          (when (fboundp setter)
+            (add (ignore-errors (fdefinition setter)))))))
     ht))
 
 (defun extract-traces (sap serialno-to-code)
@@ -273,10 +316,11 @@ EXPERIMENTAL: Interface subject to change."
       (let* ((trace (sprof-data-trace sap trace-ptr))
              (len (trace-len trace))
              ;; byte offset into the trace at which the locs[] array begins
-             (element-offset 16)
+             (element-offset 24)
              (locs))
-        (dotimes (i len (push (cons (nreverse (coerce locs 'vector))
-                                    (trace-multiplicity trace))
+        (dotimes (i len (push (list* (nreverse (coerce locs 'vector))
+                                     (trace-multiplicity trace)
+                                     (trace-raw-tag trace))
                               result))
           (multiple-value-bind (info pc-or-offset)
               #-64-bit
@@ -293,7 +337,7 @@ EXPERIMENTAL: Interface subject to change."
                       (t (absolute-pc bits))))
           (setf locs (list* pc-or-offset info locs))
           (incf element-offset element-size)))
-        (incf trace-ptr (+ 2 len))))))
+        (incf trace-ptr (+ 3 len))))))
 
 ;;; Call FUNCTION with each thread's sampled data, and deallocate the data.
 (defun call-with-each-profile-buffer (function)
@@ -361,7 +405,7 @@ EXPERIMENTAL: Interface subject to change."
            (make-array
             (let ((total-length 0))
               (dolist (subsample aggregate-data total-length)
-                (loop for (trace . multiplicity) in (car subsample)
+                (loop for (trace multiplicity) in (car subsample)
                       do (incf total-length (* (+ (length trace) +elements-per-trace-start+)
                                                multiplicity)))))))
           (index 0))
@@ -370,14 +414,15 @@ EXPERIMENTAL: Interface subject to change."
       ;; of the new format is to speed up callgraph construction.
       (dolist (subsample aggregate-data)
         (loop with thread = (cdr subsample)
-              for (trace . multiplicity) in (car subsample)
+              for (trace multiplicity . tag) in (car subsample)
               do (incf n-unique-traces)
                  (dotimes (i multiplicity)
                    (let* ((len (+ (length trace) +elements-per-trace-start+))
                           (end (+ index len)))
                      (setf (aref vector index) `(trace-start . ,end)
-                           (aref vector (1+ index)) thread)
-                     (replace vector trace :start1 (+ index 2))
+                           (aref vector (1+ index)) thread
+                           (aref vector (+ index 2)) tag)
+                     (replace vector trace :start1 (+ index +elements-per-trace-start+))
                      (setq index end)))))
       (aver (= index (length vector)))
       (values vector n-unique-traces threads))))
@@ -405,7 +450,7 @@ EXPERIMENTAL: Interface subject to change."
           do (let ((trace (sprof-data-trace sap trace-ptr)))
                (incf n-unique)
                (incf n-traces (trace-multiplicity trace))
-               (incf trace-ptr (+ 2 (trace-len trace)))))
+               (incf trace-ptr (+ 3 (trace-len trace)))))
     (aver (= trace-ptr free-ptr))
     (format t "~d buckets in use, ~D unique traces, ~D total~%" buckets-used n-unique n-traces)))
 

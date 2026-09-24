@@ -83,8 +83,8 @@ static void fiber_free(struct sb_fiber_ctx *f)
 void sb_fiber_release_registered(struct thread *th)
 {
     struct extra_thread_data *ed = thread_extra_data(th);
-    struct sb_fiber_ctx *f = ed->fiber_list;
-    ed->fiber_list = NULL;
+    struct sb_fiber_ctx *f =
+        __atomic_exchange_n(&ed->fiber_list, NULL, __ATOMIC_ACQ_REL);
     while (f) {
         struct sb_fiber_ctx *next = f->next;
         f->owner = NULL;
@@ -167,15 +167,16 @@ void sb_fiber_release(struct sb_fiber_ctx *f)
     fiber_free(f);
 }
 
+static int fiber_list_remove(struct thread *src, struct sb_fiber_ctx *fiber);
+static void fiber_list_insert(struct thread *dest, struct sb_fiber_ctx *fiber);
+
 /* Registering a fiber does not make it current, even a main fiber, which
  * is always RUNNING: sb_fiber_set_current does that. */
 void sb_fiber_register(struct thread *th, struct sb_fiber_ctx *fiber)
 {
     assert(fiber->owner == NULL);
     fiber->owner = th;
-    fiber->next = thread_extra_data(th)->fiber_list;
-    __atomic_store_n(&thread_extra_data(th)->fiber_list,
-                     fiber, __ATOMIC_RELEASE);
+    fiber_list_insert(th, fiber);
 }
 
 static inline void sb_fiber_enter_pa(struct thread *th);
@@ -198,15 +199,9 @@ void sb_fiber_unregister(struct thread *th, struct sb_fiber_ctx *fiber)
 {
     if (thread_extra_data(th)->current_fiber == fiber)
         thread_extra_data(th)->current_fiber = NULL;
-    struct sb_fiber_ctx **pp = &thread_extra_data(th)->fiber_list;
-    while (*pp) {
-        if (*pp == fiber) {
-            *pp = fiber->next;
-            fiber->next = NULL;
-            fiber->owner = NULL;
-            return;
-        }
-        pp = &(*pp)->next;
+    if (fiber_list_remove(th, fiber) == 0) {
+        fiber->next = NULL;
+        fiber->owner = NULL;
     }
 }
 

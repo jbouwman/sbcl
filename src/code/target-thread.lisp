@@ -2345,6 +2345,8 @@ implementations consider such usage to be well-defined.
           :late ("SBCL" "1.2.15")
           (function destroy-thread :replacement terminate-thread)))
 
+(declaim (type fixnum *sprof-tag*))
+
 (defvar *interrupt-handler* nil
   "A function which is called with the function argument to SB-THREAD:INTERRUPT-THREAD
 when the interrupt is ready to run.
@@ -2355,6 +2357,16 @@ The default behavior is to use FUNCALL.")
 ;;; Called from the signal handler.
 #-(or sb-safepoint win32)
 (defun run-interruption ()
+  #+sb-local-heaps
+  (unless (zerop (sb-vm::current-local-heap-address))
+    (let ((trap (sb-vm::take-local-heap-allocation-trap)))
+      (unless (zerop trap)
+        (when (thread-interruptions *current-thread*)
+          (sb-unix:raise sb-unix:sigurg))
+        (without-interrupts
+          (allow-with-interrupts
+            (sb-vm::signal-local-heap-allocation-trap trap)))
+        (return-from run-interruption))))
   ;; The queue is the runtime's bookkeeping on the thread, a global object;
   ;; an interruption delivered inside a strict local heap is not charged for it.
   (let ((interruption (with-tls-lock (*current-thread*)

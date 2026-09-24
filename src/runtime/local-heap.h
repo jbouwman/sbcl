@@ -101,6 +101,10 @@ struct local_heap {
     uword_t gc_threshold;     /* auto-collect when bytes_since_gc exceeds
                                * max(gc_threshold, bytes_live); 0 disables */
     uword_t hard_limit;       /* refuse to grow past this many bytes; 0 = none */
+    uword_t bytes_claimed;    /* every byte ever claimed; no collection lowers it */
+    uword_t alloc_trap;       /* signal once bytes_claimed exceeds this; 0 = off */
+    uword_t alloc_trap_fired; /* threshold of a trap that fired undelivered, or 0;
+                               * see local_heap_alloc_trap */
     uword_t gc_count;
     uword_t gc_time_usec;
 
@@ -205,6 +209,13 @@ uword_t local_heap_take_exhausted(void);
 void local_heap_check_store(lispobj value, lispobj object);
 int  local_heap_switch_address(uword_t heap);
 uword_t local_heap_current_address(void);
+
+/* Allocation trap: one-shot, armed on the heap by its owner thread. */
+uword_t local_heap_arm_alloc_trap_address(uword_t heap, uword_t bytes);
+void local_heap_disarm_alloc_trap_address(uword_t heap);
+void local_heap_set_hard_limit_address(uword_t heap, uword_t limit);
+uword_t local_heap_take_alloc_trap(void);
+void local_heap_alloc_trap(struct local_heap *h);
 
 /* Local collection.  The heap must be installed on the calling thread
  * and the caller must inhibit global GC (WITHOUT-GCING). */

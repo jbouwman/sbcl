@@ -8,7 +8,7 @@
   (:export
    ;; Recording
    #:start-sampling #:stop-sampling #:with-sampling
-   #:map-traces
+   #:map-traces #:trace-tag #:sample-tag #:harvest-traces
    #:sample-pc
 
    ;; Call counting

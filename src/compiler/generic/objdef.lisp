@@ -566,11 +566,13 @@ during backtrace.
   ;; Statistical CPU profiler data recording buffer
   (sprof-data)
   (sprof-enable :special sb-thread::*sprof-enable*) ; = 0 to block SIGPROF
+  (sprof-tag :special sb-thread::*sprof-tag*)
   ;;
   (arena)
   ;; The installed local heap if its stores are being checked, else 0.
   ;; Read by the store barrier; see EMIT-LOCAL-HEAP-STORE-CHECK.
   #+sb-local-heaps (local-heap-check :c-type "struct local_heap *" :pointer t)
+  #+sb-local-heaps (local-heap :c-type "struct local_heap *" :pointer t)
   ;; Miscellaneous arch-specific thread-local state for breakpoints.
   (breakpoint-misc :c-type "void *" :pointer t)
 

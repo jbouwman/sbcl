@@ -306,6 +306,7 @@ int local_heap_switch_in_pa(struct thread *th, struct local_heap *to)
         th->cons_tlab  = ed->saved_cons_tlab;
     }
     ed->current_heap = to;
+    th->local_heap = to;
     th->local_heap_check = (to && to->store_check) ? to : NULL;
 #ifdef LISP_FEATURE_SB_FIBER
     if (ed->current_fiber) ed->current_fiber->active_heap = to;
@@ -332,6 +333,51 @@ int local_heap_switch_address(uword_t heap)
 uword_t local_heap_current_address(void)
 {
     return (uword_t)thread_extra_data(get_sb_vm_thread())->current_heap;
+}
+
+uword_t local_heap_arm_alloc_trap_address(uword_t heap, uword_t bytes)
+{
+    struct local_heap *h = (struct local_heap*)heap;
+    uword_t trap = h->bytes_claimed + bytes;
+    if (trap < h->bytes_claimed) trap = (uword_t)-1;
+    if (trap == 0) trap = 1;          /* 0 means off; any claim exceeds 1 */
+    h->alloc_trap_fired = 0;
+    h->alloc_trap = trap;
+    return trap;
+}
+
+void local_heap_disarm_alloc_trap_address(uword_t heap)
+{
+    struct local_heap *h = (struct local_heap*)heap;
+    h->alloc_trap = 0;
+    h->alloc_trap_fired = 0;
+}
+
+void local_heap_set_hard_limit_address(uword_t heap, uword_t limit)
+{
+    ((struct local_heap*)heap)->hard_limit = limit;
+}
+
+void local_heap_alloc_trap(struct local_heap *h)
+{
+    uword_t trap = h->alloc_trap;
+    if (trap && h->bytes_claimed > trap) {
+        h->alloc_trap = 0;
+        h->alloc_trap_fired = trap;
+    }
+#ifndef LISP_FEATURE_SB_SAFEPOINT
+    if (h->alloc_trap_fired)
+        pthread_kill(pthread_self(), SIGURG);
+#endif
+}
+
+uword_t local_heap_take_alloc_trap(void)
+{
+    struct local_heap *h = thread_extra_data(get_sb_vm_thread())->current_heap;
+    if (!h || !h->alloc_trap_fired) return 0;
+    uword_t trap = h->alloc_trap_fired;
+    h->alloc_trap_fired = 0;
+    return trap;
 }
 
 /* --- Local collection entry points --- */
@@ -667,6 +713,8 @@ uword_t local_heap_stat(struct local_heap *h, int which)
     case 21: return h->global_root_objects;
     case 22: return local_heap_concurrency_peak();
     case 23: return h->epoch;
+    case 24: return h->bytes_claimed;
+    case 25: return h->alloc_trap;
     default: return 0;
     }
 }
