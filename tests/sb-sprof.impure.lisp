@@ -158,3 +158,37 @@
     (assert (member 'spin-tagged-b (gethash 4 second)))
     (assert (not (member 'spin-tagged-a (gethash 4 second))))
     (assert (not (member 'spin-tagged-a (gethash 3 second))))))
+
+;;; Closures whose code was compiled after startup and is reachable through
+;;; no global name resolve through the heap walk alone.
+(with-test (:name (:sprof :closure-compiled-after-startup :resolves)
+            :skipped-on (not :sb-thread))
+  (let ((plain (funcall (compile nil '(lambda (k)
+                                        (lambda (s) (+ k (spin-tagged s)))))
+                        1))
+        (named (funcall (compile nil '(lambda (k)
+                                        (sb-int:named-lambda sprof-anonymous-closure (s)
+                                          (+ k (spin-tagged s)))))
+                        2)))
+    (sb-sprof:reset)
+    (sb-sprof:start-profiling :sample-interval 0.0005 :max-samples 100000
+                              :threads (list sb-thread:*current-thread*))
+    (unwind-protect
+         (progn
+           (setf (sb-sprof:sample-tag) 5)
+           (funcall plain 0.1)
+           (setf (sb-sprof:sample-tag) 6)
+           (funcall named 0.1))
+      (setf (sb-sprof:sample-tag) 0)
+      (sb-sprof:stop-profiling))
+    (let* ((by-tag (frames-by-tag))
+           (plain-frames (gethash 5 by-tag))
+           (named-frames (gethash 6 by-tag)))
+      (assert (member 'spin-tagged plain-frames))
+      (assert (find-if (lambda (frame)
+                         (and (consp frame) (eq (first frame) 'lambda)))
+                       plain-frames))
+      (assert (member 'sprof-anonymous-closure named-frames))
+      (assert (notany (lambda (frame)
+                        (and (stringp frame) (search "Unknown fn" frame)))
+                      (append plain-frames named-frames))))))

@@ -255,25 +255,6 @@ EXPERIMENTAL: Interface subject to change."
        (let ((serial (sb-kernel:%code-serialno x)))
          (unless (eql serial 0)
            (setf (gethash serial ht) x)))))
-    ;; Under the mark-region collector the heap walk above misses code
-    ;; allocated since startup, which then reports as "Unknown fn".  The code
-    ;; of every global function is found through its name as well.
-    #+mark-region-gc
-    (flet ((add (fun)
-             (let ((simple (typecase fun
-                             (sb-kernel:closure (sb-kernel:%closure-fun fun))
-                             (sb-kernel:simple-fun fun))))
-               (when simple
-                 (let* ((code (sb-kernel:fun-code-header simple))
-                        (serial (sb-kernel:%code-serialno code)))
-                   (unless (eql serial 0)
-                     (setf (gethash serial ht) code)))))))
-      (do-all-symbols (symbol)
-        (when (fboundp symbol)
-          (add (ignore-errors (fdefinition symbol))))
-        (let ((setter (list (quote setf) symbol)))
-          (when (fboundp setter)
-            (add (ignore-errors (fdefinition setter)))))))
     ht))
 
 (defun extract-traces (sap serialno-to-code)
