@@ -404,6 +404,7 @@ static void ph_account_claim(struct local_heap *h, page_index_t p, uword_t claim
     generations[0].bytes_allocated += claimed;
     h->bytes_allocated += claimed;
     h->bytes_since_gc += claimed;
+    h->bytes_claimed += claimed;
 }
 
 /* Claim lines for a small-object region: free lines inside runs the
@@ -487,6 +488,7 @@ static page_index_t ph_claim_large(struct local_heap *h, sword_t nbytes,
     }
     h->bytes_allocated += nbytes;
     h->bytes_since_gc += nbytes;
+    h->bytes_claimed += nbytes;
     return first;
 }
 
@@ -541,6 +543,8 @@ lispobj *local_heap_alloc_slow(struct thread *th, struct local_heap *h,
         new_obj = region->start_addr;
         memset(new_obj, 0, addr_diff(region->end_addr, new_obj));
     }
+    if (__builtin_expect(h->alloc_trap || h->alloc_trap_fired, 0))
+        local_heap_alloc_trap(h);
     return new_obj;
 }
 

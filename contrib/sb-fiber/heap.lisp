@@ -103,6 +103,9 @@
 (defconstant +stat-major-gc-count+ 16)
 (defconstant +stat-bytes-old+ 17)
 (defconstant +stat-fullsweep-after+ 18)
+(defconstant +stat-installed-on+ 12)
+(defconstant +stat-bytes-claimed+ 24)
+(defconstant +stat-alloc-trap+ 25)
 
 (defconstant +flag-record-stores+ 1)
 (defconstant +flag-signal-stores+ 2)
@@ -326,6 +329,11 @@ HEAP must not be installed on another thread."
     "Bytes retained by HEAP's most recent collection.")
   (def heap-bytes-since-gc +stat-bytes-since-gc+
     "Bytes claimed by HEAP since its most recent collection.")
+  (def heap-bytes-claimed +stat-bytes-claimed+
+    "Bytes HEAP has claimed from dynamic space since it was made, block
+granular.")
+  (def heap-hard-limit +stat-hard-limit+
+    "The size past which HEAP refuses to grow, or 0 for none.  Setfable.")
   (def heap-gc-count +stat-gc-count+
     "Number of local collections HEAP has undergone.")
   (def heap-minor-gc-count +stat-minor-gc-count+
@@ -412,13 +420,73 @@ stores outlives the heap that owns it."
   (%heap-set-fullsweep-after (heap-sap-or-lose heap) count)
   count)
 
+;;; --- Allocation trap ---
+
+(define-alien-routine ("local_heap_arm_alloc_trap_address" %heap-arm-alloc-trap)
+    unsigned-long
+  (heap unsigned-long)
+  (bytes unsigned-long))
+
+(define-alien-routine ("local_heap_disarm_alloc_trap_address" %heap-disarm-alloc-trap)
+    void
+  (heap unsigned-long))
+
+(define-alien-routine ("local_heap_set_hard_limit_address" %heap-set-hard-limit)
+    void
+  (heap unsigned-long)
+  (limit unsigned-long))
+
+(defun %owned-heap-address (heap)
+  (let* ((sap (heap-sap-or-lose heap))
+         (on (%heap-stat sap +stat-installed-on+)))
+    (unless (or (zerop on)
+                (= on (sb-sys:sap-int (sb-thread::current-thread-sap))))
+      (error 'heap-in-use-error :heap heap))
+    (sb-sys:sap-int sap)))
+
+(defun arm-heap-allocation-trap (heap bytes)
+  "Arm HEAP's allocation trap to fire once HEAP-BYTES-CLAIMED has grown by
+more than BYTES from its present value."
+  (declare (type heap heap)
+           (type (unsigned-byte 62) bytes))
+  (%heap-arm-alloc-trap (%owned-heap-address heap) bytes))
+
+(defun disarm-heap-allocation-trap (heap)
+  "Disarm HEAP's allocation trap, including one that has fired and not yet
+been delivered."
+  (declare (type heap heap))
+  (unless (heap-released-p heap)
+    (%heap-disarm-alloc-trap (%owned-heap-address heap)))
+  nil)
+
+(defun heap-allocation-trap-threshold (heap)
+  "The HEAP-BYTES-CLAIMED value past which HEAP's armed allocation trap
+fires."
+  (declare (type heap heap))
+  (let ((trap (if (heap-released-p heap)
+                  0
+                  (%heap-stat-id (heap-id heap) (heap-epoch heap)
+                                 +stat-alloc-trap+))))
+    (if (zerop trap) nil trap)))
+
+(defun heap-allocation-trap-heap (condition)
+  "The heap whose allocation trap fired, or NIL if it has been released."
+  (let ((heap (%heap-from-id (sb-kernel::heap-allocation-trap-heap-id condition))))
+    (and heap
+         (= (heap-epoch heap)
+            (sb-kernel::heap-allocation-trap-heap-epoch condition))
+         heap)))
+
+(defun (setf heap-hard-limit) (limit heap)
+  "Set the size past which HEAP refuses to grow; 0 removes the bound."
+  (declare (type heap heap)
+           (type (unsigned-byte 62) limit))
+  (%heap-set-hard-limit (%owned-heap-address heap) limit)
+  limit)
+
 (defun heap-gc (&optional (heap (current-heap)) full)
   "Collect HEAP, which must be installed on the current thread.  Only
-HEAP's objects are traced and swept; other threads keep running.  A
-minor collection reclaims the young generation (everything allocated
-since the previous collection) and promotes its survivors; with FULL,
-or when the heap's policy calls for it, the old generation is collected
-too."
+HEAP's objects are traced and swept; other threads keep running."
   (unless heap
     (error 'no-current-heap-error :operation 'heap-gc))
   (let ((rc (sb-vm::local-heap-collect (heap-sap-or-lose heap) full)))
@@ -441,14 +509,9 @@ different threads since startup."
 (defun copy-for-transfer (object)
   "Return a copy of OBJECT in which every sub-object owned by a process
 heap has been replaced by a copy allocated in the current heap (or the
-global heap if none is installed).  Global objects are shared, cycles
-and shared structure are preserved.  Signals UNTRANSFERABLE-OBJECT for
-closures, weak pointers, weak hash tables, foreign pointers, streams,
-threads, fibers, heaps and synchronization objects."
+global heap if none is installed)."
   (let ((table (make-hash-table :test 'eq)))
     (unwind-protect (%copy-object object table)
-      ;; Drop the (destination-heap) table's pointers back into the
-      ;; source heap before it becomes garbage.
       (clrhash table))))
 
 (defun %copy-object (x table)
@@ -587,12 +650,7 @@ threads, fibers, heaps and synchronization objects."
 
 (defun make-shared-binary (contents-or-length &key (element-type '(unsigned-byte 8)))
   "Return a fresh simple vector of ELEMENT-TYPE in the global heap, of
-the given length or holding the given CONTENTS.  Every local heap may
-refer to a global object, so a shared binary travels in messages
-without being copied and is reclaimed by a global collection once no
-heap refers to it any more; treat it as immutable once it has been
-sent.  Objects allocated while a heap is installed are copied when
-sent, which is what makes a large payload worth sharing."
+the given length or holding the given CONTENTS."
   (without-heap
     (etypecase contents-or-length
       (integer (make-array contents-or-length :element-type element-type))

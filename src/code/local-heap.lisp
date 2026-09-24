@@ -97,6 +97,45 @@ success."
 (define-alien-routine ("local_heap_take_exhausted" %take-exhausted-local-heap)
     unsigned-long)
 
+;;; --- Allocation trap ---
+
+(define-condition sb-kernel::heap-allocation-trap (condition)
+  ((heap-id :initarg :heap-id :reader sb-kernel::heap-allocation-trap-heap-id)
+   (heap-epoch :initarg :heap-epoch :reader sb-kernel::heap-allocation-trap-heap-epoch)
+   (claimed :initarg :claimed :reader sb-kernel::heap-allocation-trap-claimed)
+   (trap :initarg :trap :reader sb-kernel::heap-allocation-trap-trap))
+  (:report
+   (lambda (condition stream)
+     (format stream "Local heap #~D claimed ~D bytes, past its allocation ~
+                     trap at ~D."
+             (sb-kernel::heap-allocation-trap-heap-id condition)
+             (sb-kernel::heap-allocation-trap-claimed condition)
+             (sb-kernel::heap-allocation-trap-trap condition)))))
+
+(define-alien-routine ("local_heap_take_alloc_trap" take-local-heap-allocation-trap)
+    unsigned-long)
+
+(define-alien-routine ("local_heap_stat" %local-heap-stat) unsigned-long
+  (heap unsigned-long)
+  (which int))
+
+(defvar sb-kernel::*heap-allocation-trap-function* nil)
+(declaim (type (or function null) sb-kernel::*heap-allocation-trap-function*)
+         (always-bound sb-kernel::*heap-allocation-trap-function*))
+
+(defun signal-local-heap-allocation-trap (trap)
+  (let* ((heap (current-local-heap-address))
+         (condition (make-condition 'sb-kernel::heap-allocation-trap
+                                    :heap-id (%local-heap-stat heap 11)
+                                    :heap-epoch (%local-heap-stat heap 23)
+                                    :claimed (%local-heap-stat heap 24)
+                                    :trap trap))
+         (function sb-kernel::*heap-allocation-trap-function*))
+    (if function
+        (funcall function condition)
+        (signal condition))
+    nil))
+
 ;;; --- Store barrier ---
 
 (define-condition sb-kernel::heap-store-error (error)

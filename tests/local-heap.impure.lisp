@@ -702,3 +702,303 @@ drained."
     (assert (= 50 (length retained)))
     (assert (every (lambda (r) (search "request" (stale-root-record-message r)))
                    retained))))
+
+(defparameter *heap-reader-long-token* (make-string 300 :initial-element #\7))
+
+(defun check-heap-reads (values)
+  (destructuring-bind (d i r car token-buf kw list long symbol) values
+    (assert (eql d 0.5d0))
+    (assert (eql i -42))
+    (assert (eql r 1/3))
+    (assert (eq car 'car))
+    (assert (eq token-buf 'sb-impl::token-buf))
+    (assert (eq kw :test))
+    (assert (equal list '(1 cdr "text")))
+    (assert (= long (parse-integer *heap-reader-long-token*)))
+    (assert (string= (symbol-name symbol) *heap-reader-long-token*))
+    (assert (eq (symbol-package symbol) (find-package "CL-USER")))))
+
+(defun read-in-heap (heap)
+  "Read numbers, symbols, a list and two long tokens inside HEAP, and
+   check them there: the values are owned by HEAP."
+  (with-heap (heap)
+    (let ((values (list (read-from-string "0.5d0")
+                        (read-from-string "-42")
+                        (read-from-string "1/3")
+                        (read-from-string "cl:car")
+                        (read-from-string "sb-impl::token-buf")
+                        (read-from-string ":test")
+                        (read-from-string "(1 cl:cdr \"text\")")
+                        (read-from-string *heap-reader-long-token*)
+                        (read-from-string
+                         (concatenate 'string "cl-user::|"
+                                      *heap-reader-long-token* "|")))))
+      (check-heap-reads values)
+      t)))
+
+(with-test (:name (:local-heap :strict :reader-token-buffers))
+  (read-from-string "(warm cl:car)")
+  (intern *heap-reader-long-token* "CL-USER")
+  (dotimes (i 3)
+    (with-test-heap (heap :check-stores :error :strict t)
+      (assert (read-in-heap heap))))
+  (dotimes (i 2)
+    (with-test-heap (heap :check-stores :error)
+      (assert (read-in-heap heap))))
+  ;; No heap-owned buffer reached the pool.
+  (loop for buffer = sb-impl::*token-buf-pool*
+          then (sb-impl::token-buf-next buffer)
+        while buffer
+        do (assert (not (sb-vm::locally-owned-p buffer)))
+           (assert (sb-impl::token-buf-pooled buffer)))
+  (assert (equal (read-from-string "(cl:car 1.5d0)") '(car 1.5d0))))
+
+;;; --- Allocation trap ---
+
+(defun churn (bytes &optional (chunk 1024))
+  (declare (type fixnum bytes chunk))
+  (let ((last nil))
+    (loop repeat (ceiling bytes chunk)
+          do (setq last (make-array (floor chunk sb-vm:n-word-bytes))))
+    last))
+
+(defvar *traps* nil)
+
+(defmacro counting-traps (&body body)
+  `(let ((*traps* 0))
+     (handler-bind ((heap-allocation-trap
+                      (lambda (c) (declare (ignore c)) (incf *traps*))))
+       ,@body)))
+
+(with-test (:name (:local-heap :allocation-trap :fires-once))
+  (with-test-heap (h :check-stores nil)
+    (let ((condition nil)
+          (trap nil))
+      (with-heap (h)
+        (setf trap (arm-heap-allocation-trap h (* 64 1024)))
+        (assert (= trap (heap-allocation-trap-threshold h)))
+        (counting-traps
+          (handler-bind ((heap-allocation-trap
+                           (lambda (c) (unless condition (setf condition c)))))
+            (churn (* 1024 1024)))
+          (assert (= 1 *traps*))))
+      (assert condition)
+      (assert (eq h (heap-allocation-trap-heap condition)))
+      (assert (= trap (heap-allocation-trap-trap condition)))
+      ;; Delivered at the end of the claim that crossed the threshold.
+      (assert (< trap (heap-allocation-trap-claimed condition)
+                 (+ trap sb-vm:gencgc-page-bytes 1)))
+      (assert (null (heap-allocation-trap-threshold h))))))
+
+(with-test (:name (:local-heap :allocation-trap :is-a-plain-condition))
+  (assert (subtypep 'heap-allocation-trap 'condition))
+  (assert (not (subtypep 'heap-allocation-trap 'error)))
+  (assert (not (subtypep 'heap-allocation-trap 'storage-condition))))
+
+(with-test (:name (:local-heap :allocation-trap :rearm-and-disarm))
+  (with-test-heap (h)
+    (with-heap (h)
+      (counting-traps
+        (arm-heap-allocation-trap h (* 64 1024))
+        (disarm-heap-allocation-trap h)
+        (assert (null (heap-allocation-trap-threshold h)))
+        (churn (* 1024 1024))
+        (assert (= 0 *traps*))
+        ;; Re-arming replaces the threshold and counts from now.
+        (arm-heap-allocation-trap h (* 16 1024 1024))
+        (arm-heap-allocation-trap h (* 64 1024))
+        (churn (* 1024 1024))
+        (assert (= 1 *traps*))
+        (arm-heap-allocation-trap h (* 64 1024))
+        (churn (* 1024 1024))
+        (assert (= 2 *traps*))))))
+
+(with-test (:name (:local-heap :allocation-trap :claimed-is-monotonic-across-gc))
+  (with-test-heap (h :gc-threshold (* 256 1024))
+    (with-heap (h)
+      (let ((claimed (heap-bytes-claimed h))
+            (peak 0)
+            (fell nil))
+        (counting-traps
+          (arm-heap-allocation-trap h (* 8 1024 1024))
+          (dotimes (i 64)
+            (churn (* 256 1024))
+            (let ((now (heap-bytes-claimed h))
+                  (footprint (heap-bytes-allocated h)))
+              (assert (>= now claimed))
+              (when (< footprint peak) (setf fell t))
+              (setf peak (max peak footprint)
+                    claimed now)))
+          (assert (plusp (heap-gc-count h)))
+          (assert fell)
+          (assert (< peak (* 4 1024 1024)))
+          (assert (>= claimed (* 16 1024 1024)))
+          (assert (= 1 *traps*)))))))
+
+(with-test (:name (:local-heap :allocation-trap :deferred-by-without-interrupts))
+  (with-test-heap (h)
+    (with-heap (h)
+      (counting-traps
+        (arm-heap-allocation-trap h (* 64 1024))
+        (let ((inside -1))
+          (sb-sys:without-interrupts
+            (churn (* 1024 1024))
+            (setf inside *traps*))
+          (assert (= 0 inside))
+          (assert (= 1 *traps*)))))))
+
+(with-test (:name (:local-heap :allocation-trap :deferred-by-without-gcing))
+  (with-test-heap (h)
+    (with-heap (h)
+      (counting-traps
+        (arm-heap-allocation-trap h (* 64 1024))
+        (let ((inside -1))
+          (sb-sys:without-gcing
+            (churn (* 256 1024))
+            (setf inside *traps*))
+          (assert (= 0 inside))
+          (assert (= 1 *traps*)))))))
+
+(with-test (:name (:local-heap :allocation-trap :disarm-withdraws-a-deferred-trap))
+  (with-test-heap (h)
+    (with-heap (h)
+      (counting-traps
+        (arm-heap-allocation-trap h (* 64 1024))
+        (sb-sys:without-interrupts
+          (churn (* 1024 1024))
+          (disarm-heap-allocation-trap h))
+        (churn (* 1024 1024))
+        (assert (= 0 *traps*))))))
+
+(with-test (:name (:local-heap :allocation-trap :waits-for-its-heap))
+  (with-test-heap (h)
+    (counting-traps
+      (with-heap (h)
+        (arm-heap-allocation-trap h (* 64 1024))
+        (sb-sys:without-interrupts
+          (churn (* 1024 1024))
+          (sb-fiber::%switch-heap 0))
+        (assert (= 0 *traps*))
+        (sb-fiber::%switch-heap (sb-sys:sap-int (sb-fiber::heap-sap h)))
+        (churn (* 64 1024))
+        (assert (= 1 *traps*))))))
+
+(define-alien-routine qsort void
+  (base system-area-pointer)
+  (nmemb unsigned-long)
+  (size unsigned-long)
+  (compar (function int (* double) (* double))))
+
+(define-alien-callable churning-double-cmp int ((a (* double)) (b (* double)))
+  (churn (* 16 1024))
+  (let ((x (deref a)) (y (deref b)))
+    (cond ((= x y) 0) ((< x y) -1) (t 1))))
+
+(with-test (:name (:local-heap :allocation-trap :in-a-foreign-callback))
+  (with-test-heap (h :check-stores nil)
+    (let* ((vector (coerce (loop for i below 64 collect (float (mod (* i 37) 64) 1d0))
+                           '(vector double-float)))
+           (sorted (sort (copy-seq vector) #'<))
+           (traps 0))
+      (with-heap (h)
+        (counting-traps
+          (arm-heap-allocation-trap h (* 64 1024))
+          (sb-sys:with-pinned-objects (vector)
+            (qsort (sb-sys:vector-sap vector) (length vector)
+                   (alien-size double :bytes)
+                   (alien-callable-function 'churning-double-cmp)))
+          (setf traps *traps*)))
+      (assert (= 1 traps))
+      (assert (equalp vector sorted)))))
+
+(with-test (:name (:local-heap :allocation-trap :handler-unwinds))
+  (with-test-heap (h)
+    (with-heap (h)
+      (dotimes (i 3)
+        (arm-heap-allocation-trap h (* 64 1024))
+        (assert (eq :refused
+                    (block request
+                      (handler-bind ((heap-allocation-trap
+                                       (lambda (c)
+                                         (declare (ignore c))
+                                         (return-from request :refused))))
+                        (churn (* 16 1024 1024))
+                        :finished))))
+        (assert (eq h (current-heap)))
+        (assert (vectorp (churn (* 64 1024))))))))
+
+(with-test (:name (:local-heap :allocation-trap :in-a-fiber))
+  (with-fiber-thread ()
+    (let* ((f (make-fiber (lambda ()
+                            (let ((heap (current-heap)))
+                              (arm-heap-allocation-trap heap (* 64 1024))
+                              (handler-case (progn (churn (* 4 1024 1024)) :finished)
+                                (heap-allocation-trap (c)
+                                  (eq heap (heap-allocation-trap-heap c))))))
+                          :heap t)))
+      (assert (eq t (join-fiber f)))
+      (release-fiber f))))
+
+(with-test (:name (:local-heap :hard-limit :setter))
+  (with-test-heap (h :gc-threshold 0)
+    (with-heap (h)
+      (assert (= 0 (heap-hard-limit h)))
+      (setf (heap-hard-limit h) (+ (heap-bytes-allocated h) (* 256 1024)))
+      (let ((keep nil))
+        (assert (eq :caught
+                    (handler-case (loop (push (make-array 100) keep))
+                      (local-heap-exhausted-error () :caught))))
+        (setf keep nil))
+      (setf (heap-hard-limit h) 0)
+      (assert (= 0 (heap-hard-limit h)))
+      (let ((keep nil))
+        (dotimes (i 10000) (push (make-array 100) keep))
+        (assert (= 10000 (length keep)))))))
+
+(with-test (:name (:local-heap :allocation-trap :strict))
+  (with-test-heap (h :check-stores :error :strict t)
+    (with-heap (h)
+      (arm-heap-allocation-trap h (* 64 1024))
+      (assert (eq :trapped
+                  (handler-case (progn (churn (* 4 1024 1024)) :finished)
+                    (heap-allocation-trap () :trapped)))))))
+
+(with-test (:name (:local-heap :allocation-trap :with-a-queued-interruption))
+  (with-test-heap (h)
+    (let ((ran 0))
+      (declare (fixnum ran))
+      (with-heap (h)
+        (arm-heap-allocation-trap h (* 64 1024))
+        (assert (eq :refused
+                    (block request
+                      (handler-bind ((heap-allocation-trap
+                                       (lambda (c)
+                                         (declare (ignore c))
+                                         (return-from request :refused))))
+                        (sb-sys:without-interrupts
+                          (sb-thread:interrupt-thread sb-thread:*current-thread*
+                                                      (lambda () (incf ran)))
+                          (churn (* 1024 1024)))
+                        (churn (* 1024 1024))
+                        :finished))))
+        (loop repeat 100 until (= ran 1) do (sleep 0.01)))
+      (assert (= 1 ran)))))
+
+(define-condition inner-refusal (condition) ())
+
+(with-test (:name (:local-heap :allocation-trap :function-signals-inward))
+  (with-test-heap (h)
+    (with-heap (h)
+      (arm-heap-allocation-trap h (* 64 1024))
+      (let ((*heap-allocation-trap-function*
+              (lambda (trap)
+                (assert (typep trap 'heap-allocation-trap))
+                (signal 'inner-refusal))))
+        (assert (eq :inner
+                    (block inner
+                      (handler-bind ((inner-refusal
+                                       (lambda (c)
+                                         (declare (ignore c))
+                                         (return-from inner :inner))))
+                        (churn (* 4 1024 1024))
+                        :finished))))))))

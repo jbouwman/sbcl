@@ -75,3 +75,86 @@
           ;; surely more samples is better, right?
           sb-sprof-test::*sprof-loop-test-max-samples* 100)
     (sb-sprof-test:run-tests)))
+
+;;; Sample tags: the handler copies the thread's SAMPLE-TAG into each sample,
+;;; and HARVEST-TRACES hands it back per stack.
+
+(defun spin-tagged (seconds)
+  (let ((end (+ (get-internal-real-time)
+                (round (* seconds internal-time-units-per-second))))
+        (x 0))
+    (declare (fixnum x))
+    (loop while (< (get-internal-real-time) end)
+          do (dotimes (i 1000) (setf x (logand (+ x i) #xffff))))
+    x))
+(defun spin-tagged-a (seconds) (1+ (spin-tagged seconds))) ; not a tail call
+(defun spin-tagged-b (seconds) (1+ (spin-tagged seconds)))
+(declaim (notinline spin-tagged spin-tagged-a spin-tagged-b))
+(compile 'spin-tagged)
+(compile 'spin-tagged-a)
+(compile 'spin-tagged-b)
+
+(defun frames-by-tag ()
+  (let ((by-tag (make-hash-table)))
+    (sb-sprof:harvest-traces
+     (lambda (tag thread count frames)
+       (declare (ignore thread))
+       (assert (plusp count))
+       (dolist (frame frames)
+         (pushnew frame (gethash tag by-tag) :test #'equal))))
+    by-tag))
+
+(with-test (:name (:sprof :sample-tag :accessors))
+  (assert (eql 0 (sb-thread:join-thread
+                  (sb-thread:make-thread (lambda () (sb-sprof:sample-tag))))))
+  (let ((old (sb-sprof:sample-tag)))
+    (unwind-protect
+         (progn
+           (setf (sb-sprof:sample-tag) 42)
+           (assert (eql 42 (sb-sprof:sample-tag)))
+           (setf (sb-sprof:sample-tag) most-negative-fixnum)
+           (assert (eql most-negative-fixnum (sb-sprof:sample-tag)))
+           (assert-error (funcall (compile nil '(lambda (x) (setf (sb-sprof:sample-tag) x)))
+                                  (list 1))))
+      (setf (sb-sprof:sample-tag) old))))
+
+(with-test (:name (:sprof :sample-tag :splits-samples)
+            :skipped-on (not :sb-thread))
+  (sb-sprof:reset)
+  (sb-sprof:start-profiling :sample-interval 0.0005 :max-samples 100000
+                            :threads (list sb-thread:*current-thread*))
+  (unwind-protect
+       (dotimes (i 4)
+         (setf (sb-sprof:sample-tag) 1)
+         (spin-tagged-a 0.05)
+         (setf (sb-sprof:sample-tag) -2)
+         (spin-tagged-b 0.05))
+    (setf (sb-sprof:sample-tag) 0)
+    (sb-sprof:stop-profiling))
+  (let ((by-tag (frames-by-tag)))
+    (assert (member 'spin-tagged-a (gethash 1 by-tag)))
+    (assert (not (member 'spin-tagged-b (gethash 1 by-tag))))
+    (assert (member 'spin-tagged-b (gethash -2 by-tag)))
+    (assert (not (member 'spin-tagged-a (gethash -2 by-tag)))))
+  ;; Harvesting took them.
+  (assert (zerop (hash-table-count (frames-by-tag)))))
+
+(with-test (:name (:sprof :sample-tag :harvest-while-sampling)
+            :skipped-on (not :sb-thread))
+  (sb-sprof:reset)
+  (sb-sprof:start-profiling :sample-interval 0.0005 :max-samples 100000
+                            :threads (list sb-thread:*current-thread*))
+  (unwind-protect
+       (progn
+         (setf (sb-sprof:sample-tag) 3)
+         (spin-tagged-a 0.1)
+         (let ((first (frames-by-tag)))
+           (assert (member 'spin-tagged-a (gethash 3 first))))
+         (setf (sb-sprof:sample-tag) 4)
+         (spin-tagged-b 0.1))
+    (setf (sb-sprof:sample-tag) 0)
+    (sb-sprof:stop-profiling))
+  (let ((second (frames-by-tag)))
+    (assert (member 'spin-tagged-b (gethash 4 second)))
+    (assert (not (member 'spin-tagged-a (gethash 4 second))))
+    (assert (not (member 'spin-tagged-a (gethash 3 second))))))

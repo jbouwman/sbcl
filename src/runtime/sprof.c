@@ -75,13 +75,16 @@ struct sprof_data {
 
 // Number of elements that are not part of the locs[] array.
 // An 'element' is 8 bytes.
-#define TRACE_PREFIX_ELEMENTS 2
+#define TRACE_PREFIX_ELEMENTS 3
 struct trace {
     uint32_t next; // next trace with identical hash
     uint32_t multiplicity; // number of times hit
 #ifdef LISP_FEATURE_64_BIT
 #define trace_len(trace) ((int32_t)((trace)->header))
     uword_t header; // upper 32 bits are hash val, lower 32 are length
+    // The thread's sprof_tag when the sample was taken.  Part of the
+    // trace's identity: equal stacks under different tags count apart.
+    uword_t tag;
     // each entry has the most-significant-bit on if the value represents
     // <code-serial#, pc-offset> in  the high and low 4 byte.
     // If it's just an address, the uppermost bit is clear.
@@ -92,6 +95,8 @@ struct trace {
 #define trace_len(trace) trace->len
     sword_t len;
     uword_t hash;
+    uword_t tag;       // the thread's sprof_tag; see the 64-bit layout
+    uword_t tag_pad;   // keeps locs[] on an 8-byte element
     // One entry is 2 lispwords. If word1 is 0, then word0 is a PC.
     // Otherwise word0 is the code serial# and word1 is the pc offset.
     // This could probably be reduced to 6 bytes per element by using 3 bytes to store
@@ -121,9 +126,9 @@ static inline uword_t word_mix(uword_t x, uword_t y)
 }
 
 #ifdef LISP_FEATURE_64_BIT
-static uint32_t compute_hash(uword_t* elements, int len) {
+static uint32_t compute_hash(uword_t tag, uword_t* elements, int len) {
     int i;
-    uword_t hash = len;
+    uword_t hash = word_mix(len, tag);
     for (i = 0; i < len; i++) {
         uword_t pc = elements[i];
         hash = word_mix(hash, pc);
@@ -131,9 +136,9 @@ static uint32_t compute_hash(uword_t* elements, int len) {
     return (uint32_t)murmur3_fmix64(hash);
 }
 #else
-static uint32_t compute_hash(struct loc* elements, int len) {
+static uint32_t compute_hash(uword_t tag, struct loc* elements, int len) {
     int i;
-    uword_t hash = len;
+    uword_t hash = word_mix(len, tag);
     for (i = 0; i < len; i++) {
         uword_t pc = elements[i].word0; // this is either a PC or the code serial#
         hash = word_mix(hash, pc);
@@ -156,10 +161,10 @@ static int trace_equal(struct trace* a, struct trace* b)
 {
     int i;
 #ifdef LISP_FEATURE_64_BIT
-    if (a->header != b->header) return 0;
+    if (a->header != b->header || a->tag != b->tag) return 0;
     for (i=0; i<trace_len(a); ++i) if (a->locs[i] != b->locs[i]) return 0;
 #else
-    if (a->hash != b->hash || a->len != b->len) return 0;
+    if (a->hash != b->hash || a->len != b->len || a->tag != b->tag) return 0;
     for (i=0; i<trace_len(a); ++i)
         if (a->locs[i].word0 != b->locs[i].word0 ||
             a->locs[i].word1 != b->locs[i].word1) return 0;
@@ -524,9 +529,10 @@ collect_backtrace(struct thread* th, int contextp, void* context_or_fp)
         memmove(&trace.locs[midpoint+1], &trace.locs[len-suffix], N_WORD_BYTES*suffix);
         len = MAX_RECORDED_TRACE_LEN;
     }
+    trace.tag = th->sprof_tag;
     // Hash before trying to insert so that potentially the conversion of unstable
     // PCs to stable PCs can be skipped, if there is a hash match.
-    uword_t hash = compute_hash(trace.locs, len);
+    uword_t hash = compute_hash(trace.tag, trace.locs, len);
     store_trace_header(&trace, hash, len);
 
     // Try to acquire the lock
@@ -538,7 +544,7 @@ collect_backtrace(struct thread* th, int contextp, void* context_or_fp)
     uint32_t* pcount;
     if ((pcount = hash_get(data, &trace, hash)) == NULL) {
         if (stabilize(&trace)) { // changed ?
-            hash = compute_hash(trace.locs, len); // revise the hash
+            hash = compute_hash(trace.tag, trace.locs, len); // revise the hash
             store_trace_header(&trace, hash, len);
             pcount = hash_get(data, &trace, hash);
         }

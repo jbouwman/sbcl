@@ -537,7 +537,8 @@ FROM-READTABLE defaults to the standard Lisp readtable when NIL."
 ;;; Too bad we don't have a way to collapse them to one.
 (defstruct (token-buf (:predicate nil) (:copier nil)
                       (:constructor !make-token-buf
-                          (&aux (initial-string (truly-the (simple-array character (128))
+                          (&optional (pooled t)
+                           &aux (initial-string (truly-the (simple-array character (128))
                                                            (make-string 128)))
                                 (string initial-string)
                                 (adjustable-string
@@ -560,6 +561,7 @@ FROM-READTABLE defaults to the standard Lisp readtable when NIL."
            :type (and (vector fixnum) (not simple-array)) :read-only t)
   ;; Link to next TOKEN-BUF, to chain the *TOKEN-BUF-POOL* together.
   (next nil :type (or null token-buf))
+  (pooled t :type boolean :read-only t)
   (only-base-chars t :type boolean))
 (declaim (freeze-type token-buf))
 
@@ -617,15 +619,17 @@ FROM-READTABLE defaults to the standard Lisp readtable when NIL."
          (prog1 (elt (token-buf-string b) i)
            (setf (token-buf-cursor b) (1+ i))))))
 
-;; Grab a buffer off the token-buf pool if there is one, or else make one.
-;; This does not need to be protected against other threads because the
-;; pool is thread-local, or against async interrupts. An async signal
-;; delivered anywhere in the midst of the code sequence below can not
-;; corrupt the buffer given to the caller of ACQUIRE-TOKEN-BUF.
-;; Additionally the cleanup is on a "best effort" basis. Async unwinds
-;; through WITH-READ-BUFFER fail to recycle token-bufs, but that's ok.
+#+sb-local-heaps
+(defun make-heap-token-buf ()
+  (declare (inline !make-token-buf))
+  (!make-token-buf nil))
+
 (defun acquire-token-buf ()
   (declare (sb-c::tlab :system) (inline !make-token-buf))
+  #+sb-local-heaps
+  (unless (zerop (sap-int (sb-vm::current-thread-offset-sap
+                            sb-vm::thread-local-heap-slot)))
+    (return-from acquire-token-buf (make-heap-token-buf)))
   (let ((this-buffer *token-buf-pool*))
     (cond (this-buffer
            (shiftf *token-buf-pool* (token-buf-next this-buffer) nil)
@@ -635,19 +639,17 @@ FROM-READTABLE defaults to the standard Lisp readtable when NIL."
 
 (defun release-token-buf (chain)
   (named-let free ((buffer chain))
-    ;; If 'adjustable-string' was displaced to 'string',
-    ;; adjust it back down to allow GC of the abnormally large string.
-    (unless (eq (%array-data (token-buf-adjustable-string buffer))
-                (token-buf-initial-string buffer))
-      (adjust-array (token-buf-adjustable-string buffer) '(0)
-                    :displaced-to (token-buf-initial-string buffer)))
-    ;; 'initial-string' is assigned into 'string'
-    ;; so not to preserve huge buffers in the pool indefinitely.
-    (setf (token-buf-string buffer) (token-buf-initial-string buffer))
-    (if (token-buf-next buffer)
-        (free (token-buf-next buffer))
-        (setf (token-buf-next buffer) *token-buf-pool*)))
-  (setf *token-buf-pool* chain))
+    (let ((next (token-buf-next buffer)))
+      (when (token-buf-pooled buffer)
+        (unless (eq (%array-data (token-buf-adjustable-string buffer))
+                    (token-buf-initial-string buffer))
+          (adjust-array (token-buf-adjustable-string buffer) '(0)
+                        :displaced-to (token-buf-initial-string buffer)))
+        (setf (token-buf-string buffer) (token-buf-initial-string buffer))
+        (setf (token-buf-next buffer) *token-buf-pool*
+              *token-buf-pool* buffer))
+      (when next
+        (free next)))))
 
 ;; Return a fresh copy of BUFFER's string
 (defun copy-token-buf-string (buffer)

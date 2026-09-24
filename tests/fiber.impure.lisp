@@ -517,8 +517,7 @@
 
 ;;; --- Cross-thread migration ---
 
-(with-test (:name (:fiber :migrate :metadata-only)
-            :skipped-on (not :sb-thread))
+(with-test (:name (:fiber :migrate :metadata-only))
   (let* ((fiber-cell (list nil))
          (a-installed (sb-thread:make-semaphore :name "metaonly-installed"))
          (a-released  (sb-thread:make-semaphore :name "metaonly-released"))
@@ -556,8 +555,7 @@
       (sb-thread:signal-semaphore a-released)
       (sb-thread:join-thread a-thread))))
 
-(with-test (:name (:fiber :migrate :runnable-runs-on-dest)
-            :skipped-on (not :sb-thread))
+(with-test (:name (:fiber :migrate :runnable-runs-on-dest))
   (let* ((fiber-cell (list nil))
          (a-installed (sb-thread:make-semaphore :name "a-installed"))
          (a-released  (sb-thread:make-semaphore :name "a-released"))
@@ -607,8 +605,7 @@
       (sb-thread:signal-semaphore a-released)
       (sb-thread:join-thread a-thread))))
 
-(with-test (:name (:fiber :migrate :rejects-released)
-            :skipped-on (not :sb-thread))
+(with-test (:name (:fiber :migrate :rejects-released))
   (let* ((other (sb-thread:make-thread
                  (lambda () (sb-thread:thread-yield) :ok)
                  :name "migrate-validate-dest"))
@@ -623,6 +620,45 @@
                (error "expected DEAD-FIBER-ERROR; none signaled"))
       (dead-fiber-error () :ok))
     (sb-thread:join-thread other)))
+
+(with-test (:name (:fiber :migrate :concurrent-with-destination-list-changes))
+  (let* ((count 20000)
+         (lock (sb-thread:make-mutex :name "migrate-race"))
+         (inbox nil)
+         (done nil)
+         (failures 0)
+         (a-thread sb-thread:*current-thread*)
+         (b-thread
+           (sb-thread:make-thread
+            (lambda ()
+              (with-main-fiber (b-main)
+                (loop
+                  (release-fiber (make-fiber (lambda ()) :stack-size 65536))
+                  (multiple-value-bind (f finished)
+                      (sb-thread:with-mutex (lock)
+                        (values (pop inbox) done))
+                    (cond (f
+                           (handler-case (fiber-migrate f a-thread)
+                             (fiber-state-error () (incf failures))))
+                          (finished (return)))))))
+            :name "migrate-race-dest")))
+    (with-main-fiber (a-main)
+      (let ((fibers nil))
+        (dotimes (i count)
+          (let ((f (make-fiber (lambda () (loop (yield-fiber)))
+                               :stack-size 65536)))
+            (resume-fiber f)
+            (fiber-migrate f b-thread)
+            (sb-thread:with-mutex (lock) (push f inbox))
+            (push f fibers)))
+        (sb-thread:with-mutex (lock) (setf done t))
+        (sb-thread:join-thread b-thread)
+        (dolist (f fibers)
+          (when (eq (fiber-thread f) a-thread)
+            (release-fiber f)))
+        (assert (zerop failures) ()
+                "~D of ~D fibers migrated into a busy thread were missing ~
+                 from its fiber list" failures count)))))
 
 ;;; --- Current-fiber storage ---
 

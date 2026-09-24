@@ -8,7 +8,11 @@
                 #:heap-store-error
                 #:heap-store-error-object
                 #:heap-store-error-value
-                #:heap-store-error-kind)
+                #:heap-store-error-kind
+                #:heap-allocation-trap
+                #:heap-allocation-trap-claimed
+                #:heap-allocation-trap-trap
+                #:*heap-allocation-trap-function*)
   (:export
    #:current-fiber
    #:*default-fiber-stack-size*
@@ -80,6 +84,11 @@
    #:heap-check-stores
    #:heap-strict-p
    #:heap-bytes-allocated
+   #:heap-bytes-claimed
+   #:heap-hard-limit
+   #:arm-heap-allocation-trap
+   #:disarm-heap-allocation-trap
+   #:heap-allocation-trap-threshold
    #:heap-bytes-live
    #:heap-bytes-since-gc
    #:heap-gc-count
@@ -126,6 +135,11 @@
    #:heap-store-error-object
    #:heap-store-error-value
    #:heap-store-error-kind
+   #:heap-allocation-trap
+   #:heap-allocation-trap-heap
+   #:heap-allocation-trap-claimed
+   #:heap-allocation-trap-trap
+   #:*heap-allocation-trap-function*
    ;; Pre-rename names, aliases of the above (issue #45)
    #:without-store-checking
    #:process-heap-store-error
