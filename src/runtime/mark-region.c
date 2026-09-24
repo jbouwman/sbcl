@@ -573,6 +573,14 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
         }
         return;
       }
+      /* No global object lives on a free page or in an unowned block of
+       * a process page.  An edge there was left by an object of a heap
+       * released since; marking through it would set line marks that no
+       * sweep clears and trace whatever the memory now holds. */
+      if (target == 0 && (page_free_p(page) || ph_process_page[page])) {
+        if (local_heap_check_refs) local_heap_note_violation(source_object, where, object);
+        return;
+      }
       /* Every allocated process object is walked as a root of a global
        * collection, dead ones included, and a dead object may still
        * point at global memory that was freed and reused since.  Treat
@@ -1246,11 +1254,35 @@ void mr_preserve_ambiguous(uword_t address) {
   }
 }
 
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+/* True if OBJ points at the start of an allocated object whose tag
+ * matches it, or at a simple-fun of allocated code. */
+static bool ph_exact_root_p(lispobj obj) {
+  lispobj *found = find_object(obj, DYNAMIC_SPACE_START);
+  if (!found) return false;
+  if (found != native_pointer(obj))
+    return functionp(obj) && widetag_of(found) == CODE_HEADER_WIDETAG;
+  return plausible_tag_p(obj);
+}
+#endif
+
 /* Preserve exact pointers in an array.
  * Used for scanning thread-local storage for roots. */
 void mr_preserve_range(lispobj *from, sword_t nwords) {
   source_object = NULL;
   for (sword_t n = 0; n < nwords; n++) {
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    /* The store barrier does not see a thread-local symbol value, so a
+     * slot may still hold an object of a heap released since, and the
+     * memory may be free or reused by now.  A slot that points at no
+     * object in the domain being collected is dead; objects of other
+     * domains are leaves for mark() either way. */
+    lispobj obj = from[n];
+    if (is_lisp_pointer(obj) && in_dynamic_space(obj)
+        && block_owner[address_block(native_pointer(obj))] == local_heap_target_owner()
+        && !ph_exact_root_p(obj))
+      continue;
+#endif
     mark(from[n], from + n, SOURCE_NORMAL);
   }
 }
