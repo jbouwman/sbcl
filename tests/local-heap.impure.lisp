@@ -769,6 +769,20 @@ drained."
     (sb-ext:gc :full t)
     (setq *dangling-holder* nil)))
 
+;;; GLOBALIZE fills its table of copies in the global heap.  A vector
+;;; the table outgrows is garbage that a conservative root can retain,
+;;; so no entry may refer to the heap being copied from.
+(with-test (:name (:local-heap :globalize :table-holds-no-source-objects))
+  (let ((table (make-hash-table :test 'eql)))
+    (with-test-heap (heap)
+      (with-heap (heap)
+        (let ((local (loop for i below 200 collect (list i (format nil "~D" i)))))
+          (without-heap (sb-fiber::%copy-object local table)))))
+    (assert (> (hash-table-count table) 200))
+    (loop for key being the hash-keys of table using (hash-value copy)
+          do (assert (typep key 'fixnum))
+             (assert (zerop (sb-vm::object-owner copy))))))
+
 (defparameter *heap-reader-long-token* (make-string 300 :initial-element #\7))
 
 (defun check-heap-reads (values)
