@@ -32,9 +32,11 @@
   (:gc-barrier 0 1 0)
   (:generator 1
     (when barrier
-      (emit-gengc-barrier object nil tmp-tn t)
       #+sb-local-heaps
-      (emit-local-heap-store-check object (vop-nth-arg 1 vop) tmp-tn))
+      (emit-local-heap-store-check object (vop-nth-arg 1 vop) tmp-tn
+                                   (eq barrier :card-marked))
+      (unless (eq barrier :card-marked)
+        (emit-gengc-barrier object nil tmp-tn t)))
     (storew value object offset lowtag)))
 
 (define-vop (compare-and-swap-slot)

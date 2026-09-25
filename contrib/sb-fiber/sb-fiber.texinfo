@@ -351,6 +351,16 @@ operations that must touch global state are wrapped in
 to whatever runs while the heap is installed, including error handlers
 established outside the process: a handler that records the error in
 global state must do so inside @code{without-heap}.
+
+A store whose value the compiler knows at the store to be global is
+not checked in either mode, since it cannot make anything refer into a
+heap.  That covers a literal constant of the compiled code (a keyword
+or a quoted list, for instance) and a value whose type admits only
+fixnums, characters, single-floats, @code{nil}, @code{t} and symbols
+of the initial core.  Under @var{strict}, such a store into a global
+object is therefore not a violation.  The exemption depends on what
+the compiler can prove at the store: the same keyword arriving as a
+function argument is checked, and refused.
 @end deffn
 
 @deffn Function heap-check-stores heap
@@ -364,7 +374,7 @@ is performed.  Readers @code{heap-store-error-object} (the
 object stored into), @code{heap-store-error-value} (the value)
 and @code{heap-store-error-kind}: @code{:escape} for a
 locally-owned value stored into a global object, @code{:cross-heap}
-for a value owned by another heap, @code{:global} for any store into a
+for a value owned by another heap, @code{:global} for any checked store into a
 global object under @code{:strict}.  A @code{continue} restart
 performs the store anyway.
 @end deffn

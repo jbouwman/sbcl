@@ -61,9 +61,11 @@
              (emit-store (object-slot-ea object offset lowtag) value val-temp)))
           (t
            (when barrier
-             (emit-gengc-barrier object nil val-temp t)
              #+sb-local-heaps
-             (emit-local-heap-store-check object (vop-nth-arg 1 vop) val-temp))
+             (emit-local-heap-store-check object (vop-nth-arg 1 vop) val-temp
+                                          (eq barrier :card-marked))
+             (unless (eq barrier :card-marked)
+               (emit-gengc-barrier object nil val-temp t)))
            (emit-store (object-slot-ea object offset lowtag) value val-temp)))))
 
 (define-vop (compare-and-swap-slot)
@@ -792,11 +794,11 @@
   (define-dblcas %cons-cas-pair nil
     (:vop-var vop)
     (:generator 2
-      (emit-gengc-barrier object nil temp)
       #+sb-local-heaps
       (progn
         (emit-local-heap-store-check object (vop-nth-arg 3 vop) temp)
         (emit-local-heap-store-check object (vop-nth-arg 4 vop) temp))
+      (emit-gengc-barrier object nil temp)
       (generate-dblcas (ea (- list-pointer-lowtag) object)
                        expected-old-lo expected-old-hi new-lo new-hi
                        eax ebx ecx edx result-lo result-hi)))
@@ -808,11 +810,11 @@
     (:generator 2
       (let ((ea (ea (- (* n-word-bytes vector-data-offset) other-pointer-lowtag)
                     object index (ash n-word-bytes (- n-fixnum-tag-bits)))))
-        (emit-gengc-barrier object ea temp)
         #+sb-local-heaps
         (progn
           (emit-local-heap-store-check object (vop-nth-arg 4 vop) temp)
           (emit-local-heap-store-check object (vop-nth-arg 5 vop) temp))
+        (emit-gengc-barrier object ea temp)
         (generate-dblcas ea expected-old-lo expected-old-hi new-lo new-hi
                          eax ebx ecx edx result-lo result-hi))))
 
@@ -822,11 +824,11 @@
   (define-dblcas %instance-cas-pair t
     (:vop-var vop)
     (:generator 2
-      (emit-gengc-barrier object nil temp)
       #+sb-local-heaps
       (progn
         (emit-local-heap-store-check object (vop-nth-arg 4 vop) temp)
         (emit-local-heap-store-check object (vop-nth-arg 5 vop) temp))
+      (emit-gengc-barrier object nil temp)
       (let ((ea (ea (- (* n-word-bytes instance-slots-offset) instance-pointer-lowtag)
                     object index (ash n-word-bytes (- n-fixnum-tag-bits)))))
         (generate-dblcas ea expected-old-lo expected-old-hi new-lo new-hi

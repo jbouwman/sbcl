@@ -17,12 +17,22 @@
 ;;; into OBJECT calls the LOCAL-HEAP-STORE-CHECK assembly routine, which
 ;;; classifies the store against the heap ownership rules.  Costs one load
 ;;; and one branch per barriered store when no heap is installed.
+;;;
+;;; A value in a CONSTANT or IMMEDIATE TN is not checked: a literal of the
+;;; compiled code is a global object, so storing it cannot make anything
+;;; refer into a heap.  Strict mode therefore does not see such stores.
+;;;
+;;; The check precedes the card mark.  The routine can call into Lisp to
+;;; signal HEAP-STORE-ERROR, and a collection there could clear a card
+;;; marked before it.  For the same reason, when the card was marked by an
+;;; earlier store (REMARK-CARD), a store that calls the routine marks the
+;;; card again after the call.
 #+sb-local-heaps
 (defun store-check-worthy-tn-p (tn)
   (sc-is tn descriptor-reg control-stack))
 
 #+sb-local-heaps
-(defun emit-local-heap-store-check (object value-tn-ref temp)
+(defun emit-local-heap-store-check (object value-tn-ref temp &optional remark-card)
   (when (and value-tn-ref
              (not (eq value-tn-ref t))
              (not (sc-is object immediate))
@@ -44,15 +54,17 @@
               (stack-push object)
               (stack-push tn)
               (invoke-asm-routine 'local-heap-store-check temp)))))
+      (when remark-card
+        (emit-gengc-barrier object nil temp t))
       (emit-label skip))))
 
 (defun emit-gengc-barrier (object cell-address temp &optional value-tn-ref allocator)
   (cond ((or (eq value-tn-ref t)
              (require-gengc-barrier-p object value-tn-ref allocator))
-         (inst ubfm temp (or cell-address object) gencgc-card-shift (make-fixup nil :card-table-index-mask))
-         (inst strb zr-tn (@ cardtable-tn temp))
          #+sb-local-heaps
-         (emit-local-heap-store-check object value-tn-ref temp))
+         (emit-local-heap-store-check object value-tn-ref temp)
+         (inst ubfm temp (or cell-address object) gencgc-card-shift (make-fixup nil :card-table-index-mask))
+         (inst strb zr-tn (@ cardtable-tn temp)))
         #+debug-gc-barriers
         (t
          (labels ((encode (x)
@@ -190,11 +202,11 @@
   (:generator 3
     (inst add lip object (lsl index (- word-shift n-fixnum-tag-bits)))
     (inst add-sub lip lip (- (* vector-data-offset n-word-bytes) other-pointer-lowtag))
-    (emit-gengc-barrier object lip tmp t)
     #+sb-local-heaps
     (progn
       (emit-local-heap-store-check object (vop-nth-arg 4 vop) tmp)
       (emit-local-heap-store-check object (vop-nth-arg 5 vop) tmp))
+    (emit-gengc-barrier object lip tmp t)
     (move oldpair-first old1)
     (move oldpair-second old2)
     (move newpair-first new1)

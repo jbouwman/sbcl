@@ -261,7 +261,10 @@ CHECK-STORES controls the store barrier while the heap is installed:
 store would make a global object or another heap refer into this heap,
 :RECORD only records such stores (see HEAP-VIOLATIONS), NIL does not
 check.  STRICT additionally treats any store into a global object as a
-violation, so that a process can only mutate its own data."
+violation, so that a process can only mutate its own data.  Neither mode
+checks a store whose value the compiler knows to be global: a literal
+constant, or a value whose type admits only immediates, NIL, T and
+symbols of the initial core."
   (declare (type (integer 0) gc-threshold hard-limit fullsweep-after)
            (type (member nil :record :error) check-stores))
   (without-heap
