@@ -496,6 +496,12 @@
 (defvar *violation-sink* (list :sink))
 (defvar *draining* nil)
 
+;;; A recorded escape is left in place, so the sink points into the heap
+;;; until it is cleared; a later collection would otherwise trace it into
+;;; pages another heap has reused.
+(defun clear-violation-sink ()
+  (setf (car *violation-sink*) :sink))
+
 (defun note-violations (start n)
   "Note N escape violations: a store of this heap's object into a global
 one, under a heap that records rather than signals."
@@ -507,6 +513,7 @@ one, under a heap that records rather than signals."
              (dotimes (i n)
                ;; An escaping store: this heap's object into a global cons.
                (setf (car *violation-sink*) mine))))
+      (clear-violation-sink)
       (release-heap h)))
   :noted)
 
@@ -549,6 +556,7 @@ drained."
     (unwind-protect
          (with-heap (h)
            (setf (car *violation-sink*) (list :escapee)))
+      (clear-violation-sink)
       (release-heap h))
     (multiple-value-bind (details total) (take-heap-violations)
       (assert (= total 1))
