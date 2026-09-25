@@ -592,6 +592,21 @@ drained."
          (heap-store-error () t)))
       (assert (zerop (hash-table-count *strict-dispatch-target*))))))
 
+;;; ALLOCATE-INSTANCE of a constant class calls an allocator CTOR whose
+;;; first call compiles the optimized allocator and records the CTOR on
+;;; the class. Made inside a checked heap, both run in the global heap.
+(defclass checked-allocator-probe () ((x :initform nil)))
+(defun checked-allocator-probe ()
+  (allocate-instance (find-class 'checked-allocator-probe)))
+
+(with-test (:name (:local-heap :checked :first-optimized-allocator))
+  (with-test-heap (heap :check-stores :error)
+    (let ((owner (with-heap (heap)
+                   (sb-vm::object-owner (checked-allocator-probe)))))
+      (assert (= owner (sb-fiber::heap-id heap)))))
+  (gc :full t)
+  (assert (typep (checked-allocator-probe) 'checked-allocator-probe)))
+
 (defun strict-cached-package () (find-package "SB-FIBER"))
 (with-test (:name (:local-heap :strict :cold-package-cache))
   (with-test-heap (heap :check-stores :error :strict t)
