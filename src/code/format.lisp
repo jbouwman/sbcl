@@ -53,8 +53,14 @@
         ;; there in any case, and finishing it stores into them, which a
         ;; strict local heap would otherwise refuse as a mutation of a
         ;; global object.  The caller gets a global list its heap may
-        ;; refer to.
-        #+sb-local-heaps (sb-kernel::with-global-heap (compute-it))
+        ;; refer to.  The directives keep the control string they were parsed
+        ;; from, so they are given a global copy of it.
+        #+sb-local-heaps
+        (if (zerop (sb-vm::current-local-heap-address))
+            (compute-it)
+            (sb-kernel::with-global-heap
+              (let ((string (copy-seq string)))
+                (compute-it))))
         #-sb-local-heaps (compute-it))))
 
 ;;; If at some point I can figure out how to *CORRECTLY* utilize
@@ -939,7 +945,17 @@
                (case ,case-sym ,@clauses))))))
      remaining)))
 
+;;; This file conses in the system TLAB, which under a local heap is the
+;;; global heap, while the SUBSEQs and directives these parsers make at
+;;; interpretation time come from the caller's heap: a global list holding
+;;; local objects, which no store barrier sees and a later collection
+;;; traces into the heap once it is released.  The parsers that run while a
+;;; control string is interpreted therefore build their whole result in the
+;;; global heap, as TOKENIZE-CONTROL-STRING does.
 (defun parse-conditional-directive (directives)
+  (sb-kernel::with-global-heap (%parse-conditional-directive directives)))
+
+(defun %parse-conditional-directive (directives)
   (let ((sublists nil)
         (last-semi-with-colon-p nil)
         (remaining directives))
@@ -1179,6 +1195,18 @@
 
 (defun parse-format-logical-block
        (segments colonp first-semi close params string end)
+  ;; The fill-style newline directives keep STRING; under a local heap they
+  ;; are given a global copy of it.
+  (let ((local-p #+(and sb-local-heaps (not sb-xc-host))
+                 (not (zerop (sb-vm::current-local-heap-address)))
+                 #-(and sb-local-heaps (not sb-xc-host)) nil))
+    (sb-kernel::with-global-heap
+      (%parse-format-logical-block segments colonp first-semi close params
+                                   (if (and local-p string) (copy-seq string) string)
+                                   end))))
+
+(defun %parse-format-logical-block
+       (segments colonp first-semi close params string end)
   (when params
     (format-error-at nil (caar params)
                      "No parameters can be supplied with ~~<...~~:>."))
@@ -1272,6 +1300,9 @@
       (results))))
 
 (defun parse-format-justification (directives)
+  (sb-kernel::with-global-heap (%parse-format-justification directives)))
+
+(defun %parse-format-justification (directives)
   (let ((first-semi nil)
         (close nil)
         (remaining directives))
