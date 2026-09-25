@@ -703,6 +703,86 @@ drained."
     (assert (every (lambda (r) (search "request" (stale-root-record-message r)))
                    retained))))
 
+;;; A thread-local symbol value is stored without the store barrier, so
+;;; it can outlive the heap that owned it.  Collections that scan the
+;;; thread afterwards must not mark through it into memory that is free,
+;;; or that a later heap took.
+
+(defvar *thread-local-value* nil)
+
+(defun churn-heaps (n bytes)
+  "Claim and release pages the way short-lived connection heaps do."
+  (dotimes (i n)
+    (let ((heap (make-heap)))
+      (with-heap (heap)
+        (make-list (floor bytes 16))
+        (make-array (floor bytes 8)))
+      (release-heap heap))))
+
+(with-test (:name (:local-heap :thread-local-value-outlives-heap :global-gc))
+  (dotimes (i 20)
+    (let ((*thread-local-value* nil))
+      (let ((heap (make-heap)))
+        (with-heap (heap)
+          (setq *thread-local-value*
+                (list (make-list 200) (make-array 100000))))
+        (release-heap heap))
+      (sb-ext:gc :full t)
+      (churn-heaps 4 (* 256 1024))
+      (sb-ext:gc))))
+
+(with-test (:name (:local-heap :thread-local-value-outlives-heap :local-gc))
+  (dotimes (i 20)
+    (let ((*thread-local-value* nil))
+      (let ((heap (make-heap)))
+        (with-heap (heap)
+          (dotimes (k 300)
+            (setq *thread-local-value* (make-array 7 :initial-element k))))
+        (release-heap heap))
+      ;; A new heap on this thread takes the released blocks, so the
+      ;; stale value points into the middle of its objects.
+      (let ((heap (make-heap)))
+        (with-heap (heap)
+          (let ((keep (loop repeat 300
+                            collect (make-array 13 :initial-element i))))
+            (heap-gc heap t)
+            (sb-ext:gc :full t)
+            (heap-gc heap t)
+            (assert (= 300 (length keep)))))
+        (release-heap heap)))))
+
+(defvar *dangling-holder* nil)
+
+;;; A global object built from a heap's objects is not a store the
+;;; barrier sees.  Once the heap is released the edge dangles, and a
+;;; global collection must not mark through it.
+(with-test (:name (:local-heap :global-object-with-edge-into-released-heap))
+  (dotimes (i 20)
+    (let ((heap (make-heap))
+          (local nil))
+      (with-heap (heap)
+        (setq local (list (make-list 300) (make-array 100000))))
+      (setq *dangling-holder* (cons local nil))
+      (release-heap heap))
+    (sb-ext:gc :full t)
+    (churn-heaps 4 (* 256 1024))
+    (sb-ext:gc :full t)
+    (setq *dangling-holder* nil)))
+
+;;; GLOBALIZE fills its table of copies in the global heap.  A vector
+;;; the table outgrows is garbage that a conservative root can retain,
+;;; so no entry may refer to the heap being copied from.
+(with-test (:name (:local-heap :globalize :table-holds-no-source-objects))
+  (let ((table (make-hash-table :test 'eql)))
+    (with-test-heap (heap)
+      (with-heap (heap)
+        (let ((local (loop for i below 200 collect (list i (format nil "~D" i)))))
+          (without-heap (sb-fiber::%copy-object local table)))))
+    (assert (> (hash-table-count table) 200))
+    (loop for key being the hash-keys of table using (hash-value copy)
+          do (assert (typep key 'fixnum))
+             (assert (zerop (sb-vm::object-owner copy))))))
+
 (defparameter *heap-reader-long-token* (make-string 300 :initial-element #\7))
 
 (defun check-heap-reads (values)

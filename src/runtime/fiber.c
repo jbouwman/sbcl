@@ -64,6 +64,39 @@ void gc_scav_fiber_binding_stacks(struct thread *th)
     }
 }
 
+uword_t sb_fiber_gc_epoch;
+uword_t sb_fiber_local_gc_epoch;
+
+/* With the world stopped: no fiber switch is in progress, since a switch
+ * runs pseudo-atomic. */
+void sb_fiber_note_global_gc(void)
+{
+    sb_fiber_gc_epoch++;
+}
+
+/* Before the collection frees anything.  A fiber that resumes after this
+ * zeroes its stack if its stack may refer into the heap collected. */
+void sb_fiber_note_local_gc(void)
+{
+    __atomic_fetch_add(&sb_fiber_local_gc_epoch, 1, __ATOMIC_ACQ_REL);
+}
+
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+void sb_fiber_note_heap_installed(struct thread *th, struct local_heap *h)
+{
+#ifdef LISP_FEATURE_ARM64
+    struct extra_thread_data *ed = thread_extra_data(th);
+    struct sb_fiber_ctx *f = ed->current_fiber;
+    /* A main fiber runs on the thread's own stack, and a later main
+     * fiber over the same stack inherits the flag at capture. */
+    if (!f || !f->control_stack_alloc_size) ed->heap_on_main_stack = 1;
+    if (f && h != f->heap) f->ran_other_heap = 1;
+#else
+    (void)th; (void)h;
+#endif
+}
+#endif
+
 static void fiber_free(struct sb_fiber_ctx *f)
 {
 #ifdef LISP_FEATURE_SB_LOCAL_HEAPS

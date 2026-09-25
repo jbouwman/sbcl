@@ -52,7 +52,13 @@ struct sb_fiber_ctx {
     lispobj *control_stack_pointer;
     lispobj *control_frame_pointer;
     size_t   control_stack_alloc_size;
-    lispobj *dirty_high;
+    /* Whether the words above CONTROL_STACK_POINTER must be zeroed
+     * before the fiber runs again; see sb_fiber_lisp_stack_resume. */
+    uword_t  gc_epoch_seen;        /* sb_fiber_gc_epoch at the last suspend */
+    uword_t  local_gc_epoch_seen;  /* sb_fiber_local_gc_epoch at the last resume */
+    uword_t  heap_gc_count_seen;   /* HEAP's collection count at the last suspend */
+    unsigned char stack_dirty;     /* has run since its stack was last zeroed */
+    unsigned char ran_other_heap;  /* has installed a heap other than HEAP */
 #endif
 
     /* Saved thread-struct fields. */
@@ -125,6 +131,18 @@ int   sb_fiber_gc_regs(const struct sb_fiber_ctx *f, lispobj *out, int max);
  * functions; the shared scanners call them by name. */
 void gc_scan_fiber_stacks         (struct thread *th);
 void gc_scav_fiber_binding_stacks (struct thread *th);
+
+/* Collection counts that decide when a suspended fiber's stack is zeroed
+ * (arm64; see sb_fiber_lisp_stack_resume).  The global collector bumps
+ * the first with the world stopped, a local collection the second. */
+extern uword_t sb_fiber_gc_epoch;
+extern uword_t sb_fiber_local_gc_epoch;
+void sb_fiber_note_global_gc(void);
+void sb_fiber_note_local_gc(void);
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+/* Called when H is installed on TH. */
+void sb_fiber_note_heap_installed(struct thread *th, struct local_heap *h);
+#endif
 
 /* Per-fiber Lisp control stack hooks */
 int  sb_fiber_lisp_stack_alloc       (struct sb_fiber_ctx *f, size_t size);

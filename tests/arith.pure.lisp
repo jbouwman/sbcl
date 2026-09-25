@@ -1189,3 +1189,30 @@
           '(eql 0))
     (test `(logand #xFF (the (integer -20 -1) a))
           '(integer 236 255))))
+
+;;; The arm64 four-argument VOP let HI share Y's register and LO share
+;;; CARRY-IN's, which depends on the argument order and on how the
+;;; results are consumed; compile the call in several such shapes.
+(with-test (:name (sb-bignum:%multiply-and-add :four-arg :register-conflicts))
+  (let ((m (ldb (byte sb-vm:n-word-bits 0) -1))
+        (orders '((a b c d) (b a c d) (d c b a) (a b d c) (c d a b) (b d a c)))
+        (consumers '((multiple-value-list call)
+                     (multiple-value-bind (h l) call (list h l))
+                     (multiple-value-bind (h l) call (vector h l))
+                     (multiple-value-bind (h l) call (list h l a b c d)))))
+    (dolist (order orders)
+      (dolist (consumer consumers)
+        (let ((fun (checked-compile
+                    `(lambda (a b c d)
+                       (declare (type sb-ext:word a b c d))
+                       (let ((r ,(subst `(sb-bignum:%multiply-and-add ,@order)
+                                        'call consumer)))
+                         (list (elt r 0) (elt r 1)))))))
+          (dolist (args (list (list 2 3 4 5) (list m m m m)
+                              (list m 3 (1- m) 1) (list 7 m 0 m)))
+            (destructuring-bind (x y prev carry)
+                (mapcar (lambda (v) (nth (position v '(a b c d)) args)) order)
+              (let ((sum (+ (* x y) prev carry)))
+                (assert (equal (apply fun args)
+                               (list (ash sum (- sb-vm:n-word-bits))
+                                     (ldb (byte sb-vm:n-word-bits 0) sum))))))))))))

@@ -45,8 +45,7 @@
 
 ;; Assert something about *CURRENT-THREAD* seeing objects that it just consed.
 (with-test (:name :m-a-o-threadlocally-precise
-                  :skipped-on (:or (:not :sb-thread) :interpreter :gc-stress)
-                  :fails-on :mark-region-gc)
+                  :skipped-on (:or (:not :sb-thread) :interpreter :gc-stress))
   (let ((before (make-array 4))
         (after  (make-array 4 :initial-element 0)))
     (flet ((countit (obj type size)
@@ -453,7 +452,6 @@
 (compile 'code-iterator)
 
 (with-test (:name :code-iteration-fast
-                  :broken-on :mark-region-gc
                   :skipped-on :gc-stress)
   (sb-int:binding* (((slow-n slow-bytes) (code-iterator :slow))
                     ((fast-n fast-bytes) (code-iterator :fast)))
@@ -461,6 +459,34 @@
     ;; to the machine and can't be reliably asserted.
     (assert (= slow-n fast-n))
     (assert (= slow-bytes fast-bytes)))))
+
+;;; MAP-CODE-OBJECTS visits code compiled after startup: before any GC,
+;;; when it lies on lines that have no allocation bits yet, and after a GC
+;;; has freed the code around it.
+(defun code-objects-missed (codes)
+  (let ((seen (make-hash-table :test 'eq)))
+    (sb-vm:map-code-objects (lambda (code) (setf (gethash code seen) t)))
+    (count-if-not (lambda (code) (gethash code seen)) codes)))
+(compile 'code-objects-missed)
+
+(with-test (:name (sb-vm:map-code-objects :code-compiled-after-startup))
+  (let ((codes '()))
+    (dotimes (i 200)
+      (let* ((maker (compile nil `(lambda (k) (lambda (x) (+ x k ,i)))))
+             (closure (funcall maker i)))
+        (push (sb-kernel:fun-code-header maker) codes)
+        (push (sb-kernel:fun-code-header (sb-kernel:%closure-fun closure)) codes)
+        (push (sb-kernel:fun-code-header
+               (compile nil `(lambda (x) (* x ,i))))
+              codes)))
+    (setq codes (remove-duplicates codes))
+    (assert (zerop (code-objects-missed codes)))
+    (gc)
+    (assert (zerop (code-objects-missed codes)))
+    ;; Drop every other one so that the survivors share pages with freed code.
+    (setq codes (loop for code in codes for i from 0 when (evenp i) collect code))
+    (gc :full t)
+    (assert (zerop (code-objects-missed codes)))))
 
 (defglobal *wp-for-signal-handler-gc-test* nil)
 #-win32

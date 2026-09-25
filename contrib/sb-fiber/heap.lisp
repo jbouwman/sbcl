@@ -261,7 +261,10 @@ CHECK-STORES controls the store barrier while the heap is installed:
 store would make a global object or another heap refer into this heap,
 :RECORD only records such stores (see HEAP-VIOLATIONS), NIL does not
 check.  STRICT additionally treats any store into a global object as a
-violation, so that a process can only mutate its own data."
+violation, so that a process can only mutate its own data.  Neither mode
+checks a store whose value the compiler knows to be global: a literal
+constant, or a value whose type admits only immediates, NIL, T and
+symbols of the initial core."
   (declare (type (integer 0) gc-threshold hard-limit fullsweep-after)
            (type (member nil :record :error) check-stores))
   (without-heap
@@ -510,13 +513,26 @@ different threads since startup."
   "Return a copy of OBJECT in which every sub-object owned by a process
 heap has been replaced by a copy allocated in the current heap (or the
 global heap if none is installed)."
-  (let ((table (make-hash-table :test 'eq)))
+  (let ((table (make-hash-table :test 'eql)))
     (unwind-protect (%copy-object object table)
       (clrhash table))))
 
+;;; The table of copies made so far is keyed by the source object's
+;;; address.  It lives where the copies do, often the global heap, and
+;;; keyed by the objects themselves it would refer into the source heap:
+;;; a vector it outgrew keeps its entries, and a conservative root that
+;;; retains one after the source heap is released leads a global
+;;; collection into freed or reused memory.  Local objects do not move,
+;;; and only local objects are entered.
+(declaim (inline %seen (setf %seen)))
+(defun %seen (x table)
+  (gethash (sb-kernel:get-lisp-obj-address x) table))
+(defun (setf %seen) (new x table)
+  (setf (gethash (sb-kernel:get-lisp-obj-address x) table) new))
+
 (defun %copy-object (x table)
   (cond ((or (sb-int:fixnump x) (zerop (sb-vm::object-owner x))) x)
-        ((gethash x table))
+        ((%seen x table))
         (t (%copy-process-object x table))))
 
 (defun %copy-process-object (x table)
@@ -524,17 +540,17 @@ global heap if none is installed)."
     (cons (%copy-list-structure x table))
     (simple-vector
      (let ((new (make-array (length x))))
-       (setf (gethash x table) new)
+       (setf (%seen x table) new)
        (dotimes (i (length x) new)
          (setf (svref new i) (%copy-object (svref x i) table)))))
     ((simple-array * (*))
      (let ((new (copy-seq x)))
-       (setf (gethash x table) new)
+       (setf (%seen x table) new)
        new))
     (array (%copy-array-header x table))
     (symbol
      (let ((new (make-symbol (copy-seq (symbol-name x)))))
-       (setf (gethash x table) new)
+       (setf (%seen x table) new)
        new))
     (number (%copy-number x table))
     ((or function weak-pointer sb-sys:system-area-pointer stream
@@ -549,15 +565,15 @@ global heap if none is installed)."
   (let* ((head (cons nil nil))
          (tail head)
          (current x))
-    (setf (gethash x table) head)
+    (setf (%seen x table) head)
     (loop
       (setf (car tail) (%copy-object (car current) table))
       (let ((next (cdr current)))
         (cond ((and (consp next)
                     (not (zerop (sb-vm::object-owner next)))
-                    (not (gethash next table)))
+                    (not (%seen next table)))
                (let ((new (cons nil nil)))
-                 (setf (gethash next table) new
+                 (setf (%seen next table) new
                        (cdr tail) new
                        tail new
                        current next)))
@@ -578,12 +594,12 @@ global heap if none is installed)."
                                       :displaced-index-offset offset
                                       :adjustable adjustable
                                       :fill-pointer fill-pointer)))
-            (setf (gethash x table) new)
+            (setf (%seen x table) new)
             new)
           (let ((new (make-array dims :element-type element-type
                                       :adjustable adjustable
                                       :fill-pointer fill-pointer)))
-            (setf (gethash x table) new)
+            (setf (%seen x table) new)
             (dotimes (i (array-total-size x) new)
               (setf (row-major-aref new i)
                     (%copy-object (row-major-aref x i) table))))))))
@@ -606,7 +622,7 @@ global heap if none is installed)."
             (complex
              (sb-kernel:%make-complex (%copy-object (realpart x) table)
                                       (%copy-object (imagpart x) table))))))
-    (setf (gethash x table) new)
+    (setf (%seen x table) new)
     new))
 
 (defun %copy-hash-table (x table)
@@ -617,7 +633,7 @@ global heap if none is installed)."
                               :rehash-size (hash-table-rehash-size x)
                               :rehash-threshold (hash-table-rehash-threshold x)
                               :synchronized (hash-table-synchronized-p x))))
-    (setf (gethash x table) new)
+    (setf (%seen x table) new)
     (maphash (lambda (k v)
                (setf (gethash (%copy-object k table) new)
                      (%copy-object v table)))
@@ -632,7 +648,7 @@ global heap if none is installed)."
                   (sb-kernel:%make-instance len)
                   (sb-kernel:%make-instance/mixed len))))
     (sb-kernel:%set-instance-layout new layout)
-    (setf (gethash x table) new)
+    (setf (%seen x table) new)
     (sb-kernel::do-layout-bitmap (i taggedp layout len)
       (if taggedp
           (sb-kernel:%instance-set new i (%copy-object (sb-kernel:%instance-ref x i) table))

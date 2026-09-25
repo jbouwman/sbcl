@@ -69,6 +69,66 @@
         (when (zerop (mod i 50)) (sb-ext:gc :full t)))
       (mapc #'release-fiber fibers))))
 
+;;; On arm64 the words above a suspended fiber's stack pointer are zeroed
+;;; when it resumes after a collection that could have freed what they
+;;; refer to, and left alone otherwise.  The fiber writes a fixnum into
+;;; the dead part of its stack before each suspend and reads it back after
+;;; the resume.
+(defun stale-word-probe (fiber-body-before-writing)
+  (let ((marker (ash 12345 sb-vm:n-fixnum-tag-bits)))
+    (lambda ()
+      (funcall fiber-body-before-writing)
+      (let ((sap (sb-sys:sap+ (sb-kernel:current-sp) 4096))
+            (seen '()))
+        (dotimes (i 3)
+          (setf (sb-sys:sap-ref-word sap 0) marker)
+          (yield-fiber)
+          (push (if (= (sb-sys:sap-ref-word sap 0) marker) :kept :zeroed) seen))
+        (nreverse seen)))))
+
+(defun run-stale-word-probe (fiber-body-before-writing between-resumes)
+  ;; Start with an empty nursery, so that no collection other than the
+  ;; ones BETWEEN-RESUMES make happens during the probe.
+  (sb-ext:gc)
+  (with-fiber-thread ()
+    (let ((f (make-fiber (stale-word-probe fiber-body-before-writing)
+                         :stack-size (* 256 1024))))
+      (unwind-protect
+           (progn (resume-fiber f)
+                  (loop for step in between-resumes
+                        for result = (progn (funcall step) (resume-fiber f))
+                        finally (return result)))
+        (release-fiber f)))))
+
+#+arm64
+(with-test (:name (:fiber :stack-scrub :after-a-global-collection))
+  (assert (equal (run-stale-word-probe
+                  (lambda ())
+                  (list (lambda ())
+                        (lambda () (sb-ext:gc))
+                        (lambda ())))
+                 '(:kept :zeroed :kept))))
+
+#+(and arm64 sb-local-heaps)
+(with-test (:name (:fiber :stack-scrub :after-a-collection-of-a-heap-it-installed))
+  (let ((used (make-heap))
+        (other (make-heap)))
+    (unwind-protect
+         (flet ((collect (heap) (lambda () (with-heap (heap) (heap-gc heap)))))
+           ;; A fiber that installed a heap other than its own is scrubbed
+           ;; after any local collection.
+           (assert (equal (run-stale-word-probe
+                           (lambda () (with-heap (used) (list 1)) nil)
+                           (list (collect other) (lambda ()) (collect used)))
+                          '(:zeroed :kept :zeroed)))
+           ;; One that never did is not.
+           (assert (equal (run-stale-word-probe
+                           (lambda ())
+                           (list (collect other) (collect used) (lambda ())))
+                          '(:kept :kept :kept))))
+      (release-heap used)
+      (release-heap other))))
+
 (with-test (:name (:fiber :trampoline-vs-gc-stop))
   (let ((done (sb-thread:make-semaphore))
         (stop-gc nil))

@@ -587,6 +587,79 @@
         (setf (cdr cell) global))
       (assert (eq (cdr cell) global)))))
 
+;;; Two barriered stores into one object in a row.  The second store's
+;;; card mark is redundant and is omitted, but its value still has to be
+;;; checked: the check classifies the value, not the object.  A literal
+;;; constant is global, so it is not checked (see MAKE-HEAP).  x86-64
+;;; fuses the struct stores into INSTANCE-SET-MULTIPLE and arm64 does
+;;; not; the counts are the same on both.
+(defstruct (two-slot-token (:constructor make-two-slot-token ()))
+  (state :active)
+  (reason nil))
+
+(defun store-constant-then-value (tok reason)
+  (setf (two-slot-token-state tok) :cancelled
+        (two-slot-token-reason tok) reason))
+(defun store-two-values (tok state reason)
+  (setf (two-slot-token-state tok) state
+        (two-slot-token-reason tok) reason))
+(defun set-car-constant-then-cdr (cell value)
+  (setf (car cell) :k
+        (cdr cell) value))
+(defun set-car-and-cdr (cell a d)
+  (setf (car cell) a
+        (cdr cell) d))
+
+(defun count-store-checks (function)
+  (let ((text (with-output-to-string (s) (disassemble function :stream s))))
+    (loop for start = 0 then (1+ pos)
+          for pos = (search "LOCAL-HEAP-STORE-CHECK" text :start2 start)
+          while pos
+          count t)))
+
+(with-test (:name (:local-heap :store-barrier :second-store-checked :code))
+  (assert (= (count-store-checks #'store-constant-then-value) 1))
+  (assert (= (count-store-checks #'store-two-values) 2))
+  (assert (= (count-store-checks #'set-car-constant-then-cdr) 1))
+  (assert (= (count-store-checks #'set-car-and-cdr) 2)))
+
+(with-test (:name (:local-heap :store-barrier :second-store-checked :escape))
+  (with-test-heap (h :check-stores :record)
+    (let ((tok (make-two-slot-token))
+          (cell (cons nil nil)))
+      (take-heap-violations)
+      (with-heap (h)
+        (store-constant-then-value tok (list 1))
+        (store-two-values tok (list 2) (list 3))
+        (set-car-constant-then-cdr cell (list 4))
+        (set-car-and-cdr cell (list 5) (list 6)))
+      (let ((noted (nth-value 1 (take-heap-violations))))
+        (setf (two-slot-token-state tok) nil (two-slot-token-reason tok) nil
+              (car cell) nil (cdr cell) nil)
+        (assert (= noted 6))))))
+
+(with-test (:name (:local-heap :store-barrier :second-store-checked :strict))
+  (with-test-heap (h :strict t)
+    (let ((tok (make-two-slot-token))
+          (cell (cons nil nil))
+          (global (list :global)))
+      (with-heap (h)
+        (flet ((kind-of (thunk)
+                 (handler-case (progn (funcall thunk) :stored)
+                   (heap-store-error (c) (heap-store-error-kind c)))))
+          (assert (eq (kind-of (lambda () (store-constant-then-value tok global)))
+                      :global))
+          (assert (eq (kind-of (lambda () (set-car-constant-then-cdr cell global)))
+                      :global))
+          ;; The literal store went through; the checked one did not.
+          (assert (eq (two-slot-token-state tok) :cancelled))
+          (assert (null (two-slot-token-reason tok)))
+          (assert (eq (car cell) :k))
+          (assert (null (cdr cell)))
+          ;; A keyword that is not a literal at the store is checked.
+          (assert (eq (kind-of (lambda () (store-two-values tok :x :y)))
+                      :global)))))))
+
 (with-test (:name (:local-heap :store-barrier :messages-are-checked-safely))
   (with-test-heap (a)
     (with-test-heap (b)

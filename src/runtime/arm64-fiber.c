@@ -5,6 +5,9 @@
 #include "os.h"
 #include "thread.h"
 #include "validate.h"
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+#include "local-heap.h"
+#endif
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -82,7 +85,8 @@ int sb_fiber_lisp_stack_alloc(struct sb_fiber_ctx *f, size_t size)
     f->control_frame_pointer    = NULL;
     f->control_stack_alloc_size = total;
     f->cs_guard_protected       = 1;
-    f->dirty_high               = (lispobj *)p;
+    /* Fresh from mmap, so zero: nothing to scrub before the first run. */
+    f->stack_dirty              = 0;
     return 0;
 }
 
@@ -106,7 +110,16 @@ void sb_fiber_lisp_stack_capture_main(struct sb_fiber_ctx *f, struct thread *th)
     f->control_stack_alloc_size = 0;   /* not owned */
     f->cs_guard_protected =
         th->state_word.control_stack_guard_page_protected;
-    f->dirty_high = th->control_stack_pointer;
+    /* The thread's stack has been the running stack at every global
+     * collection since its words above the stack pointer were written,
+     * or else a main fiber over it was scrubbed on resuming after one
+     * (see below), so only collections from now on concern it. */
+    f->stack_dirty         = 1;
+    f->gc_epoch_seen       = sb_fiber_gc_epoch;
+    f->local_gc_epoch_seen = __atomic_load_n(&sb_fiber_local_gc_epoch,
+                                             __ATOMIC_ACQUIRE);
+    f->heap_gc_count_seen  = 0;
+    f->ran_other_heap      = thread_extra_data(th)->heap_on_main_stack;
 }
 
 void sb_fiber_lisp_stack_suspend(struct sb_fiber_ctx *f, struct thread *th)
@@ -117,24 +130,63 @@ void sb_fiber_lisp_stack_suspend(struct sb_fiber_ctx *f, struct thread *th)
     f->control_frame_pointer = th->control_frame_pointer;
     f->cs_guard_protected    =
         th->state_word.control_stack_guard_page_protected;
-    if (f->control_stack_pointer && f->control_stack_end) {
+    f->gc_epoch_seen = sb_fiber_gc_epoch;
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    f->heap_gc_count_seen = f->heap ? f->heap->gc_count : 0;
+#endif
+}
+
+/* The words above a fiber's stack pointer are left over from frames that
+ * have returned.  The control stack is scanned precisely, so a frame
+ * pushed later that does not initialize every slot before a collection
+ * exposes them to the collector as roots.  That is harmless while what
+ * they refer to is still allocated, and it stays allocated until the next
+ * collection: the collectors scrub the running stack above its stack
+ * pointer for this reason (scrub_thread_control_stack), and a stale word
+ * written after a collection can only refer to an object that the
+ * collection kept or that was allocated after it.
+ *
+ * A suspended fiber's stack is not the running stack of any thread, so
+ * no collection scrubs it.  It is zeroed here, before the fiber runs
+ * again, when a collection that could have freed what a stale word refers
+ * to has happened since the fiber last ran:
+ *
+ *  - any global collection;
+ *  - a collection of the fiber's own heap, which is possible while the
+ *    fiber is suspended only when the heap is installed elsewhere;
+ *  - any local collection, for a fiber that has installed a heap other
+ *    than its own, since its stack may refer into that heap.  A stack
+ *    refers into a heap only if the heap was installed while it ran:
+ *    no global object or other heap refers into a heap, and values
+ *    crossing a fiber boundary are copied.
+ *
+ * The extent of the words to zero is not known: a fiber can call deeper
+ * than it ever suspends, then return, so no suspend point bounds it, and
+ * a run of zero words bounds nothing either, since a frame's unwritten
+ * slots are zero.  The whole rest of the stack is zeroed.
+ *
+ * A fiber that is suspended and resumed without a collection in between
+ * pays nothing, whatever depth it suspends at. */
+void sb_fiber_lisp_stack_resume(struct sb_fiber_ctx *f, struct thread *th)
+{
+    uword_t local_epoch = __atomic_load_n(&sb_fiber_local_gc_epoch,
+                                          __ATOMIC_ACQUIRE);
+    if (f->stack_dirty && f->control_stack_pointer && f->control_stack_end) {
+        int collected = f->gc_epoch_seen != sb_fiber_gc_epoch
+            || (f->ran_other_heap && f->local_gc_epoch_seen != local_epoch);
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+        if (f->heap && f->heap->gc_count != f->heap_gc_count_seen)
+            collected = 1;
+#endif
         char *csp = (char *)f->control_stack_pointer;
         char *usable_end = (char *)f->control_stack_end
                            - 3 * STACK_GUARD_SIZE;
-        char *dirty_high = (char *)f->dirty_high;
-        if (csp > dirty_high) {
-            if (csp < usable_end)
-                memset(csp, 0, usable_end - csp);
-            f->dirty_high = (lispobj *)csp;
-        } else if (csp < dirty_high) {
-            memset(csp, 0, dirty_high - csp);
-            f->dirty_high = (lispobj *)csp;
-        }
+        if (collected && csp < usable_end)
+            memset(csp, 0, usable_end - csp);
     }
-}
+    f->stack_dirty = 1;
+    f->local_gc_epoch_seen = local_epoch;
 
-void sb_fiber_lisp_stack_resume(struct sb_fiber_ctx *f, struct thread *th)
-{
     th->control_stack_start   = f->control_stack_base;
     th->control_stack_end     = f->control_stack_end;
     th->control_stack_pointer = f->control_stack_pointer;

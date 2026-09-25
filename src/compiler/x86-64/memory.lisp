@@ -48,13 +48,14 @@
 ;;;    be younger than the newly constructed thing.
 ;;; 2. hash-table k/v pair should mark once only.
 ;;;    (the vector elements are certainly on the same card)
-;;; Local heap store barrier; see the arm64 version for the protocol.
+;;; Local heap store barrier; see the arm64 version for the protocol,
+;;; the exemption of constant values and REMARK-CARD.
 #+sb-local-heaps
 (defun store-check-worthy-tn-p (tn)
   (sc-is tn descriptor-reg control-stack))
 
 #+sb-local-heaps
-(defun emit-local-heap-store-check (object value-tn-ref scratch-reg)
+(defun emit-local-heap-store-check (object value-tn-ref scratch-reg &optional remark-card)
   (when (and value-tn-ref
              (not (eq value-tn-ref t))
              (do ((ref value-tn-ref (tn-ref-across ref))) ((null ref) nil)
@@ -73,6 +74,8 @@
               (inst push (encode object))
               (inst push (encode tn))
               (invoke-asm-routine 'call 'local-heap-store-check sb-assem::*current-vop*)))))
+      (when remark-card
+        (emit-gengc-barrier object nil scratch-reg t))
       (emit-label skip))))
 
 (defun emit-gengc-barrier (object cell-address scratch-reg &optional value-tn-ref allocator)
@@ -83,13 +86,13 @@
       (aver (symbolp (tn-value object))))
     (cond ((or (eq value-tn-ref t)
                (require-gengc-barrier-p object value-tn-ref allocator))
+           #+sb-local-heaps
+           (emit-local-heap-store-check object value-tn-ref scratch-reg)
            (if cell-address ; for SIMPLE-VECTOR, the page holding the specific element index gets marked
                (inst lea scratch-reg cell-address)
                ;; OBJECT could be a symbol in immobile space
                (inst mov scratch-reg (encode-value-if-immediate object)))
-           (mark-gc-card scratch-reg)
-           #+sb-local-heaps
-           (emit-local-heap-store-check object value-tn-ref scratch-reg))
+           (mark-gc-card scratch-reg))
           #+debug-gc-barriers
           (t
            (flet ((encode (x)

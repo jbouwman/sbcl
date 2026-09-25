@@ -419,6 +419,7 @@ Please check that all strings which were not recognizable to the compiler
           sb-c::make-transform ; cl-protobufs uses this
           sb-impl::%default-comma-constructor
           sb-kernel::%%make-random-state
+          sb-kernel::with-global-heap ; for tests
           sb-lockless::+hash-nbits+ sb-lockless::%make-so-set-node ; for tests
           sb-loop::*loop-epilogue* sb-loop::add-loop-path ; internals to keep CLSQL working
           sb-profile::make-counter)))) ; for a test

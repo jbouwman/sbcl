@@ -2101,13 +2101,15 @@
 
 (define-vop (bignum-mult-and-add-4-arg)
   (:translate sb-bignum:%multiply-and-add)
+  ;; HI is written before Y is read and LO before PREV and CARRY-IN
+  ;; are read, so neither result may share a register with an argument.
   (:args (x :scs (unsigned-reg) :to :result)
-         (y :scs (unsigned-reg) :target lo)
+         (y :scs (unsigned-reg) :to :result)
          (prev :scs (unsigned-reg) :to :result)
          (carry-in :scs (unsigned-reg) :to :result))
   (:arg-types unsigned-num unsigned-num unsigned-num unsigned-num)
   (:results (hi :scs (unsigned-reg) :from :eval)
-            (lo :scs (unsigned-reg)))
+            (lo :scs (unsigned-reg) :from :eval))
   (:result-types unsigned-num unsigned-num)
   (:generator 9
     (inst umulh hi x y)
