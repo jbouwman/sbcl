@@ -78,17 +78,26 @@ conservatively pinned.  On arm64 the separate Lisp control stack
 On arm64, a conservative scanner walks `[base, CSP_save)` on a
 suspended fiber and pins anything pointer-shaped.
 
-`sb_fiber_lisp_stack_suspend` maintains a `dirty_high` per fiber: the
-address such that `[dirty_high, usable_end)` is known clean.  On each
-suspend:
+The words above a fiber's `CSP` are left over from returned frames.
+A frame pushed later can expose them to the precise scan of the
+running stack before it writes its slots, so they must not refer to
+memory a collection has freed since they were written.  The
+collectors zero the running stack above its `CSP`
+(`scrub_thread_control_stack`); a suspended fiber's stack is zeroed
+from `CSP` to `usable_end` by `sb_fiber_lisp_stack_resume`, before
+the fiber runs again, if since it last ran
 
-- `CSP == dirty_high` (tight yield loop): no scrub.
-- `CSP < dirty_high` (fiber returned to a shallower depth): scrub
-  `[CSP, dirty_high)`.
-- `CSP > dirty_high` (fiber grew above prior clean boundary):
-  scrub all the way to `usable_end`.
+- a global collection has run,
+- its own heap has been collected, or
+- any local collection has run and the fiber has installed a heap
+  other than its own.
 
-Tight-yield fibers pay zero scrub cost after the first suspend.
+A fiber resumed with no such collection in between pays nothing,
+whatever depth it suspended at, and a new fiber's stack, fresh from
+`mmap`, is not zeroed before its first run.  The extent of the words
+to zero is not recorded: a fiber can call deeper than any point it
+suspends at, and a frame's unwritten slots are zero, so neither the
+suspend depth nor a run of zero words bounds them.
 
 ## Trampoline
 

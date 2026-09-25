@@ -1164,6 +1164,9 @@ collect_garbage(generation_index_t last_gen)
     page_index_t initial_nfp = next_free_page;
 
     scrub_control_stacks();
+#ifdef LISP_FEATURE_SB_FIBER
+    sb_fiber_note_global_gc();
+#endif
 
     if (gc_mark_only) {
         garbage_collect_generation(PSEUDO_STATIC_GENERATION, 0,

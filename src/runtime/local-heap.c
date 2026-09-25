@@ -310,6 +310,7 @@ int local_heap_switch_in_pa(struct thread *th, struct local_heap *to)
     th->local_heap_check = (to && to->store_check) ? to : NULL;
 #ifdef LISP_FEATURE_SB_FIBER
     if (ed->current_fiber) ed->current_fiber->active_heap = to;
+    if (to) sb_fiber_note_heap_installed(th, to);
 #endif
     return 0;
 }
