@@ -659,6 +659,38 @@ drained."
                        (assert (global-p (sb-format::directive-string x))))))))))
   (gc :full t))
 
+;;; A frame walk from a checked heap, over an interrupted frame, makes
+;;; global frames that refer only to global objects, and fills the debug
+;;; caches without a refused store.
+(defun frame-walk-probe (x) (length x))
+(declaim (notinline frame-walk-probe))
+
+(with-test (:name (:local-heap :checked :frame-walk-builds-globally))
+  (let ((frames 0) (bad 0) (refused nil))
+    (flet ((global-p (x) (or (null x) (sb-int:fixnump x)
+                             (zerop (sb-vm::object-owner x)))))
+      (with-test-heap (heap :check-stores :error)
+        (with-heap (heap)
+          (handler-case
+              (handler-bind
+                  ((type-error
+                     (lambda (c)
+                       (declare (ignore c))
+                       (sb-debug:map-backtrace
+                        (lambda (frame)
+                          (incf frames)
+                          (unless (and (global-p frame)
+                                       (or (not (sb-di::compiled-frame-p frame))
+                                           (global-p (sb-di::compiled-frame-escaped frame))))
+                            (incf bad)))))))
+                (frame-walk-probe (make-hash-table)))
+            (heap-store-error () (setf refused t))
+            (type-error () nil))
+          nil)))
+    (assert (plusp frames))
+    (assert (not refused))
+    (assert (zerop bad))))
+
 (defun strict-cached-package () (find-package "SB-FIBER"))
 (with-test (:name (:local-heap :strict :cold-package-cache))
   (with-test-heap (heap :check-stores :error :strict t)
