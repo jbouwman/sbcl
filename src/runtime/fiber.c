@@ -449,12 +449,28 @@ void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to)
     sb_fiber_lisp_stack_suspend(from, th);
     sb_fiber_lisp_stack_resume(to, th);
 
+    /* A fiber can be switched out inside an interrupt -- a handler of an
+     * internal error that parks.  The context index travels with its
+     * binding stack, but the contexts are per thread: save FROM's, and
+     * give TO back the ones it left, or it and the GC read another
+     * fiber's context through its index. */
+    int from_contexts = fixnum_value(read_TLS(FREE_INTERRUPT_CONTEXT_INDEX, th));
+    for (int i = 0; i < from_contexts; i++)
+        from->sigcontexts[i] = nth_interrupt_context(i, th);
+    from->n_sigcontexts = from_contexts;
+
     if (from->binding_stack_base)
         swap_bindings_backward(th, from->binding_stack_base,
                                from->binding_stack_pointer);
     if (to->binding_stack_base)
         swap_bindings_forward(th, to->binding_stack_base,
                               to->binding_stack_pointer);
+
+    int to_contexts = fixnum_value(read_TLS(FREE_INTERRUPT_CONTEXT_INDEX, th));
+    for (int i = 0; i < to_contexts && i < to->n_sigcontexts; i++)
+        nth_interrupt_context(i, th) = to->sigcontexts[i];
+    for (int i = to_contexts; i < from_contexts; i++)
+        nth_interrupt_context(i, th) = NULL;
 }
 
 #ifdef LISP_FEATURE_SB_LOCAL_HEAPS

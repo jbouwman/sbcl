@@ -6,6 +6,7 @@
 #ifdef LISP_FEATURE_SB_FIBER
 
 #include "genesis/thread.h"
+#include "genesis/sbcl.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -77,6 +78,12 @@ struct sb_fiber_ctx {
 
     unsigned char cs_guard_protected;
     unsigned char bs_guard_protected;
+
+    /* The thread's interrupt contexts while this fiber is switched out.
+     * The index into them is a special binding, which the fiber's binding
+     * stack carries, but the contexts are a per-thread array. */
+    void *sigcontexts[MAX_INTERRUPTS];
+    int n_sigcontexts;
 };
 
 /* Lifecycle */
