@@ -868,6 +868,35 @@ drained."
     (sb-ext:gc :full t)
     (setq *dangling-holder* nil)))
 
+;;; The same through a cons's cdr, which tracing follows without the
+;;; ownership checks a car goes through.
+(with-test (:name (:local-heap :global-cons-with-cdr-into-released-heap))
+  (dotimes (i 20)
+    (let ((heap (make-heap))
+          (vector nil)
+          (list nil))
+      (with-heap (heap)
+        (setq vector (make-array 100000 :initial-element i)
+              list (make-list 300 :initial-element i)))
+      (setq *dangling-holder* (list* :vector (list* :list list) vector))
+      (release-heap heap))
+    (sb-ext:gc :full t)
+    (churn-heaps 4 (* 256 1024))
+    (sb-ext:gc :full t)
+    (setq *dangling-holder* nil)))
+
+(with-test (:name (:local-heap :global-cons-with-cdr-into-heap :is-a-violation))
+  (let ((heap (make-heap)))
+    (unwind-protect
+         (let ((local nil))
+           (with-heap (heap) (setq local (make-array 10)))
+           (setq *dangling-holder* (cons nil local))
+           (let ((violations (verify-all-heaps)))
+             (assert (find *dangling-holder* violations
+                           :key #'first))))
+      (setq *dangling-holder* nil)
+      (release-heap heap))))
+
 ;;; GLOBALIZE fills its table of copies in the global heap.  A vector
 ;;; the table outgrows is garbage that a conservative root can retain,
 ;;; so no entry may refer to the heap being copied from.

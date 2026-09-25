@@ -691,9 +691,14 @@ static void trace_object(lispobj object) {
     lispobj next = c->cdr;
     /* "Tail-recurse" on the cdr, unless we're recording dirty cards.
      * This saves us from continuously writing into grey blocks,
-     * but loses memory parallelism. */
+     * but loses memory parallelism. With local heaps the cdr goes
+     * through mark(), which holds the checks on who owns the target. */
     if (is_lisp_pointer(next)) {
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+      if (0) {
+#else
       if (!dirty_generation_source) {
+#endif
         /* Fix up embedded simple-fun objects. */
         lispobj *np = native_pointer(next);
         if (functionp(next) && embedded_obj_p(widetag_of(np))) {
