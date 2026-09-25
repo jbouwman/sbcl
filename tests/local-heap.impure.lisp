@@ -496,6 +496,12 @@
 (defvar *violation-sink* (list :sink))
 (defvar *draining* nil)
 
+;;; A recorded escape is left in place, so the sink points into the heap
+;;; until it is cleared; a later collection would otherwise trace it into
+;;; pages another heap has reused.
+(defun clear-violation-sink ()
+  (setf (car *violation-sink*) :sink))
+
 (defun note-violations (start n)
   "Note N escape violations: a store of this heap's object into a global
 one, under a heap that records rather than signals."
@@ -507,6 +513,7 @@ one, under a heap that records rather than signals."
              (dotimes (i n)
                ;; An escaping store: this heap's object into a global cons.
                (setf (car *violation-sink*) mine))))
+      (clear-violation-sink)
       (release-heap h)))
   :noted)
 
@@ -549,6 +556,7 @@ drained."
     (unwind-protect
          (with-heap (h)
            (setf (car *violation-sink*) (list :escapee)))
+      (clear-violation-sink)
       (release-heap h))
     (multiple-value-bind (details total) (take-heap-violations)
       (assert (= total 1))
@@ -591,6 +599,21 @@ drained."
            (with-heap (heap) (strict-dispatch-store value) nil)
          (heap-store-error () t)))
       (assert (zerop (hash-table-count *strict-dispatch-target*))))))
+
+;;; ALLOCATE-INSTANCE of a constant class calls an allocator CTOR whose
+;;; first call compiles the optimized allocator and records the CTOR on
+;;; the class. Made inside a checked heap, both run in the global heap.
+(defclass checked-allocator-probe () ((x :initform nil)))
+(defun checked-allocator-probe ()
+  (allocate-instance (find-class 'checked-allocator-probe)))
+
+(with-test (:name (:local-heap :checked :first-optimized-allocator))
+  (with-test-heap (heap :check-stores :error)
+    (let ((owner (with-heap (heap)
+                   (sb-vm::object-owner (checked-allocator-probe)))))
+      (assert (= owner (sb-fiber::heap-id heap)))))
+  (gc :full t)
+  (assert (typep (checked-allocator-probe) 'checked-allocator-probe)))
 
 (defun strict-cached-package () (find-package "SB-FIBER"))
 (with-test (:name (:local-heap :strict :cold-package-cache))

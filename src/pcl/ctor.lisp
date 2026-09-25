@@ -618,6 +618,7 @@
               (ctor-state ctor) (if optimizedp 'optimized 'fallback)))))))
 
 (defun install-optimized-allocator (ctor)
+  (sb-kernel::with-global-heap
   (with-world-lock ()
     (let* ((class-or-name (ctor-class-or-name ctor))
            (class (ensure-class-finalized
@@ -640,7 +641,7 @@
                 (pcl-compile form :unsafe
                              :tlab #+sb-local-heaps :user
                                    #-sb-local-heaps :system))
-              (ctor-state ctor) (if optimizedp 'optimized 'fallback))))))
+              (ctor-state ctor) (if optimizedp 'optimized 'fallback)))))))
 ) ; end FLET
 
 (defun allocator-function-form (ctor)
