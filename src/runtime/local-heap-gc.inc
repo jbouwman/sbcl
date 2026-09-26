@@ -755,10 +755,12 @@ static void ph_trace_heap_roots(struct local_heap *h)
                         trace_object(compute_lispobj(where));
                         walked++;
                         /* A young object spanning several lines is
-                         * traced from its first line only. */
+                         * traced from its first line only.  Its last
+                         * line is visited again for the objects that
+                         * start after it there. */
                         if (where + object_size(where) > limit) {
                             spanning = where;
-                            l = address_line(where + object_size(where) - 1);
+                            l = address_line(where + object_size(where) - 1) - 1;
                             break;
                         }
                     }
