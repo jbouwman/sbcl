@@ -918,6 +918,68 @@ drained."
         (assert (sb-kernel::condition-assigned-slots c))
         (assert (condition-cells-owned-by c owner))))))
 
+;;; A global collection walks a heap's young objects as roots, line by
+;;; line.  An object that starts in the last line of a young object
+;;; spanning several lines is a root too; a global object it alone
+;;; refers to must survive.
+(defun base-address (x) (logandc2 (sb-kernel:get-lisp-obj-address x) sb-vm:lowtag-mask))
+
+(defun make-tail-holder (words)
+  "A local vector of WORDS elements and a one-element local vector
+allocated after it, which holds the only reference to a fresh global
+string, when the second starts in the last line of the first; else NIL."
+  (declare (notinline make-array))
+  (let* ((v (make-array words))
+         (c (make-array 1 :initial-element nil))
+         (line 128)
+         (vstart (base-address v))
+         (cstart (base-address c)))
+    (when (and (= cstart (+ vstart (sb-ext:primitive-object-size v)))
+               (< (floor vstart line) (floor cstart line))
+               (plusp (mod cstart line)))
+      (setf (svref c 0) (without-heap (make-string 20 :initial-element #\g)))
+      (values c v (without-heap (make-weak-pointer (svref c 0)))))))
+(declaim (notinline make-tail-holder))
+
+(defun collect-and-check (wp)
+  (sb-sys:scrub-control-stack)
+  (sb-ext:gc :full t)
+  (weak-pointer-value wp))
+(declaim (notinline collect-and-check))
+
+(with-test (:name (:local-heap :global-gc :root-after-spanning-young-object))
+  (let ((trials 0))
+    (with-test-heap (heap)
+      (with-heap (heap)
+        (loop for words from 14 below 400
+              do (multiple-value-bind (c v wp) (make-tail-holder words)
+                   (when c
+                     (incf trials)
+                     (assert (collect-and-check wp))
+                     (assert (string= (svref c 0) (make-string 20 :initial-element #\g)))
+                     (assert v))))))
+    (assert (plusp trials))))
+
+;;; A local object's edge to a function points into the middle of the
+;;; function's code object.  The code must survive a global collection
+;;; when that edge is the only one.  (The weak pointer is to the code
+;;; object: one to the function itself breaks even while it is live.)
+(defun make-function-holder (i)
+  (let* ((fn (without-heap
+               (let ((sb-c::*compile-to-memory-space* :dynamic))
+                 (compile nil `(lambda () (list ,i :compiled))))))
+         (holder (list fn)))
+    (values holder (without-heap (make-weak-pointer (sb-kernel:fun-code-header fn))))))
+(declaim (notinline make-function-holder))
+
+(with-test (:name (:local-heap :global-gc :function-held-by-local-object))
+  (with-test-heap (heap)
+    (with-heap (heap)
+      (dotimes (i 10)
+        (multiple-value-bind (holder wp) (make-function-holder i)
+          (assert (collect-and-check wp))
+          (assert (equal (funcall (first holder)) (list i :compiled))))))))
+
 ;;; GLOBALIZE fills its table of copies in the global heap.  A vector
 ;;; the table outgrows is garbage that a conservative root can retain,
 ;;; so no entry may refer to the heap being copied from.
