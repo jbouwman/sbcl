@@ -439,7 +439,8 @@
                 (debug-fun (breakpoint-kind obj)))))))
 
 (defmacro with-weak-cache ((temp global) &body body)
-  `(let ((,temp (or ,global
+  `(sb-kernel::with-global-heap
+    (let ((,temp (or ,global
                     (let ((new
                            (sb-vm:without-arena
                                (make-hash-table :test 'eq
@@ -451,7 +452,7 @@
                       ;; global var points to it.
                       (sb-thread:barrier (:write))
                       (or (cas ,global nil new) new)))))
-     ,@body))
+     ,@body)))
 
 (defstruct (compiled-debug-fun
             (:include debug-fun)
@@ -885,7 +886,19 @@
 ;;; frame we want, and the current frame contains the pc at which we
 ;;; will continue executing upon returning to that previous frame.
 
+;;; This file conses in the system TLAB, which under a local heap is the
+;;; global heap, while what it reaches through full calls -- the escaped
+;;; context's alien, the vectors its caches grow -- comes from the caller's
+;;; heap.  A frame walked from a local heap was a global object pointing into
+;;; it, and a cache growing from one was refused.  Frames, the debug caches
+;;; and the lazily parsed debug blocks, vars and lambda lists are therefore
+;;; built in the global heap.
 (defun compute-calling-frame (caller ra up-frame &optional savedp)
+  (declare (type system-area-pointer caller ra))
+  (sb-kernel::with-global-heap
+    (%compute-calling-frame caller ra up-frame savedp)))
+
+(defun %compute-calling-frame (caller ra up-frame savedp)
   (declare (type system-area-pointer caller ra))
   (when (control-stack-pointer-valid-p caller)
     ;; First check for an escaped frame.
@@ -1607,6 +1620,10 @@
 ;;; Return a SIMPLE-VECTOR of DEBUG-BLOCKs or NIL. NIL indicates there
 ;;; was no basic block information.
 (defun parse-debug-blocks (debug-fun)
+  (the (or simple-vector null)
+       (sb-kernel::with-global-heap (%parse-debug-blocks debug-fun))))
+
+(defun %parse-debug-blocks (debug-fun)
   (etypecase debug-fun
     (compiled-debug-fun
      (let ((parsed (parse-compiled-debug-blocks debug-fun)))
@@ -1727,6 +1744,10 @@
 ;;;
 ;;; This is written by SB-C::DUMP-1-VAR
 (defun parse-compiled-debug-vars (debug-fun)
+  (the (or simple-vector null)
+       (sb-kernel::with-global-heap (%parse-compiled-debug-vars debug-fun))))
+
+(defun %parse-compiled-debug-vars (debug-fun)
   (let* ((cdebug-fun (compiled-debug-fun-compiler-debug-fun
                       debug-fun))
          (packed-vars (sb-c::compiled-debug-fun-vars cdebug-fun))
@@ -1735,10 +1756,10 @@
          (args-minimal (eq (sb-c::compiled-debug-fun-arguments cdebug-fun)
                            :minimal)))
     (unless packed-vars
-      (return-from parse-compiled-debug-vars nil))
+      (return-from %parse-compiled-debug-vars nil))
     (when (zerop (compact-vector-length packed-vars))
       ;; Return a simple-vector not whatever packed-vars may be.
-      (return-from parse-compiled-debug-vars '#()))
+      (return-from %parse-compiled-debug-vars '#()))
     (let ((i 0)
           (id 0)
           (len (length packed-vars))
@@ -1832,6 +1853,9 @@
 ;;; (VALUES NIL T) means there were no arguments, but (VALUES NIL NIL)
 ;;; means there was no argument information.
 (defun parse-compiled-debug-fun-lambda-list (debug-fun)
+  (sb-kernel::with-global-heap (%parse-compiled-debug-fun-lambda-list debug-fun)))
+
+(defun %parse-compiled-debug-fun-lambda-list (debug-fun)
   ;; This file could not be slammed if COERCE is inlined because it thinks :UNPARSED
   ;; (i.e. not a sequence) can be returned as the DEBUG-VARS. But it can't, and a running
   ;; image was able to recompile the function with no decl and no warning. What's up with that?
@@ -2029,6 +2053,10 @@
 ;;; the end of the function. We have to check for the last block being
 ;;; code first in order to see how to compare the code-location's pc.
 (defun compute-compiled-code-location-debug-block (basic-code-location)
+  (sb-kernel::with-global-heap
+    (%compute-compiled-code-location-debug-block basic-code-location)))
+
+(defun %compute-compiled-code-location-debug-block (basic-code-location)
   (let* ((pc (compiled-code-location-pc basic-code-location))
          (debug-fun (code-location-debug-fun
                           basic-code-location))
@@ -2210,6 +2238,10 @@
 ;;; NO-DEBUG-BLOCKS condition due to DEBUG-FUN-DEBUG-BLOCKS, and
 ;;; it assumes the %UNKNOWN-P slot is already set or going to be set.
 (defun fill-in-code-location (code-location)
+  (declare (type compiled-code-location code-location))
+  (sb-kernel::with-global-heap (%fill-in-code-location code-location)))
+
+(defun %fill-in-code-location (code-location)
   (declare (type compiled-code-location code-location))
   (let* ((debug-fun (code-location-debug-fun code-location))
          (blocks (debug-fun-debug-blocks debug-fun))

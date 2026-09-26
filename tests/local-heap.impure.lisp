@@ -615,6 +615,82 @@ drained."
   (gc :full t)
   (assert (typep (checked-allocator-probe) 'checked-allocator-probe)))
 
+;;; The format parsers that run at interpretation time cons in the system
+;;; TLAB; a result mixing those global conses with the caller's SUBSEQs and
+;;; directives would point the global heap into the local one.
+(with-test (:name (:local-heap :checked :format-parsers-build-globally))
+  (with-test-heap (heap :check-stores :error)
+    ;; A condition report's control is a global FMT-CONTROL whose parse is
+    ;; memoized into it on first use: take the type error's and forget its
+    ;; parse, so the first use is made from the local heap.
+    (let ((control (find-if (lambda (x)
+                              (and (typep x 'sb-format::fmt-control)
+                                   (search "~@<Value of ~S in ~_~A ~I~_is"
+                                           (sb-format::fmt-control-string x))))
+                            (sb-vm:list-allocated-objects
+                             :all :type sb-vm:funcallable-instance-widetag))))
+      (assert control)
+      (setf (sb-format::fmt-control-memo control) nil)
+      (with-heap (heap)
+        (format nil (copy-seq "~@<Value of ~S in ~_~A is ~_not a ~S.~:@>") 1 "x" 'y)
+        (format nil (copy-seq "~10<~A~;~A~>") "ab" "cd")
+        (format nil (copy-seq "~[zero~;one~:;many~]") 1)
+        (format nil control 'v "ctx" 1 'string)
+        nil))
+    ;; While the heap is alive, nothing global may point into it.
+    (assert (null (verify-all-heaps)))
+    ;; Whether a garbage escape shows there depends on what the collection
+    ;; finds reachable, so the parsers' results are checked directly: every
+    ;; cons, element and directive's control string is global.
+    (flet ((global-p (x) (or (sb-int:fixnump x) (zerop (sb-vm::object-owner x)))))
+      (with-heap (heap)
+        (let* ((string (copy-seq "~@<Value of ~S in ~_~A is ~_not a ~S.~:@>"))
+               (tokens (sb-format::tokenize-control-string string))
+               (insides (nth-value 2 (multiple-value-bind (segments first-semi close)
+                                         (sb-format::parse-format-justification (cdr tokens))
+                                       (sb-format::parse-format-logical-block
+                                        segments nil first-semi close nil string 0)))))
+          (dolist (list (list tokens insides))
+            (loop for cell on list
+                  for x = (car cell)
+                  do (assert (global-p cell))
+                     (assert (global-p x))
+                     (when (sb-format::format-directive-p x)
+                       (assert (global-p (sb-format::directive-string x))))))))))
+  (gc :full t))
+
+;;; A frame walk from a checked heap, over an interrupted frame, makes
+;;; global frames that refer only to global objects, and fills the debug
+;;; caches without a refused store.
+(defun frame-walk-probe (x) (length x))
+(declaim (notinline frame-walk-probe))
+
+(with-test (:name (:local-heap :checked :frame-walk-builds-globally))
+  (let ((frames 0) (bad 0) (refused nil))
+    (flet ((global-p (x) (or (null x) (sb-int:fixnump x)
+                             (zerop (sb-vm::object-owner x)))))
+      (with-test-heap (heap :check-stores :error)
+        (with-heap (heap)
+          (handler-case
+              (handler-bind
+                  ((type-error
+                     (lambda (c)
+                       (declare (ignore c))
+                       (sb-debug:map-backtrace
+                        (lambda (frame)
+                          (incf frames)
+                          (unless (and (global-p frame)
+                                       (or (not (sb-di::compiled-frame-p frame))
+                                           (global-p (sb-di::compiled-frame-escaped frame))))
+                            (incf bad)))))))
+                (frame-walk-probe (make-hash-table)))
+            (heap-store-error () (setf refused t))
+            (type-error () nil))
+          nil)))
+    (assert (plusp frames))
+    (assert (not refused))
+    (assert (zerop bad))))
+
 (defun strict-cached-package () (find-package "SB-FIBER"))
 (with-test (:name (:local-heap :strict :cold-package-cache))
   (with-test-heap (heap :check-stores :error :strict t)
