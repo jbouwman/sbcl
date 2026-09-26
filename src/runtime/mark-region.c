@@ -313,7 +313,13 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       return true;
     }
   }
-  if (!start->allow_free_pages) {;
+  /* With local heaps, free pages can also lie behind the start hint:
+   * see try_allocate_large. */
+  if (!start->allow_free_pages
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+      || start->page > 0
+#endif
+      ) {
     *start = (struct allocator_state){0, true};
     goto again;
   }
@@ -332,11 +338,11 @@ page_index_t try_allocate_large(uword_t nbytes,
   gc_assert(gen != SCRATCH_GENERATION);
   uword_t pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
-  page_index_t where = start->page;
+  page_index_t first = start->page, where = first;
   uword_t largest_hole_seen = 0;
   while (1) {
     page_index_t chunk_start = find_free_page(where, end);
-    if (chunk_start == -1) return -1;
+    if (chunk_start == -1) goto wrap;
     /* TODO: this is suboptimal - the full extent of the free space is irrelevant
      * as long as it's at _least_ pages_needed. So find_used_page is a poor choice
      * of algorithm for this. It's not wrong, though I've seen it say (via added
@@ -365,11 +371,20 @@ page_index_t try_allocate_large(uword_t nbytes,
       return chunk_start;
     }
     if (hole_size > largest_hole_seen) largest_hole_seen = hole_size;
-    if (chunk_end == end) {
-      *largest_hole = largest_hole_seen * GENCGC_PAGE_BYTES;
-      return -1;
-    }
+    if (chunk_end == end) goto wrap;
     where = chunk_end;
+    continue;
+  wrap:
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    /* A local heap gives its pages back without a global collection,
+     * so free pages can lie behind the start hint. */
+    if (first > 0) {
+      first = where = 0;
+      continue;
+    }
+#endif
+    *largest_hole = largest_hole_seen * GENCGC_PAGE_BYTES;
+    return -1;
   }
   /* Shouldn't end up here, really. */
   return -1;

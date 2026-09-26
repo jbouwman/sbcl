@@ -1293,3 +1293,42 @@ string, when the second starts in the last line of the first; else NIL."
                                          (return-from inner :inner))))
                         (churn (* 4 1024 1024))
                         :finished))))))))
+
+;;; A heap gives its pages back without a global collection, while the
+;;; global allocator searches for free pages from a start hint that only
+;;; a global collection resets.  Pages a heap released behind the hint
+;;; must still serve a global allocation.  The child's dynamic space is
+;;; small enough for global vectors to fill everything past the heap's
+;;; pages, and collections are inhibited so that nothing resets the hint.
+(with-test (:name (:local-heap :release-heap :pages-behind-the-allocation-hint))
+  (let ((script (format nil "/tmp/local-heap-hint-~D.lisp" (sb-unix:unix-getpid))))
+    (with-open-file (s script :direction :output :if-exists :supersede)
+      (write-string "
+(require :sb-fiber)
+(sb-ext:gc :full t)
+(let ((mb (* 1024 1024))
+      (keep (make-array 1000 :initial-element nil))
+      (h (sb-fiber:make-heap :gc-threshold 0))
+      (after nil))
+  (sb-sys:without-gcing
+    (sb-fiber:with-heap (h)
+      (setf (aref (make-array (* 32 mb) :element-type '(unsigned-byte 8)) 0) 1))
+    (handler-case
+        (dotimes (i (length keep))
+          (setf (svref keep i) (make-array (* 4 mb) :element-type '(unsigned-byte 8))))
+      (storage-condition () nil))
+    (sb-fiber:release-heap h)
+    (setf after (handler-case (make-array (* 16 mb) :element-type '(unsigned-byte 8))
+                  (storage-condition () nil))))
+  (sb-ext:exit :code (if after 0 3) :abort t))
+" s))
+    (unwind-protect
+         (let ((process (run-program sb-ext:*runtime-pathname*
+                                     (list "--core" sb-int:*core-string*
+                                           "--dynamic-space-size" "512MB"
+                                           "--noinform" "--no-sysinit" "--no-userinit"
+                                           "--disable-debugger" "--non-interactive"
+                                           "--load" script)
+                                     :output nil :error nil)))
+           (assert (zerop (process-exit-code process))))
+      (delete-file script))))
