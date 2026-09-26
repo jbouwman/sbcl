@@ -553,6 +553,7 @@ static _Thread_local lispobj *source_object;
 
 #ifdef LISP_FEATURE_SB_LOCAL_HEAPS
 static lispobj *find_object(uword_t address, uword_t start);
+static bool ph_exact_root_p(lispobj obj);
 int local_heap_debug;
 #endif
 static void mark(lispobj object, lispobj *where, enum source source_type) {
@@ -584,12 +585,11 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
       /* Every allocated process object is walked as a root of a global
        * collection, dead ones included, and a dead object may still
        * point at global memory that was freed and reused since.  Treat
-       * such edges as ambiguous: only mark an actual object start. */
+       * such edges as ambiguous: only mark an actual object start, or
+       * a function of allocated code. */
       if (target == 0 && source_object
           && local_heap_owner_of_native(source_object)) {
-        if (page_free_p(page)) return;
-        lispobj *found = find_object(object, DYNAMIC_SPACE_START);
-        if (found != native_pointer(object)) return;
+        if (page_free_p(page) || !ph_exact_root_p(object)) return;
       }
       if (local_heap_debug) {
         lispobj *np = native_pointer(object);
