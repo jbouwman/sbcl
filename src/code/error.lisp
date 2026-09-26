@@ -278,12 +278,18 @@ specification."
 #-sb-xc-host
 (labels
     ((atomic-acons (condition key val alist)
-       ;; Force new conses to the heap if instance is arena-allocated
+       ;; Force new conses to the heap if instance is arena-allocated.
+       ;; A condition in a local heap keeps its cells there: a global
+       ;; cell would hold the heap's values where its collector cannot
+       ;; see them.
        (cas (condition-assigned-slots condition)
             alist
-            (if (dynamic-space-obj-p condition)
-                (locally (declare (sb-c::tlab :system)) (acons key val alist))
-                (acons key val alist))))
+            (or #+sb-local-heaps
+                (dx-flet ((cell () (acons key val alist)))
+                  (values (call-with-heap-of condition #'cell)))
+                (if (dynamic-space-obj-p condition)
+                    (locally (declare (sb-c::tlab :system)) (acons key val alist))
+                    (acons key val alist)))))
      (initval (instance slot classoid operation)
        (let ((instance-length (%instance-length instance)))
          (do ((i (+ sb-vm:instance-data-start 1) (+ i 2)))

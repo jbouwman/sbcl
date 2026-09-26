@@ -897,6 +897,27 @@ drained."
       (setq *dangling-holder* nil)
       (release-heap heap))))
 
+;;; Reading a condition slot caches it on the condition's assigned-slots
+;;; list.  The cells belong with the condition: a global cell holding a
+;;; heap's value is one the heap's collector does not trace, and one the
+;;; global collector reaches into the heap from.
+(defun condition-cells-owned-by (condition owner)
+  (loop for tail on (sb-kernel::condition-assigned-slots condition)
+        always (and (= owner (sb-vm::object-owner tail))
+                    (= owner (sb-vm::object-owner (car tail))))))
+
+(with-test (:name (:local-heap :checked :condition-slot-cells-stay-local))
+  (with-test-heap (heap :check-stores :error)
+    (with-heap (heap)
+      (let* ((datum (list 1 2 3))
+             (c (make-condition 'type-error :datum datum :expected-type 'string))
+             (owner (sb-vm::object-owner c)))
+        (assert (/= 0 owner))
+        (assert (eq datum (type-error-datum c)))
+        (assert (eq 'string (without-heap (type-error-expected-type c))))
+        (assert (sb-kernel::condition-assigned-slots c))
+        (assert (condition-cells-owned-by c owner))))))
+
 ;;; GLOBALIZE fills its table of copies in the global heap.  A vector
 ;;; the table outgrows is garbage that a conservative root can retain,
 ;;; so no entry may refer to the heap being copied from.
