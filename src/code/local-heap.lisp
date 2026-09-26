@@ -67,6 +67,26 @@ immediate or lives in the global heap."
           (unwind-protect (funcall thunk)
             (%switch-local-heap prev))))))
 
+(define-alien-routine ("local_heap_from_id" %local-heap-from-id) unsigned-long
+  (id (unsigned 32)))
+
+;;; Call THUNK with the heap that owns OBJECT installed, and return its
+;;; value and T.  Return NIL and NIL without calling THUNK when OBJECT is
+;;; global or its heap is installed on another thread.
+(defun sb-kernel::call-with-heap-of (object thunk)
+  (declare (function thunk) (dynamic-extent thunk))
+  (let ((owner (object-owner object)))
+    (if (zerop owner)
+        (values nil nil)
+        (let ((heap (%local-heap-from-id owner))
+              (prev (current-local-heap-address)))
+          (cond ((zerop heap) (values nil nil))
+                ((= heap prev) (values (funcall thunk) t))
+                ((zerop (%switch-local-heap heap))
+                 (unwind-protect (values (funcall thunk) t)
+                   (%switch-local-heap prev)))
+                (t (values nil nil)))))))
+
 (define-alien-routine ("local_heap_collect" %local-heap-collect) int
   (heap system-area-pointer)
   (full int))
