@@ -843,3 +843,40 @@
       (assert (eq n seen-in-n))
       (release-fiber n)
       (release-fiber w))))
+
+;;; A fiber parked in the handler of an internal error keeps its interrupt
+;;; context: the context index is a special binding that travels with the
+;;; fiber's binding stack, and the contexts it indexes are saved with the
+;;; fiber rather than overwritten by another fiber's error on the thread.
+(defun fiber-context-probe (x) (length x))
+(declaim (notinline fiber-context-probe))
+
+(defun current-interrupt-context-address ()
+  (sb-sys:sap-int
+   (sb-alien:alien-sap
+    (sb-di::nth-interrupt-context (1- sb-di::*free-interrupt-context-index*)))))
+
+(with-test (:name (:fiber :interrupt-context :kept-across-switch))
+  (with-fiber-thread ()
+    (flet ((erring ()
+             (block erring
+               (handler-bind
+                   ((type-error
+                      (lambda (c)
+                        (declare (ignore c))
+                        (let ((before (current-interrupt-context-address)))
+                          (yield-fiber :parked)
+                          (return-from erring
+                            (list before (current-interrupt-context-address)))))))
+                 (fiber-context-probe (make-hash-table))))))
+      (let ((a (make-fiber #'erring :name "context a"))
+            (b (make-fiber #'erring :name "context b")))
+        (assert (eq :parked (resume-fiber a)))
+        (assert (eq :parked (resume-fiber b)))
+        (let ((ra (resume-fiber a))
+              (rb (resume-fiber b)))
+          (assert (= (first ra) (second ra)))
+          (assert (= (first rb) (second rb)))
+          (assert (/= (first ra) (first rb))))
+        (release-fiber a)
+        (release-fiber b)))))
