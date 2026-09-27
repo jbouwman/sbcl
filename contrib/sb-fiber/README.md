@@ -69,6 +69,15 @@ auto-return flow, which runs in C and can't use the VOP's exit.
 `extra_thread_data->fiber_list` enumerates every registered fiber on
 a thread: GC walks it.
 
+`extra_thread_data->fiber_list_lock` serialises changes to the list:
+registration, release, and `sb_fiber_migrate`, which takes the source
+and destination locks in address order, so a fiber can be migrated
+from any thread while its owner creates and releases fibers.  A local
+collection holds its own thread's lock while it scans the list.
+Holders are pseudo-atomic, or have the blockable signals blocked, so
+a holder is never stopped for GC or interrupted into another list
+operation; a global collection walks the lists without the lock.
+
 Suspended fibers marked runnable or new have their saved SP range
 `[ctx.sp .. stack_end)` and their callee-saved registers
 conservatively pinned.  On arm64 the separate Lisp control stack

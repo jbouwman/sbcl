@@ -840,9 +840,13 @@ static void ph_scan_thread_roots(struct thread *th, void *approx_sp)
 
 #ifdef LISP_FEATURE_SB_FIBER
     /* Suspended fibers on this thread may hold pointers into the heap
-     * (mark() ignores anything that isn't in the target heap). */
+     * (mark() ignores anything that isn't in the target heap).  Another
+     * thread may migrate a fiber off or onto the list meanwhile: hold its
+     * lock, which the collection's WITHOUT-GCING makes safe to hold. */
+    sb_fiber_list_lock(th);
     gc_scan_fiber_stacks(th);
     gc_scav_fiber_binding_stacks(th);
+    sb_fiber_list_unlock(th);
 #endif
 }
 
