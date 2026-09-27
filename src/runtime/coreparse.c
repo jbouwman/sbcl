@@ -1193,6 +1193,13 @@ void darwin_jit_code_pages_kludge () {
             }
         }
     }
+    /* Saved alien callbacks live here, outside the dynamic-space page
+     * table. They need the same post-protection touch as Lisp code:
+     * otherwise their first instruction can spuriously fault on Darwin
+     * even though the mapping is executable. */
+    for (volatile char* addr = (char*)STATIC_CODE_SPACE_START;
+         addr < (char*)static_code_space_free_pointer; addr += 4096)
+        addr[0] = addr[0];
     THREAD_JIT_WP(1);
 }
 #endif
@@ -1360,11 +1367,11 @@ void gc_load_corefile_ptes(core_entry_elt_t n_ptes,
     }
 
 #ifdef LISP_FEATURE_DARWIN_JIT
-    darwin_jit_code_pages_kludge();
     /* For some reason doing an early pthread_jit_write_protect_np sometimes fails.
        Which is weird, because it's done many times in arch_write_linkage_table_entry later.
        Adding the executable bit here avoids calling pthread_jit_write_protect_np */
     os_protect((os_vm_address_t)STATIC_CODE_SPACE_START, STATIC_CODE_SPACE_SIZE, OS_VM_PROT_ALL);
+    darwin_jit_code_pages_kludge();
 #endif
 }
 
