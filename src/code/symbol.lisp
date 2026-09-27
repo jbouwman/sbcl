@@ -432,6 +432,17 @@ distinct from the global value. Can also be SETF."
   (declare (sb-c::tlab :system))
   (do ((pl (symbol-plist symbol) (cddr pl)))
       ((endp pl)
+       ;; The new cells are global under a local heap, and their
+       ;; initializing stores are not barriered, so an INDICATOR or VALUE
+       ;; the installed heap owns would escape into the plist unchecked.
+       ;; Check them as the barrier checks a store into an existing cell.
+       #+sb-local-heaps
+       (let ((pc #+c-stack-is-control-stack (sap-int (%caller-pc))
+                 #-c-stack-is-control-stack (get-lisp-obj-address (%caller-pc))))
+         (when (sb-vm::locally-owned-p indicator)
+           (sb-vm::check-store symbol indicator pc))
+         (when (sb-vm::locally-owned-p value)
+           (sb-vm::check-store symbol value pc)))
        (setf (symbol-plist symbol)
              (list* indicator value (symbol-plist symbol)))
        value)

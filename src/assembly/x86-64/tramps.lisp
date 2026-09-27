@@ -240,11 +240,13 @@
 ;;; Store barrier slow path: (object, value) were pushed, value last.
 ;;; Unlike CHECK-BARRIER, the C function may call back into Lisp (to
 ;;; signal an error), so the floating-point registers are preserved
-;;; too, which also aligns the stack for the C call.
+;;; too, which also aligns the stack for the C call.  The third argument
+;;; is the return address into the storing code, which the runtime keeps
+;;; with a violation to name where the store was made.
 #+sb-local-heaps
 (define-assembly-routine (local-heap-store-check (:return-style :none)) ()
   (with-registers-preserved (c)
-    (call-c "local_heap_check_store" (ea 16 rbp-tn) (ea 24 rbp-tn)))
+    (call-c "local_heap_check_store" (ea 16 rbp-tn) (ea 24 rbp-tn) (ea 8 rbp-tn)))
   (inst ret 16))
 
 #+debug-gc-barriers

@@ -522,8 +522,9 @@ tells whether @var{object} is one.
 
 @deffn Function verify-heap &optional (heap (current-heap))
 Check every pointer held by @var{heap}'s objects.  Returns a list of
-@code{(source-object slot-address target-address)} for each pointer
-into another local heap or a freed page.
+@code{(source-object slot-address target-address origin store-pc)},
+as @code{take-heap-violations} describes, for each pointer into another
+local heap or a freed page.
 @end deffn
 
 @deffn Function verify-all-heaps
@@ -546,11 +547,29 @@ Remove and return the violations recorded since the last call, and as a
 second value the number noted, which is exact and may exceed the length
 of the list: a burst larger than the record keeps its first entries.
 
+Each violation is a list @code{(source-object slot-address
+target-address origin store-pc)}.  @var{origin} is @code{:collection}
+for a pointer a collection or verification found,
+@code{:recorded-store} for a store the barrier recorded and let proceed
+(@code{:check-stores :record}), and @code{:signaled-store} for a store
+it signaled @code{heap-store-error} for (@code{:check-stores :error}),
+which left the object unchanged unless a handler continued the store.
+For a store, @var{slot-address} is 0 and @var{store-pc} is the return
+address into the code that made it; for a collection @var{store-pc} is
+@code{nil}.
+
 Violations are noted from collections and from the store barrier on any
 thread, without a lock, so one noted between a @code{heap-violations}
 call and a @code{reset-heap-violations} call is lost.  This clears the
 record and copies it out in one step, and is what to use wherever
 violations are drained while other threads are running.
+@end deffn
+
+@deffn Function store-site pc
+The name of the function whose code contains @var{pc}, the
+@var{store-pc} of a store violation, or @code{nil} when no code object
+holds it.  The runtime keeps the address rather than the code object, so
+the answer is for whatever code holds @var{pc} when this is called.
 @end deffn
 
 @subsubsection Rules for code running in a local heap

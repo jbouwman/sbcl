@@ -190,6 +190,29 @@ success."
                       (ash thread-local-heap-check-slot word-shift))
         saved))
 
+(define-alien-routine ("local_heap_classify_store" %classify-store) int
+  (value unsigned)
+  (object unsigned)
+  (pc unsigned))
+
+;;; The store barrier's check, for a store of VALUE into OBJECT that the
+;;; compiler does not barrier: the initializing stores of an object
+;;; allocated in the system TLAB, which is global under a local heap, are
+;;; stores of VALUE into a global object that no barrier sees.  PC is the
+;;; return address to name as the storing site.  Records or signals
+;;; exactly as the barrier would; a handler that continues lets the store
+;;; proceed.
+(defun check-store (object value pc)
+  (declare (type word pc))
+  (unless (zerop (sap-int (current-thread-offset-sap thread-local-heap-check-slot)))
+    (let ((kind (with-pinned-objects (object value)
+                  (%classify-store (get-lisp-obj-address value)
+                                   (get-lisp-obj-address object)
+                                   pc))))
+      (unless (zerop kind)
+        (sb-kernel::heap-store-error object value kind))))
+  nil)
+
 ;;; Called from C (local_heap_check_store) for a store that violates
 ;;; the ownership rules.  Checking is suspended while the error is
 ;;; handled so that the handlers' own stores do not recurse into it.

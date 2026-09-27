@@ -458,17 +458,23 @@ void local_heap_exhausted(struct local_heap *h, sword_t nbytes)
     lose("LOCAL-HEAP-EXHAUSTED-ERROR fell through");
 }
 
-/* The store barrier's slow path: classify a pointer store of VALUE into
- * OBJECT against the ownership matrix.  Non-pointer values and stores
- * into stack or static objects are never violations; a store into a
- * global object is one only in strict mode. */
-void local_heap_check_store(lispobj value, lispobj object)
+/* Classify a pointer store of VALUE into OBJECT against the ownership
+ * matrix, and note it when it is a violation.  Non-pointer values and
+ * stores into stack or static objects are never violations; a store into
+ * a global object is one only in strict mode.  PC is the return address
+ * into the code that made the store, kept with the violation so that a
+ * reader of the record can name the storing function.  Returns the kind
+ * of violation when the store has to be signaled, else 0.
+ *
+ * This calls no Lisp, so Lisp may call it directly for a store the
+ * compiler does not barrier (see SB-VM::CHECK-STORE). */
+int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
 {
     struct thread *th = get_sb_vm_thread();
     struct local_heap *h = th->local_heap_check;
-    if (!h) return;
+    if (!h) return 0;
     /* Stack-allocated objects belong to the storing process. */
-    if (!is_lisp_pointer(object) || is_in_stack_space(object)) return;
+    if (!is_lisp_pointer(object) || is_in_stack_space(object)) return 0;
     uint32_t value_owner = local_heap_owner_of(value);
     uint32_t object_owner = local_heap_owner_of(object);
     int kind = 0;
@@ -476,13 +482,27 @@ void local_heap_check_store(lispobj value, lispobj object)
         kind = object_owner ? LOCAL_HEAP_STORE_CROSS_HEAP : LOCAL_HEAP_STORE_ESCAPE;
     else if (h->strict && !object_owner)
         kind = LOCAL_HEAP_STORE_GLOBAL;
-    if (!kind) return;
-    local_heap_note_violation(is_lisp_pointer(object) ? native_pointer(object) : NULL,
-                                NULL, value);
+    if (!kind) return 0;
+    int signaled = h->store_check == LOCAL_HEAP_STORES_SIGNALED;
+    local_heap_note_store_violation(native_pointer(object), value,
+                                    signaled
+                                    ? LOCAL_HEAP_STORE_SIGNALED_ORIGIN
+                                    : LOCAL_HEAP_STORE_RECORDED_ORIGIN,
+                                    pc);
     if (local_heap_debug)
-        fprintf(stderr, "ph store violation kind %d: object %p value %p\n",
-                kind, (void*)object, (void*)value);
-    if (h->store_check != LOCAL_HEAP_STORES_SIGNALED) return;
+        fprintf(stderr, "ph store violation kind %d: object %p value %p pc %p\n",
+                kind, (void*)object, (void*)value, (void*)pc);
+    return signaled ? kind : 0;
+}
+
+/* The store barrier's slow path, called from the local-heap-store-check
+ * assembly routine: classify the store, and signal HEAP-STORE-ERROR when
+ * the heap's mode says to. */
+void local_heap_check_store(lispobj value, lispobj object, uword_t pc)
+{
+    int kind = local_heap_classify_store(value, object, pc);
+    if (!kind) return;
+    struct thread *th = get_sb_vm_thread();
     /* The assembly routine enters pseudo-atomic before calling us. */
     if (get_pseudo_atomic_atomic(th)) {
         clear_pseudo_atomic_atomic(th);
@@ -503,18 +523,40 @@ uword_t local_heap_take_exhausted(void)
 
 /* --- Violation log (filled during tracing, possibly from GC threads) --- */
 
+/* Each entry is LOCAL_HEAP_VIOLATION_WORDS words: the source object (0
+ * when unknown), the slot address (0 for a store, whose slot the barrier
+ * is not given), the target, the origin (enum
+ * local_heap_violation_origin), and for a store the return address into
+ * the code that made it (0 for a collection). */
 #define MAX_VIOLATIONS 64
-static lispobj violations[MAX_VIOLATIONS][3];
+static lispobj violations[MAX_VIOLATIONS][LOCAL_HEAP_VIOLATION_WORDS];
 static int nviolations;
 
-void local_heap_note_violation(lispobj *source, lispobj *slot, lispobj target)
+static void note_violation(lispobj *source, lispobj *slot, lispobj target,
+                           int origin, uword_t pc)
 {
     int i = __atomic_fetch_add(&nviolations, 1, __ATOMIC_ACQ_REL);
     if (i < MAX_VIOLATIONS) {
         violations[i][0] = source ? compute_lispobj(source) : 0;
         violations[i][1] = (lispobj)slot;
         violations[i][2] = target;
+        violations[i][3] = (lispobj)origin;
+        violations[i][4] = (lispobj)pc;
     }
+}
+
+/* A pointer a collection or a verification found. */
+void local_heap_note_violation(lispobj *source, lispobj *slot, lispobj target)
+{
+    note_violation(source, slot, target, LOCAL_HEAP_FOUND_BY_COLLECTION, 0);
+}
+
+/* A store the barrier classified as a violation, made by the code
+ * returning to PC. */
+void local_heap_note_store_violation(lispobj *object, lispobj value,
+                                     int origin, uword_t pc)
+{
+    note_violation(object, NULL, value, origin, pc);
 }
 
 int local_heap_violation_count(void)
@@ -544,11 +586,9 @@ int local_heap_take_violations(lispobj *out, int capacity, int *ndetails)
     int n = __atomic_exchange_n(&nviolations, 0, __ATOMIC_ACQ_REL);
     int ncopy = n < capacity ? n : capacity;
     if (ncopy > MAX_VIOLATIONS) ncopy = MAX_VIOLATIONS;
-    for (int i = 0; i < ncopy; i++) {
-        out[3 * i]     = violations[i][0];
-        out[3 * i + 1] = violations[i][1];
-        out[3 * i + 2] = violations[i][2];
-    }
+    for (int i = 0; i < ncopy; i++)
+        for (int w = 0; w < LOCAL_HEAP_VIOLATION_WORDS; w++)
+            out[LOCAL_HEAP_VIOLATION_WORDS * i + w] = violations[i][w];
     *ndetails = ncopy;
     return n;
 }
@@ -556,9 +596,8 @@ int local_heap_take_violations(lispobj *out, int capacity, int *ndetails)
 int local_heap_get_violation(int i, lispobj *out)
 {
     if (i < 0 || i >= local_heap_violation_count()) return 0;
-    out[0] = violations[i][0];
-    out[1] = violations[i][1];
-    out[2] = violations[i][2];
+    for (int w = 0; w < LOCAL_HEAP_VIOLATION_WORDS; w++)
+        out[w] = violations[i][w];
     return 1;
 }
 

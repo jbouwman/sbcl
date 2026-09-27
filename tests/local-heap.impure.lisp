@@ -568,6 +568,118 @@ drained."
       (assert (null details))
       (assert (zerop total)))))
 
+;;; --- Where a violation came from ---
+
+;;; A store the barrier notes carries its origin -- recorded and let
+;;; proceed, or signaled -- and the return address into the storing code,
+;;; which STORE-SITE names.  A pointer a collection finds carries neither.
+
+(declaim (notinline store-into-sink))
+(defun store-into-sink (value)
+  (setf (car *violation-sink*) value)
+  nil)
+
+(defun only-violation ()
+  (multiple-value-bind (details total) (take-heap-violations)
+    (assert (= total 1) () "~D violations noted: ~S" total details)
+    (first details)))
+
+(with-test (:name (:local-heap :violations :recorded-store-names-its-site))
+  (reset-heap-violations)
+  (let ((h (make-heap :check-stores :record)))
+    (unwind-protect
+         (with-heap (h) (store-into-sink (list :escapee)))
+      (clear-violation-sink)
+      (release-heap h))
+    (destructuring-bind (source slot target origin pc) (only-violation)
+      (declare (ignore target))
+      (assert (eq source *violation-sink*))
+      (assert (zerop slot))
+      (assert (eq origin :recorded-store))
+      (assert (typep pc 'sb-ext:word))
+      (assert (eq (store-site pc) 'store-into-sink)))))
+
+(with-test (:name (:local-heap :violations :signaled-store-is-told-apart))
+  (reset-heap-violations)
+  (let ((h (make-heap :check-stores :error)))
+    (unwind-protect
+         (with-heap (h)
+           (assert (eq :refused
+                       (handler-case (store-into-sink (list :escapee))
+                         (heap-store-error () :refused)))))
+      (release-heap h))
+    (assert (eq (car *violation-sink*) :sink))
+    (destructuring-bind (source slot target origin pc) (only-violation)
+      (declare (ignore slot target))
+      (assert (eq source *violation-sink*))
+      (assert (eq origin :signaled-store))
+      (assert (eq (store-site pc) 'store-into-sink)))))
+
+(with-test (:name (:local-heap :violations :collection-has-no-store-site))
+  (reset-heap-violations)
+  (let ((h (make-heap :check-stores nil)))
+    (unwind-protect
+         (progn
+           ;; Unchecked, so nothing is noted until a collection finds it.
+           (with-heap (h) (store-into-sink (list :escapee)))
+           (let ((found (find *violation-sink* (verify-all-heaps) :key #'first)))
+             (clear-violation-sink)
+             (assert found)
+             (destructuring-bind (source slot target origin pc) found
+               (declare (ignore source target))
+               (assert (/= 0 slot))
+               (assert (eq origin :collection))
+               (assert (null pc)))))
+      (clear-violation-sink)
+      (release-heap h))
+    (reset-heap-violations)))
+
+;;; (SETF GET) conses a new plist cell in the system TLAB, which is global
+;;; under a local heap, and the cell's initializing stores are not
+;;; barriered.  A heap-owned value put on a global symbol's plist has to
+;;; be checked as a store into an existing cell is.
+
+(declaim (notinline put-into-plist))
+(defun put-into-plist (symbol value)
+  (setf (get symbol :local-heap-test) value)
+  nil)
+
+(with-test (:name (:local-heap :checked :plist-put-of-a-local-value-is-refused))
+  (reset-heap-violations)
+  (let ((symbol (make-symbol "PLIST-HOLDER"))
+        (h (make-heap :check-stores :error)))
+    (unwind-protect
+         (with-heap (h)
+           (assert (eq :escape
+                       (handler-case (progn (put-into-plist symbol (list :escapee))
+                                            :stored)
+                         (heap-store-error (c) (heap-store-error-kind c)))))
+           (assert (null (symbol-plist symbol)))
+           ;; A global value goes on the plist as before.
+           (put-into-plist symbol :global)
+           (assert (eq (get symbol :local-heap-test) :global)))
+      (release-heap h))
+    (destructuring-bind (source slot target origin pc) (only-violation)
+      (declare (ignore slot target))
+      (assert (eq source symbol))
+      (assert (eq origin :signaled-store))
+      (assert (eq (store-site pc) 'put-into-plist)))))
+
+(with-test (:name (:local-heap :checked :plist-put-of-a-local-value-is-recorded))
+  (reset-heap-violations)
+  (let ((symbol (make-symbol "PLIST-HOLDER"))
+        (h (make-heap :check-stores :record)))
+    (unwind-protect
+         (with-heap (h) (put-into-plist symbol (list :escapee)))
+      ;; The store went ahead; take it back before the heap is released.
+      (setf (symbol-plist symbol) nil)
+      (release-heap h))
+    (destructuring-bind (source slot target origin pc) (only-violation)
+      (declare (ignore slot target))
+      (assert (eq source symbol))
+      (assert (eq origin :recorded-store))
+      (assert (eq (store-site pc) 'put-into-plist)))))
+
 ;;; Generic dispatch may update global caches, but effective methods must
 ;;; retain the caller's heap on first calls and subsequent cache misses.
 (defgeneric strict-dispatch-owner (value))

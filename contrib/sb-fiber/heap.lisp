@@ -67,6 +67,9 @@
 ;;; fit and reports the number noted either way, so the two need not
 ;;; agree for the count to be exact.
 (defconstant +violation-detail-entries+ 64)
+
+;;; Words per entry in the runtime's record: LOCAL_HEAP_VIOLATION_WORDS.
+(defconstant +violation-words+ 5)
 (define-alien-routine ("local_heap_reset_violations" %heap-reset-violations) void)
 
 (define-alien-routine ("local_heap_seal" %heap-seal) int
@@ -753,27 +756,61 @@ is adopted into HEAP without copying."
 
 ;;; --- Verification ---
 
+;;; A violation as the runtime records it, decoded from the words at
+;;; INDEX in the alien word array WORDS: (SOURCE-OBJECT SLOT-ADDRESS
+;;; TARGET-ADDRESS ORIGIN STORE-PC).  ORIGIN is :COLLECTION for a pointer a
+;;; collection or verification found, :RECORDED-STORE for a store the
+;;; barrier recorded and let proceed, and :SIGNALED-STORE for one it
+;;; signaled HEAP-STORE-ERROR for, which refused the store unless a
+;;; handler continued it.  STORE-PC is the return address into the code
+;;; that made the store, or NIL for a collection; STORE-SITE names it.
+(declaim (inline %decode-violation))
+(defun %decode-violation (words index)
+  (flet ((word (n) (sb-alien:deref words (+ (* +violation-words+ index) n))))
+    (let ((source (word 0))
+          (pc (word 4)))
+      (list (if (zerop source) nil (sb-kernel:%make-lisp-obj source))
+            (word 1)
+            (word 2)
+            (case (word 3)
+              (0 :collection)
+              (1 :recorded-store)
+              (2 :signaled-store)
+              (t (word 3)))
+            (if (zerop pc) nil pc)))))
+
 (defun %collect-violations ()
   (let ((n (%heap-violation-count))
         (result '()))
-    (sb-alien:with-alien ((out (sb-alien:array sb-alien:unsigned-long 3)))
+    ;; The dimension is +VIOLATION-WORDS+; it has to be a literal, since
+    ;; the whole file is read as one form before any of it is evaluated.
+    (sb-alien:with-alien ((out (sb-alien:array sb-alien:unsigned-long 5)))
       (dotimes (i n)
         (sb-alien:alien-funcall
          (sb-alien:extern-alien "local_heap_get_violation"
                                 (function sb-alien:int sb-alien:int (* sb-alien:unsigned-long)))
          i (sb-alien:cast out (* sb-alien:unsigned-long)))
-        (let ((source (sb-alien:deref out 0)))
-          (push (list (if (zerop source) nil (sb-kernel:%make-lisp-obj source))
-                      (sb-alien:deref out 1)
-                      (sb-alien:deref out 2))
-                result))))
+        (push (%decode-violation out 0) result)))
     (nreverse result)))
+
+(defun store-site (pc)
+  "The name of the function whose code contains PC, the STORE-PC of a
+store violation, or NIL when no code object holds PC.  The runtime keeps
+the address rather than the code object, so the code can have been
+collected by the time this is asked; the name is that of whatever code
+holds PC then."
+  (let ((code (sb-di::code-header-from-pc pc)))
+    (when code
+      (let ((offset (- pc (sb-sys:sap-int (sb-kernel:code-instructions code)))))
+        (when (<= 0 offset)
+          (sb-di:debug-fun-name (sb-di::debug-fun-from-pc code offset nil)))))))
 
 (defun verify-heap (&optional (heap (current-heap)))
   "Check every pointer held by HEAP's objects against the ownership
-rules.  Returns a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS)
-for each pointer into another local heap or a freed page.  HEAP must
-be installed on the current thread."
+rules.  Returns a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS
+ORIGIN STORE-PC), as TAKE-HEAP-VIOLATIONS describes, for each pointer
+into another local heap or a freed page.  HEAP must be installed on the
+current thread."
   (unless heap
     (error 'no-current-heap-error :operation 'verify-heap))
   (%heap-reset-violations)
@@ -794,8 +831,9 @@ be installed on the current thread."
   enable)
 
 (defun heap-violations ()
-  "The ownership violations recorded by collections since the last
-reset, as a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS)."
+  "The ownership violations recorded by collections and the store
+barrier since the last reset, as a list of (SOURCE-OBJECT SLOT-ADDRESS
+TARGET-ADDRESS ORIGIN STORE-PC), as TAKE-HEAP-VIOLATIONS describes."
   (without-heap (%collect-violations)))
 
 (defun reset-heap-violations ()
@@ -804,9 +842,19 @@ reset, as a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS)."
 
 (defun take-heap-violations ()
   "Remove and return the ownership violations recorded since the last
-call: a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS), and as a
-second value the number noted, which is exact and may exceed the length
-of the list -- a burst larger than the record keeps its first entries.
+call: a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS ORIGIN
+STORE-PC), and as a second value the number noted, which is exact and may
+exceed the length of the list -- a burst larger than the record keeps its
+first entries.
+
+ORIGIN tells a pointer that exists from a store that was stopped:
+:COLLECTION for a pointer a collection or verification found,
+:RECORDED-STORE for a store the barrier recorded and let proceed under
+:CHECK-STORES :RECORD, and :SIGNALED-STORE for a store the barrier
+signaled HEAP-STORE-ERROR for under :CHECK-STORES :ERROR, which left the
+object as it was unless a handler chose CONTINUE.  For a store,
+SLOT-ADDRESS is 0 and STORE-PC is the return address into the code that
+made it, which STORE-SITE names; for a collection STORE-PC is NIL.
 
 Clearing the record and copying it out happen in one step.  Violations
 are noted from collections and from the store barrier on any thread,
@@ -818,10 +866,10 @@ threads are running."
   ;; finishes, so it must not allocate per call.  The runtime copies at
   ;; most as many entries as it is offered room for, and the count it
   ;; returns is exact whether or not they all fit.
-  ;; 192 words is +VIOLATION-DETAIL-ENTRIES+ entries of three; the array
-  ;; dimension has to be a literal, since the whole file is read as one
-  ;; form before any of it is evaluated.
-  (sb-alien:with-alien ((buffer (sb-alien:array sb-alien:unsigned-long 192))
+  ;; 320 words is +VIOLATION-DETAIL-ENTRIES+ entries of +VIOLATION-WORDS+;
+  ;; the array dimension has to be a literal, since the whole file is read
+  ;; as one form before any of it is evaluated.
+  (sb-alien:with-alien ((buffer (sb-alien:array sb-alien:unsigned-long 320))
                         (ndetails sb-alien:int 0))
     (let ((total (sb-alien:alien-funcall
                   (sb-alien:extern-alien
@@ -834,11 +882,7 @@ threads are running."
           (result '()))
       (without-heap
         (dotimes (i ndetails)
-          (let ((source (sb-alien:deref buffer (* 3 i))))
-            (push (list (if (zerop source) nil (sb-kernel:%make-lisp-obj source))
-                        (sb-alien:deref buffer (+ (* 3 i) 1))
-                        (sb-alien:deref buffer (+ (* 3 i) 2)))
-                  result)))
+          (push (%decode-violation buffer i) result))
         (values (nreverse result) total)))))
 
 (defun verify-all-heaps ()

@@ -204,9 +204,10 @@ void local_heap_exhausted(struct local_heap *h, sword_t nbytes)
 uword_t local_heap_take_exhausted(void);
 
 /* Store barrier slow path, called from the local-heap-store-check
- * assembly routine with the value being stored and the object stored
- * into. */
-void local_heap_check_store(lispobj value, lispobj object);
+ * assembly routine with the value being stored, the object stored into,
+ * and the return address into the code that made the store. */
+void local_heap_check_store(lispobj value, lispobj object, uword_t pc);
+int  local_heap_classify_store(lispobj value, lispobj object, uword_t pc);
 int  local_heap_switch_address(uword_t heap);
 uword_t local_heap_current_address(void);
 
@@ -235,9 +236,25 @@ void local_heaps_trace_roots(void);
 void local_heap_free_pages_locked(struct local_heap *h);
 void local_heap_materialize(struct local_heap *h);
 
+/* Where a violation in the record came from.  A store's origin is the
+ * store-check mode of the heap it was made under, so a recorded store
+ * went ahead and a signaled one was refused unless a handler continued
+ * it. */
+enum local_heap_violation_origin {
+    LOCAL_HEAP_FOUND_BY_COLLECTION = 0,
+    LOCAL_HEAP_STORE_RECORDED_ORIGIN = LOCAL_HEAP_STORES_RECORDED,
+    LOCAL_HEAP_STORE_SIGNALED_ORIGIN = LOCAL_HEAP_STORES_SIGNALED
+};
+
+/* Words per violation record entry: source, slot, target, origin, and
+ * for a store the return address into the code that made it. */
+#define LOCAL_HEAP_VIOLATION_WORDS 5
+
 /* Ownership verification. */
 int  local_heap_verify(struct local_heap *h);
 void local_heap_note_violation(lispobj *source, lispobj *slot, lispobj target);
+void local_heap_note_store_violation(lispobj *object, lispobj value,
+                                     int origin, uword_t pc);
 int  local_heap_violation_count(void);
 int  local_heap_violation_capacity(void);
 int  local_heap_get_violation(int i, lispobj *out);

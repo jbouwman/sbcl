@@ -117,6 +117,7 @@
    #:heap-violations
    #:reset-heap-violations
    #:take-heap-violations
+   #:store-site
    #:heap-reference-checking
    ;; Heap conditions
    #:heap-error
