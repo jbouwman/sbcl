@@ -139,6 +139,16 @@ int   sb_fiber_gc_regs(const struct sb_fiber_ctx *f, lispobj *out, int max);
 void gc_scan_fiber_stacks         (struct thread *th);
 void gc_scav_fiber_binding_stacks (struct thread *th);
 
+/* TH's fiber list lock.  Every change to a thread's fiber list, and every
+ * walk of it made while the world runs, holds it: registration, release,
+ * migration off or onto the thread, and a local collection's scan.  The
+ * holder must not be stoppable for GC or interruptible while it holds the
+ * lock -- pseudo-atomic, or with the blockable signals blocked -- since
+ * another thread may spin on it pseudo-atomic, and a global collection
+ * walks the lists without it once every thread has left pseudo-atomic. */
+void sb_fiber_list_lock  (struct thread *th);
+void sb_fiber_list_unlock(struct thread *th);
+
 /* Collection counts that decide when a suspended fiber's stack is zeroed
  * (arm64; see sb_fiber_lisp_stack_resume).  The global collector bumps
  * the first with the world stopped, a local collection the second. */
