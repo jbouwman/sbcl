@@ -705,7 +705,7 @@ calling @code{load-shared-object}.
 
 @anchor{Function sb-alien load-shared-object}
 @ffindex @sortas{load-shared-object sb-alien} load-shared-object [sb-alien]
-@deffn{Function} sb-alien:load-shared-object pathname &key dont-save
+@deffn{Function} sb-alien:load-shared-object pathname &key dont-save (if-loaded :reload)
 Load a shared library / dynamic shared object file / similar foreign
 container specified by designated @code{pathname}, such as a .so on an ELF platform.
 
@@ -721,6 +721,12 @@ definitions; if a symbol was previously referenced through the object and
 is not present in the reloaded version an error will be signalled. Reloading
 may not work as expected if user or library-code has called @code{dlopen(3)} on the
 same shared object or running on a system where @code{dlclose(3)} is a noop.
+
+With @code{if-loaded :keep}, an already loaded pathname is returned without
+reopening the object or changing its @code{dont-save} setting. The lookup
+and initial load are serialized, including concurrent calls for the same
+pathname. The default, @code{:reload}, retains the replacement behavior
+described above.
 
 @code{load-shared-object} interacts with @code{sb-ext:save-lisp-and-die}:
 
