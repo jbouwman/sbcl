@@ -10,6 +10,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v1
+    - name: Fetch upstream release tags for version generation
+      shell: bash
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - name: install host sbcl
       run: |
         sudo dpkg --add-architecture armhf
