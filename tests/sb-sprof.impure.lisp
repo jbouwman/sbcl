@@ -105,6 +105,7 @@
     by-tag))
 
 (with-test (:name (:sprof :sample-tag :accessors))
+  #+sb-thread
   (assert (eql 0 (sb-thread:join-thread
                   (sb-thread:make-thread (lambda () (sb-sprof:sample-tag))))))
   (let ((old (sb-sprof:sample-tag)))
