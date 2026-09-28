@@ -24,7 +24,9 @@ jobs:
         fetch-depth: 0
     - name: Fetch upstream release tags for version generation
       shell: bash
-      run: git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - uses: msys2/setup-msys2@v2
       with:
         install: mingw-w64-${{matrix.env}}-clang mingw-w64-${{matrix.env}}-toolchain make diffutils git libzstd-devel

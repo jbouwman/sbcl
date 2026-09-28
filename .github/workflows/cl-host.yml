@@ -15,7 +15,9 @@ jobs:
         fetch-depth: 0      
     - name: Fetch upstream release tags for version generation
       shell: bash
-      run: git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - uses: actions/cache@v4
       id: ecl-cache3
       with:
@@ -55,7 +57,9 @@ jobs:
         fetch-depth: 0
     - name: Fetch upstream release tags for version generation
       shell: bash
-      run: git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - name: Reset mtime
       uses: alerque/git-warp-time@latest
     - name: install host clisp
@@ -87,7 +91,9 @@ jobs:
         fetch-depth: 0
     - name: Fetch upstream release tags for version generation
       shell: bash
-      run: git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - name: Reset mtime
       uses: alerque/git-warp-time@latest
     - name: install host ccl
@@ -119,7 +125,9 @@ jobs:
         fetch-depth: 0
     - name: Fetch upstream release tags for version generation
       shell: bash
-      run: git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - name: Reset mtime
       uses: alerque/git-warp-time@latest
     - name: install host cmucl
@@ -157,7 +165,9 @@ jobs:
         fetch-depth: 0
     - name: Fetch upstream release tags for version generation
       shell: bash
-      run: git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - name: Reset mtime
       uses: alerque/git-warp-time@latest
     - name: install host sbcl

@@ -11,7 +11,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Fetch upstream release tags for version generation
-        run: git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        run: |
+          git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+          git checkout --detach
       - name: Install host SBCL
         run: brew install sbcl
       - name: Build the Epsilon runtime configuration
