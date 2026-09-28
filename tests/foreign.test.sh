@@ -260,6 +260,38 @@ EOF
 # convention.
 set +e
 
+# Keeping an object must preserve its native state, including when several
+# threads request it. The default reload tests below still exercise replacement.
+run_sbcl <<EOF
+  (define-alien-variable foo int)
+  (let ((path (truename "$TEST_FILESTEM-b.so")))
+    (assert (equal path (load-shared-object path :if-loaded :keep :dont-save t)))
+    (setf foo 71)
+    (load-shared-object path :if-loaded :keep)
+    (assert (= foo 71))
+    #+sb-thread
+    (mapc #'sb-thread:join-thread
+          (loop repeat 16 collect
+            (sb-thread:make-thread
+             (lambda ()
+               (dotimes (i 20)
+                 (load-shared-object path :if-loaded :keep))))))
+    (assert (= foo 71))
+    (assert (handler-case (progn (load-shared-object path :if-loaded :invalid) nil)
+              (type-error () t)))
+    (let ((object (find path sb-alien::*shared-objects*
+                        :key #'sb-alien::shared-object-pathname :test #'equal)))
+      (assert (sb-alien::shared-object-dont-save object))
+      ;; A failed explicit reload can leave a descriptor without a handle.
+      ;; Such an object still needs opening when :KEEP is requested.
+      (sb-alien::dlclose-or-lose object)
+      (assert (null (sb-alien::shared-object-handle object)))
+      (load-shared-object path :if-loaded :keep)
+      (assert (sb-alien::shared-object-handle object))))
+  (exit :code $EXIT_LISP_WIN)
+EOF
+check_status_maybe_lose "keep loaded object state" $?
+
 test_compile() {
     x="$1"
     run_sbcl <<EOF
