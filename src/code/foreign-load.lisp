@@ -88,7 +88,7 @@ will be signalled when the core is saved -- this is orthogonal from DONT-SAVE."
         #-win32
         (dlopen-or-lose obj)
         #+win32
-        (unless old
+        (unless (shared-object-handle obj)
           (dlopen-or-lose obj))
         (setf *shared-objects* (append (remove obj *shared-objects*)
                                        (list obj)))
