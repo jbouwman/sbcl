@@ -78,6 +78,15 @@
 
 ;;; Sample tags: the handler copies the thread's SAMPLE-TAG into each sample,
 ;;; and HARVEST-TRACES hands it back per stack.
+;;;
+;;; How often the profiling timer interrupts a spinning thread depends on the
+;;; platform and the machine's load: on the macOS x86-64 CI runner, four
+;;; 50 ms rounds at a 0.5 ms interval once yielded no sample under their tag.
+;;; So these tests repeat their workload in rounds, harvesting after each,
+;;; until the samples they assert on have arrived or *SAMPLING-BOUND* seconds
+;;; have passed. What they assert about the samples is unchanged.
+
+(defvar *sampling-bound* 30)
 
 (defun spin-tagged (seconds)
   (let ((end (+ (get-internal-real-time)
@@ -89,20 +98,50 @@
     x))
 (defun spin-tagged-a (seconds) (1+ (spin-tagged seconds))) ; not a tail call
 (defun spin-tagged-b (seconds) (1+ (spin-tagged seconds)))
+(defun spin-under-tag (tag function seconds)
+  (setf (sb-sprof:sample-tag) tag)
+  (funcall function seconds))
+(defun spin-tagged-alternately (seconds)
+  (setf (sb-sprof:sample-tag) 1)
+  (spin-tagged-a seconds)
+  (setf (sb-sprof:sample-tag) -2)
+  (spin-tagged-b seconds))
 (declaim (notinline spin-tagged spin-tagged-a spin-tagged-b))
 (compile 'spin-tagged)
 (compile 'spin-tagged-a)
 (compile 'spin-tagged-b)
+(compile 'spin-under-tag)
+(compile 'spin-tagged-alternately)
 
-(defun frames-by-tag ()
-  (let ((by-tag (make-hash-table)))
-    (sb-sprof:harvest-traces
-     (lambda (tag thread count frames)
-       (declare (ignore thread))
-       (assert (plusp count))
-       (dolist (frame frames)
-         (pushnew frame (gethash tag by-tag) :test #'equal))))
-    by-tag))
+(defun frames-by-tag (&optional (by-tag (make-hash-table)))
+  "Harvest the samples taken so far into BY-TAG, a table from each tag to the
+frames seen under it, and return it."
+  (sb-sprof:harvest-traces
+   (lambda (tag thread count frames)
+     (declare (ignore thread))
+     (assert (plusp count))
+     (dolist (frame frames)
+       (pushnew frame (gethash tag by-tag) :test #'equal))))
+  by-tag)
+
+(defun sample-in-rounds (by-tag enough-p min-rounds function &rest arguments)
+  "Apply FUNCTION to ARGUMENTS, then set the sample tag to 0 and harvest into
+BY-TAG, until MIN-ROUNDS rounds have run and ENOUGH-P is true of BY-TAG, or
+*SAMPLING-BOUND* seconds have passed. ENOUGH-P runs under tag 0, so its own
+frames are never among those a test asserts on."
+  (let ((deadline (+ (get-internal-real-time)
+                     (* *sampling-bound* internal-time-units-per-second))))
+    (loop for rounds from 1
+          do (apply function arguments)
+             (setf (sb-sprof:sample-tag) 0)
+             (frames-by-tag by-tag)
+          until (or (and (>= rounds min-rounds) (funcall enough-p by-tag))
+                    (> (get-internal-real-time) deadline))
+          finally (format *error-output* "~&;; ~D sampling round~:P~%" rounds))))
+(compile 'sample-in-rounds)
+
+(defun lambda-frame-p (frame)
+  (and (consp frame) (eq (first frame) 'lambda)))
 
 (with-test (:name (:sprof :sample-tag :accessors))
   #+sb-thread
@@ -124,15 +163,16 @@
   (sb-sprof:reset)
   (sb-sprof:start-profiling :sample-interval 0.0005 :max-samples 100000
                             :threads (list sb-thread:*current-thread*))
-  (unwind-protect
-       (dotimes (i 4)
-         (setf (sb-sprof:sample-tag) 1)
-         (spin-tagged-a 0.05)
-         (setf (sb-sprof:sample-tag) -2)
-         (spin-tagged-b 0.05))
-    (setf (sb-sprof:sample-tag) 0)
-    (sb-sprof:stop-profiling))
-  (let ((by-tag (frames-by-tag)))
+  (let ((by-tag (make-hash-table)))
+    (unwind-protect
+         (sample-in-rounds by-tag
+                           (lambda (by-tag)
+                             (and (member 'spin-tagged-a (gethash 1 by-tag))
+                                  (member 'spin-tagged-b (gethash -2 by-tag))))
+                           4 #'spin-tagged-alternately 0.05)
+      (setf (sb-sprof:sample-tag) 0)
+      (sb-sprof:stop-profiling))
+    (frames-by-tag by-tag)
     (assert (member 'spin-tagged-a (gethash 1 by-tag)))
     (assert (not (member 'spin-tagged-b (gethash 1 by-tag))))
     (assert (member 'spin-tagged-b (gethash -2 by-tag)))
@@ -145,17 +185,20 @@
   (sb-sprof:reset)
   (sb-sprof:start-profiling :sample-interval 0.0005 :max-samples 100000
                             :threads (list sb-thread:*current-thread*))
-  (unwind-protect
-       (progn
-         (setf (sb-sprof:sample-tag) 3)
-         (spin-tagged-a 0.1)
-         (let ((first (frames-by-tag)))
-           (assert (member 'spin-tagged-a (gethash 3 first))))
-         (setf (sb-sprof:sample-tag) 4)
-         (spin-tagged-b 0.1))
-    (setf (sb-sprof:sample-tag) 0)
-    (sb-sprof:stop-profiling))
-  (let ((second (frames-by-tag)))
+  (let ((first (make-hash-table))
+        (second (make-hash-table)))
+    (unwind-protect
+         (progn
+           (sample-in-rounds first
+                             (lambda (by-tag) (member 'spin-tagged-a (gethash 3 by-tag)))
+                             2 #'spin-under-tag 3 #'spin-tagged-a 0.05)
+           (assert (member 'spin-tagged-a (gethash 3 first)))
+           (sample-in-rounds second
+                             (lambda (by-tag) (member 'spin-tagged-b (gethash 4 by-tag)))
+                             2 #'spin-under-tag 4 #'spin-tagged-b 0.05))
+      (setf (sb-sprof:sample-tag) 0)
+      (sb-sprof:stop-profiling))
+    (frames-by-tag second)
     (assert (member 'spin-tagged-b (gethash 4 second)))
     (assert (not (member 'spin-tagged-a (gethash 4 second))))
     (assert (not (member 'spin-tagged-a (gethash 3 second))))))
@@ -170,25 +213,29 @@
         (named (funcall (compile nil '(lambda (k)
                                         (sb-int:named-lambda sprof-anonymous-closure (s)
                                           (+ k (spin-tagged s)))))
-                        2)))
+                        2))
+        (by-tag (make-hash-table)))
     (sb-sprof:reset)
     (sb-sprof:start-profiling :sample-interval 0.0005 :max-samples 100000
                               :threads (list sb-thread:*current-thread*))
     (unwind-protect
          (progn
-           (setf (sb-sprof:sample-tag) 5)
-           (funcall plain 0.1)
-           (setf (sb-sprof:sample-tag) 6)
-           (funcall named 0.1))
+           (sample-in-rounds by-tag
+                             (lambda (by-tag)
+                               (and (member 'spin-tagged (gethash 5 by-tag))
+                                    (find-if #'lambda-frame-p (gethash 5 by-tag))))
+                             2 #'spin-under-tag 5 plain 0.05)
+           (sample-in-rounds by-tag
+                             (lambda (by-tag)
+                               (member 'sprof-anonymous-closure (gethash 6 by-tag)))
+                             2 #'spin-under-tag 6 named 0.05))
       (setf (sb-sprof:sample-tag) 0)
       (sb-sprof:stop-profiling))
-    (let* ((by-tag (frames-by-tag))
-           (plain-frames (gethash 5 by-tag))
-           (named-frames (gethash 6 by-tag)))
+    (frames-by-tag by-tag)
+    (let ((plain-frames (gethash 5 by-tag))
+          (named-frames (gethash 6 by-tag)))
       (assert (member 'spin-tagged plain-frames))
-      (assert (find-if (lambda (frame)
-                         (and (consp frame) (eq (first frame) 'lambda)))
-                       plain-frames))
+      (assert (find-if #'lambda-frame-p plain-frames))
       (assert (member 'sprof-anonymous-closure named-frames))
       (assert (notany (lambda (frame)
                         (and (stringp frame) (search "Unknown fn" frame)))
