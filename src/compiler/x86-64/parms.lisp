@@ -106,7 +106,13 @@
     text-space-addr
     text-card-count
     text-card-marks
-    cpu-feature-bits)
+    cpu-feature-bits
+    ;; The store barrier ANDs a card index with this word, which the runtime
+    ;; sets from the size of the card table at startup, so no code depends on
+    ;; the heap size a core was saved with.
+    card-table-mask
+    ;; Keeps the number of trailer words even, which the alignment of NIL needs.
+    unused-trailer-word)
   #'equalp)
 (defconstant n-static-trailer-constants (length +static-space-trailer-constants+))
 
