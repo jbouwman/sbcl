@@ -561,11 +561,11 @@ struct link_writer {
 };
 
 static void link_add_run(struct link_writer *w, int space_id, uword_t space_offset,
-                         uword_t len, int source, sword_t data_page)
+                         uword_t len, int source, sword_t data_page, int flags)
 {
     if (w->n_runs) {
         struct corefrag_stored_run *prev = &w->runs[w->n_runs-1];
-        if (prev->space_id == space_id && prev->source == source
+        if (prev->space_id == space_id && prev->source == source && prev->flags == flags
             && (uword_t)(prev->space_offset + prev->len) == space_offset
             && prev->data_page + prev->len / (sword_t)os_vm_page_size == data_page) {
             prev->len += len;
@@ -583,6 +583,7 @@ static void link_add_run(struct link_writer *w, int space_id, uword_t space_offs
     run->len = len;
     run->source = source;
     run->data_page = data_page;
+    run->flags = flags;
 }
 
 /* The recorded run that holds the whole page at ADDR, or NULL. */
@@ -652,18 +653,20 @@ static void link_space(struct link_writer *w, int id, lispobj *start, lispobj *e
     dir->page_count = npages;
 
     uword_t page, batch_start = 0, batch_pages = 0;
+    int batch_flags = 0;
 #define FLUSH_BATCH() \
     if (batch_pages) { \
         sword_t data_page = write_bytes(w->file, (char*)start + batch_start * os_vm_page_size, \
                                         batch_pages * os_vm_page_size, w->core_start_pos, \
                                         COMPRESSION_LEVEL_NONE); \
         link_add_run(w, id, batch_start * os_vm_page_size, batch_pages * os_vm_page_size, \
-                     0, data_page); \
+                     0, data_page, batch_flags); \
         w->written += batch_pages; \
         batch_pages = 0; \
     }
     for (page = 0; page < npages; ++page) {
         char *addr = (char*)start + page * os_vm_page_size;
+        int flags = 0;
         if (id == DYNAMIC_CORE_SPACE_ID) {
             page_index_t index = find_page_index(addr);
             if (index >= 0 && !page_words_used(index)) { // free: loads as zeros
@@ -671,6 +674,7 @@ static void link_space(struct link_writer *w, int id, lispobj *start, lispobj *e
                 ++w->free;
                 continue;
             }
+            if (index >= 0 && is_code(page_table[index].type)) flags = COREFRAG_RUN_CODE;
         }
         struct corefrag_run *run = link_find_run(w, (uword_t)addr);
         if (run) {
@@ -680,12 +684,13 @@ static void link_space(struct link_writer *w, int id, lispobj *start, lispobj *e
                 sword_t data_page = (offset - corefrag_sources[run->source].core_start)
                     / os_vm_page_size - 1;
                 link_add_run(w, id, page * os_vm_page_size, os_vm_page_size,
-                             link_parent_number(w, run->source), data_page);
+                             link_parent_number(w, run->source), data_page, flags);
                 ++w->referenced;
                 continue;
             }
         }
-        if (!batch_pages) batch_start = page;
+        if (batch_pages && flags != batch_flags) FLUSH_BATCH();
+        if (!batch_pages) batch_start = page, batch_flags = flags;
         ++batch_pages;
     }
     FLUSH_BATCH();
@@ -762,8 +767,9 @@ static void save_link_core(FILE *file, char *filename, lispobj init_function,
     }
 
     write_lispobj(SPACE_RUNS_CORE_ENTRY_TYPE_CODE, file);
-    write_lispobj(4, file); // number of words in this core header entry
+    write_lispobj(5, file); // number of words in this core header entry
     write_lispobj(w.n_runs, file);
+    write_lispobj(COREFRAG_STORED_RUN_WORDS, file);
     write_lispobj(write_bytes(file, (char*)w.runs, w.n_runs * sizeof (struct corefrag_stored_run),
                               w.core_start_pos, COMPRESSION_LEVEL_NONE),
                   file);
