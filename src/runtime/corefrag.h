@@ -44,7 +44,11 @@ struct corefrag_stored_run {
     core_entry_elt_t len;               /* bytes */
     core_entry_elt_t source;
     core_entry_elt_t data_page;         /* as a directory entry's, relative to the source core */
+    core_entry_elt_t flags;
 };
+/* The run's pages hold code. On darwin-jit these are read into JIT memory,
+ * and the others can be mapped from the file. */
+#define COREFRAG_RUN_CODE 1
 #define COREFRAG_STORED_RUN_WORDS (sizeof (struct corefrag_stored_run)/sizeof (core_entry_elt_t))
 
 extern struct corefrag_source *corefrag_sources;
