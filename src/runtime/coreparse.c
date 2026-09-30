@@ -755,11 +755,17 @@ struct core_sources {
     int n_runs;
 };
 
+/* MAPPABLE says the bytes hold no code, in which case darwin-jit maps them from
+ * the file instead of reading them into JIT memory: gc_load_corefile_ptes marks
+ * only code pages executable, and prepare_pages remaps a page that later
+ * receives code. */
 static void load_space_bytes(int id, int fd, os_vm_offset_t file_pos,
-                             os_vm_address_t addr, os_vm_size_t len)
+                             os_vm_address_t addr, os_vm_size_t len,
+                             __attribute__((unused)) bool mappable)
 {
 #ifdef LISP_FEATURE_DARWIN_JIT
-    if (id == DYNAMIC_CORE_SPACE_ID || id == STATIC_CODE_CORE_SPACE_ID || id == READ_ONLY_CORE_SPACE_ID) {
+    if ((id == DYNAMIC_CORE_SPACE_ID && !mappable)
+        || id == STATIC_CODE_CORE_SPACE_ID || id == READ_ONLY_CORE_SPACE_ID) {
         load_core_bytes_jit(fd, file_pos, addr, len);
         return;
     }
@@ -785,7 +791,8 @@ static void load_space_runs(int id, os_vm_address_t addr, os_vm_size_t len,
         os_vm_offset_t file_pos = sources->core_start[run->source]
             + (1 + run->data_page) * os_vm_page_size;
         os_vm_address_t where = addr + run->space_offset;
-        load_space_bytes(id, sources->fd[run->source], file_pos, where, run->len);
+        load_space_bytes(id, sources->fd[run->source], file_pos, where, run->len,
+                         !(run->flags & COREFRAG_RUN_CODE));
         int recorded = sources->corefrag_source[run->source];
         if (recorded >= 0)
             corefrag_add_run((uword_t)where, run->len, recorded, file_pos);
@@ -927,7 +934,7 @@ process_directory(int count, struct ndir_entry *entry,
             } else if (compressed) {
                 inflate_core_bytes(fd, offset + file_offset, (os_vm_address_t)addr, len);
             } else {
-                load_space_bytes(id, fd, offset + file_offset, (os_vm_address_t)addr, len);
+                load_space_bytes(id, fd, offset + file_offset, (os_vm_address_t)addr, len, 0);
                 if (sources->corefrag_source[0] >= 0)
                     corefrag_add_run(addr, len, sources->corefrag_source[0],
                                      offset + file_offset);
@@ -1708,8 +1715,10 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
             read_parent_cores(ptr, remaining_len, &sources, file);
             break;
         case SPACE_RUNS_CORE_ENTRY_TYPE_CODE:
-            // elements = n-runs, data-page
-            read_space_runs(fd, file_offset + (ptr[1] + 1) * os_vm_page_size, ptr[0],
+            // elements = n-runs, words per run, data-page
+            if (remaining_len != 3 || ptr[1] != (core_entry_elt_t)COREFRAG_STORED_RUN_WORDS)
+                lose("core %s lists its runs in a form this runtime does not read", file);
+            read_space_runs(fd, file_offset + (ptr[2] + 1) * os_vm_page_size, ptr[0],
                             &sources);
             break;
         case DIRECTORY_CORE_ENTRY_TYPE_CODE:
