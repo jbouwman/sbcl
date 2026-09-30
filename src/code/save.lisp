@@ -244,8 +244,8 @@ sufficiently motivated to do lengthy fixes."
   (when (and callable-exports toplevel-supplied)
     (error ":TOPLEVEL cannot be supplied when there are callable exports."))
   (when link
-    #+(or win32 immobile-space (not mark-region-gc))
-    (error "This runtime can't save a link core.")
+    (unless (link-save-supported-p)
+      (error "This runtime can't save a link core."))
     (when executable
       (error ":LINK cannot be combined with :EXECUTABLE."))
     (when compression
@@ -333,6 +333,19 @@ sufficiently motivated to do lengthy fixes."
     (restore-fd-streams)
     (reinit nil)
     (error 'save-error)))
+
+(defun link-save-supported-p ()
+  "True when SAVE-LISP-AND-DIE :LINK T works in this runtime."
+  (/= 0 (extern-alien "corefrag_link_saves_supported" int)))
+
+(defun core-sources ()
+  "The core files this process loaded pages from: the files a link core it
+saves may take pages from."
+  (loop for i from 0
+        for path = (alien-funcall (extern-alien "corefrag_source_path"
+                                                (function c-string int))
+                                  i)
+        while path collect path))
 
 (defun tune-image-for-dump ()
   ;; C code will GC again (nonconservatively if pertinent), but the coalescing

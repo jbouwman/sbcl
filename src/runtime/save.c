@@ -543,7 +543,7 @@ void save_to_filehandle(FILE *file, char *filename, lispobj init_function,
     if (verbose) printf("done]\n");
 }
 
-#if !defined LISP_FEATURE_WIN32 && !defined LISP_FEATURE_IMMOBILE_SPACE && defined LISP_FEATURE_MARK_REGION_GC
+#if COREFRAG_LINK_SAVES
 /* A link save writes each page that differs from the page this process loaded
  * it from, and for the rest refers to the files it loaded them from. */
 struct link_writer {
@@ -1038,7 +1038,7 @@ char gc_coalesce_string_literals = 0;
  * which rewrites pages across the heap. */
 static void link_and_save(FILE *file, char *filename, int save_runtime_options)
 {
-#if defined LISP_FEATURE_WIN32 || defined LISP_FEATURE_IMMOBILE_SPACE || !defined LISP_FEATURE_MARK_REGION_GC
+#if !COREFRAG_LINK_SAVES
     (void)file; (void)filename; (void)save_runtime_options;
     lose("this runtime can't save a link core"); // SAVE-LISP-AND-DIE checks first
 #else
