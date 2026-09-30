@@ -14,6 +14,14 @@
 #include "core.h"
 #include "os.h"
 
+/* Whether this runtime can save a link core: see link_and_save in save.c. */
+#if defined LISP_FEATURE_MARK_REGION_GC && !defined LISP_FEATURE_IMMOBILE_SPACE \
+    && !defined LISP_FEATURE_WIN32
+#define COREFRAG_LINK_SAVES 1
+#else
+#define COREFRAG_LINK_SAVES 0
+#endif
+
 #define COREFRAG_ID_WORDS 2
 /* A link core refers to the files that hold its pages, not to the cores those
  * files were themselves saved against, so a chain of saves adds one file per
@@ -60,5 +68,7 @@ extern int corefrag_add_source(char *path, uword_t *id, os_vm_offset_t core_star
 extern void corefrag_add_run(uword_t addr, uword_t len, int source, os_vm_offset_t offset);
 extern int corefrag_read_core_id(int fd, os_vm_offset_t core_start, uword_t *id);
 extern void corefrag_new_id(uword_t *id);
+extern int corefrag_link_saves_supported;
+extern char *corefrag_source_path(int n);
 
 #endif

@@ -106,3 +106,13 @@ void corefrag_new_id(uword_t *id)
         id[1] = (uword_t)(uintptr_t)&got ^ (uword_t)clock();
     }
 }
+
+/* For Lisp, which decides with these whether to save a link core and which
+ * files the core it saves may depend on. */
+int corefrag_link_saves_supported = COREFRAG_LINK_SAVES;
+
+/* The path of the Nth core this process loaded pages from, or NULL. */
+char *corefrag_source_path(int n)
+{
+    return (n >= 0 && n < corefrag_n_sources) ? corefrag_sources[n].path : NULL;
+}
