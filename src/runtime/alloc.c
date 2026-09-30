@@ -273,6 +273,17 @@ DEFINE_LISP_ENTRYPOINT(alloc_list, 0, mixed, PAGE_TYPE_MIXED)
 
 #endif
 
+/* The region code is allocated from: the installed build heap's, which
+ * takes code too, or else the global one. */
+static struct alloc_region *code_alloc_region(__attribute__((unused)) struct thread *th)
+{
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    struct local_heap *h = thread_extra_data(th)->current_heap;
+    if (h && h->kind == LOCAL_HEAP_BUILD) return &h->code_alloc;
+#endif
+    return code_region;
+}
+
 lispobj alloc_code_object(unsigned total_words, unsigned boxed)
 {
     struct thread *th = get_sb_vm_thread();
@@ -288,7 +299,7 @@ lispobj alloc_code_object(unsigned total_words, unsigned boxed)
     __attribute__((unused)) int result = mutex_acquire(&code_allocator_lock);
     gc_assert(result);
     struct code *code =
-        (void*)lisp_alloc(nbytes >= LARGE_OBJECT_SIZE, code_region, nbytes, PAGE_TYPE_CODE, th);
+        (void*)lisp_alloc(nbytes >= LARGE_OBJECT_SIZE, code_alloc_region(th), nbytes, PAGE_TYPE_CODE, th);
     THREAD_JIT_WP(0);
     /* Write the header before releasing the lock, so that linear
     search for a code object allocated after this one skips the
@@ -328,7 +339,7 @@ NO_SANITIZE_MEMORY lispobj alloc_funinstance(sword_t nbytes)
     struct thread *th = get_sb_vm_thread();
     __attribute__((unused)) int result = mutex_acquire(&code_allocator_lock);
     gc_assert(result);
-    void* mem = lisp_alloc(0, code_region, nbytes, PAGE_TYPE_CODE, th);
+    void* mem = lisp_alloc(0, code_alloc_region(th), nbytes, PAGE_TYPE_CODE, th);
     result = mutex_release(&code_allocator_lock);
     gc_assert(result);
     memset(mem, 0, nbytes);

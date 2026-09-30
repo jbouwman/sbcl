@@ -115,6 +115,9 @@ struct extra_thread_data
     // The thread's own (global) user TLABs while a local heap is installed.
     struct alloc_region saved_mixed_tlab;
     struct alloc_region saved_cons_tlab;
+    // The thread's own system TLABs while a build heap is installed.
+    struct alloc_region saved_sys_mixed_tlab;
+    struct alloc_region saved_sys_cons_tlab;
     // State of this thread's local collections (struct ph_local_gc), or NULL.
     void *local_gc;
 #endif

@@ -436,10 +436,14 @@ static bool ph_claim_small(struct local_heap *h, sword_t nbytes,
     int want = h->nblocks / 2;
     if (want < need) want = need;
     if (want > PH_BLOCKS_PER_PAGE) want = PH_BLOCKS_PER_PAGE;
+    /* A build heap's pages become a fragment's pages, so it takes whole
+     * pages and leaves none partial for other heaps. */
+    bool build = h->kind == LOCAL_HEAP_BUILD;
+    if (build) want = PH_BLOCKS_PER_PAGE;
 
     block_index_t first;
     int count;
-    page_index_t p = ph_find_free_run(type, need, want, &first, &count);
+    page_index_t p = build ? -1 : ph_find_free_run(type, need, want, &first, &count);
     if (p != -1) {
         bool listed = ph_heap_on_page(h, p);
         ph_own_blocks(h, first, count);
@@ -453,7 +457,9 @@ static bool ph_claim_small(struct local_heap *h, sword_t nbytes,
 
     p = ph_find_free_page();
     if (p == -1) return false;
-    prepare_pages(1, p, p, 0, 0);
+    /* The page type matters only to code, which darwin-jit maps
+     * executable; everything a region covers is cleared by the caller. */
+    prepare_pages(1, p, p, type == PAGE_TYPE_CODE ? type : 0, 0);
     /* Process pages never carry OPEN_REGION_PAGE_FLAG: several heaps may
      * have regions open on one page. */
     set_page_type(page_table[p], type);
@@ -490,6 +496,19 @@ static page_index_t ph_claim_large(struct local_heap *h, sword_t nbytes,
     h->bytes_since_gc += nbytes;
     h->bytes_claimed += nbytes;
     return first;
+}
+
+/* Code pages are executable on darwin-jit, and writable only with the
+ * thread's JIT write protection off. */
+static void ph_clear(int page_type, void *start, uword_t nbytes)
+{
+    if (page_type == PAGE_TYPE_CODE) {
+        THREAD_JIT_WP(0);
+        memset(start, 0, nbytes);
+        THREAD_JIT_WP(1);
+    } else {
+        memset(start, 0, nbytes);
+    }
 }
 
 static void ph_request_collection(struct thread *th, struct local_heap *h)
@@ -535,13 +554,13 @@ lispobj *local_heap_alloc_slow(struct thread *th, struct local_heap *h,
         new_obj = page_address(p);
         set_allocation_bit_mark(new_obj);
         release_gc_page_table_lock();
-        memset(new_obj, 0, nbytes);
+        ph_clear(page_type, new_obj, nbytes);
     } else {
         if (!ph_claim_small(h, nbytes, region, page_type))
             gc_heap_exhausted_error_or_lose(0, nbytes);
         release_gc_page_table_lock();
         new_obj = region->start_addr;
-        memset(new_obj, 0, addr_diff(region->end_addr, new_obj));
+        ph_clear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
     }
     if (__builtin_expect(h->alloc_trap || h->alloc_trap_fired, 0))
         local_heap_alloc_trap(h);
@@ -619,6 +638,10 @@ void local_heaps_before_global_gc(void)
         if (ed->current_heap) {
             ensure_region_closed(&ed->saved_mixed_tlab, PAGE_TYPE_MIXED);
             ensure_region_closed(&ed->saved_cons_tlab, PAGE_TYPE_CONS);
+            if (ed->current_heap->kind == LOCAL_HEAP_BUILD) {
+                ensure_region_closed(&ed->saved_sys_mixed_tlab, PAGE_TYPE_MIXED);
+                ensure_region_closed(&ed->saved_sys_cons_tlab, PAGE_TYPE_CONS);
+            }
         }
     }
     for (uint32_t i = 0; i < local_heap_table_size; i++) {
@@ -627,7 +650,13 @@ void local_heaps_before_global_gc(void)
         if (!h->installed_on) {
             ensure_region_closed(&h->parked_mixed, PAGE_TYPE_MIXED);
             ensure_region_closed(&h->parked_cons, PAGE_TYPE_CONS);
+            if (h->kind == LOCAL_HEAP_BUILD) {
+                ensure_region_closed(&h->parked_sys_mixed, PAGE_TYPE_MIXED);
+                ensure_region_closed(&h->parked_sys_cons, PAGE_TYPE_CONS);
+            }
         }
+        if (h->kind == LOCAL_HEAP_BUILD)
+            ensure_region_closed(&h->code_alloc, PAGE_TYPE_CODE);
         local_heap_materialize(h);
     }
 }
@@ -1022,6 +1051,8 @@ int local_heap_collect_impl(struct local_heap *h, void *approx_sp, int full)
     struct thread *th = get_sb_vm_thread();
     if (h->state != LOCAL_HEAP_LIVE) return -2;
     if (h->installed_on != th) return -1;
+    /* A build heap keeps everything: its objects are the fragment. */
+    if (h->kind == LOCAL_HEAP_BUILD) return -3;
     if (gc_active_p) lose("local heap collection during a global collection");
     if (ph_local) lose("nested local heap collection");
 

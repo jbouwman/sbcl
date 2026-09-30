@@ -166,6 +166,12 @@
                 allocate-code-object))
 
 (defun update-dynamic-space-code-tree (obj)
+  ;; Code a build heap owns is never moved or freed by a global
+  ;; collection, and pc lookups find it by scanning its fresh lines.  Its
+  ;; nodes would be allocated in that heap and reached from this global.
+  #+sb-local-heaps
+  (when (locally-owned-p obj)
+    (return-from update-dynamic-space-code-tree))
   (with-pinned-objects (obj)
     (let ((addr (logandc2 (get-lisp-obj-address obj) lowtag-mask))
           (tree *dynspace-codeblob-tree*))
