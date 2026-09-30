@@ -180,15 +180,16 @@
 ;;; Maintaining the direct subclasses backpointers. The update methods are
 ;;; here, the values are read by an automatically generated reader method.
 (defmethod add-direct-subclass ((class class) (subclass class))
-  (with-slots (direct-subclasses) class
-    (with-world-lock ()
-      (pushnew subclass direct-subclasses :test #'eq)
-      (let ((layout (class-wrapper subclass)))
-        (when layout
-          (let ((classoid (layout-classoid layout)))
-            (dovector (super-layout (layout-inherits layout))
-              (sb-kernel::add-subclassoid (layout-classoid super-layout)
-                                          classoid layout))))))
+  (sb-kernel::with-fragment-record (:add-direct-subclass class class subclass)
+    (with-slots (direct-subclasses) class
+      (with-world-lock ()
+        (pushnew subclass direct-subclasses :test #'eq)
+        (let ((layout (class-wrapper subclass)))
+          (when layout
+            (let ((classoid (layout-classoid layout)))
+              (dovector (super-layout (layout-inherits layout))
+                (sb-kernel::add-subclassoid (layout-classoid super-layout)
+                                            classoid layout)))))))
     subclass))
 (defmethod remove-direct-subclass ((class class) (subclass class))
   (with-slots (direct-subclasses) class
@@ -224,8 +225,9 @@
 (defmethod add-direct-method :around ((specializer specializer) (method method))
   ;; All the actions done under this lock are done in an order
   ;; that is safe to unwind at any point.
-  (sb-thread::with-recursive-system-lock (*specializer-lock*)
-    (call-next-method)))
+  (sb-kernel::with-fragment-record (:add-direct-method specializer specializer method)
+    (sb-thread::with-recursive-system-lock (*specializer-lock*)
+      (call-next-method))))
 
 (defmethod remove-direct-method :around ((specializer specializer) (method method))
   ;; All the actions done under this lock are done in an order

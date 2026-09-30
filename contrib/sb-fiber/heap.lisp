@@ -527,6 +527,57 @@ HEAP's objects are traced and swept; other threads keep running."
       (-3 (error "~S is a build heap, which is never collected" heap))
       (t (error "unexpected return code ~D collecting heap" rc)))))
 
+;;; --- Building core fragments ---
+
+(defun make-fragment-recorder (heap)
+  "Make the recorder of a core fragment built in HEAP, a build heap.  Loading
+a module with HEAP installed and the recorder bound (WITH-FRAGMENT-RECORDER)
+notes as records the effects its definitions have on global objects outside
+the fragment, and accounts for every store that makes a global object refer
+into HEAP: to a record, to a cache, or as unaccounted.  The recorder is
+allocated in HEAP."
+  (declare (type heap heap))
+  (unless (eq (heap-kind heap) :build)
+    (error "~S is not a build heap" heap))
+  (with-heap (heap) (sb-vm::make-fragment-recorder)))
+
+(defmacro with-fragment-recorder ((recorder) &body body)
+  "Execute BODY with RECORDER noting records and accounting for escapes, for
+whatever BODY does while RECORDER's heap is installed."
+  `(let ((sb-kernel::*fragment-recorder* ,recorder))
+     ,@body))
+
+(defmacro with-fragment-record ((kind target &rest args) &body body)
+  "Execute BODY as a registration's effect on TARGET, a global object.
+While a fragment is being built and TARGET is not the fragment's, the
+effect is noted as a record of KIND with ARGS, and the stores BODY makes
+into global objects are accounted to it.  A KIND of :CALL names, as the
+first of ARGS, a function that activating the fragment calls with the
+rest; :PUT records storing the second of ARGS under the first in TARGET,
+a hash table.  Outside a build, BODY runs as it is."
+  `(sb-kernel::with-fragment-record (,kind ,target ,@args) ,@body))
+
+(defun fragment-records (recorder)
+  "The records RECORDER noted, oldest first."
+  (reverse (sb-vm::fragment-recorder-records recorder)))
+
+(defun fragment-record-kind (record) (sb-vm::fragment-record-kind record))
+(defun fragment-record-target (record) (sb-vm::fragment-record-target record))
+(defun fragment-record-args (record) (sb-vm::fragment-record-args record))
+(defun fragment-record-escapes (record)
+  "The number of escapes RECORD accounts for."
+  (sb-vm::fragment-record-escapes record))
+
+(defun fragment-unaccounted-escapes (recorder)
+  "The escapes no record or cache accounts for, oldest first, as lists
+(OBJECT VALUE STORE-PC): a global OBJECT made to refer to VALUE, of the
+fragment, by the code STORE-SITE names for STORE-PC."
+  (reverse (sb-vm::fragment-recorder-unaccounted recorder)))
+
+(defun fragment-cache-escapes (recorder)
+  "The number of escapes RECORDER accounted to caches."
+  (sb-vm::fragment-recorder-cache-escapes recorder))
+
 ;;; --- Copying objects between heaps ---
 
 (defun local-gc-concurrency-peak ()

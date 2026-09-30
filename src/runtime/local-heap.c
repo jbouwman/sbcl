@@ -499,6 +499,16 @@ void local_heap_exhausted(struct local_heap *h, sword_t nbytes)
  *
  * This calls no Lisp, so Lisp may call it directly for a store the
  * compiler does not barrier (see SB-VM::CHECK-STORE). */
+/* The return address of the most recent store this thread classified as a
+ * violation, for Lisp code handling it: the store barrier calls Lisp with
+ * the object and value only. */
+static _Thread_local uword_t last_store_pc;
+
+uword_t local_heap_last_store_pc(void)
+{
+    return last_store_pc;
+}
+
 int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
 {
     struct thread *th = get_sb_vm_thread();
@@ -514,6 +524,7 @@ int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
     else if (h->strict && !object_owner)
         kind = LOCAL_HEAP_STORE_GLOBAL;
     if (!kind) return 0;
+    last_store_pc = pc;
     int signaled = h->store_check == LOCAL_HEAP_STORES_SIGNALED;
     local_heap_note_store_violation(native_pointer(object), value,
                                     signaled
