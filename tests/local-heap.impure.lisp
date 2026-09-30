@@ -888,6 +888,21 @@ drained."
                       (sb-ext:timeout () :timed-out)))))
       (sb-ext:unschedule-timer timer))))
 
+;;; SIGCHLD can arrive on a thread with a strict heap installed, and a status
+;;; read can be made from inside one; the process list both update is global.
+(with-test (:name (:local-heap :strict :child-status-changes) :skipped-on :win32)
+  (let ((process (sb-ext:run-program "/bin/sh" '("-c" "exit 7") :wait nil)))
+    (with-test-heap (heap :check-stores :error :strict t)
+      (with-heap (heap)
+        (sb-unix:pthread-kill (sb-thread::thread-os-thread sb-thread:*current-thread*)
+                              sb-unix:sigchld)
+        (loop repeat 500
+              until (eq :exited (sb-ext:process-status process))
+              do (sleep 0.01))))
+    (assert (eq :exited (sb-ext:process-status process)))
+    (assert (eql 7 (sb-ext:process-exit-code process)))
+    (sb-ext:process-close process)))
+
 ;;; A frame can still hold an object of a heap it has released. A global
 ;;; collection that finds that stale root must not trace the memory the
 ;;; release gave back.

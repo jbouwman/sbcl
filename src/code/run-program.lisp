@@ -351,7 +351,14 @@ should not be used."
             (sb-win32::win32-error 'process-close)))))
   process)
 
+;;; Called from the SIGCHLD handler as well as by the status readers.
 (defun get-processes-status-changes ()
+  ;; The process list and the processes on it are global; the signal can
+  ;; arrive on a thread with a local heap installed, which they do not
+  ;; belong to, and so can a status read.
+  (sb-kernel::with-global-heap (%get-processes-status-changes)))
+
+(defun %get-processes-status-changes ()
   (let (changed)
     (with-active-processes-lock ()
       (setf *active-processes*
