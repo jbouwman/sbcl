@@ -418,6 +418,7 @@ Please check that all strings which were not recognizable to the compiler
           sb-c::tab sb-c::scramble ; for perfecthash
           sb-c::make-transform ; cl-protobufs uses this
           sb-impl::%default-comma-constructor
+          sb-impl::link-save-supported-p sb-impl::core-sources ; for programs that keep link cores
           sb-kernel::%%make-random-state
           sb-kernel::with-global-heap ; for tests
           sb-lockless::+hash-nbits+ sb-lockless::%make-so-set-node ; for tests

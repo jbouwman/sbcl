@@ -13,8 +13,7 @@ monolithic=$TEST_FILESTEM-monolithic.core
 rm -f "$first" "$second" "$other" "$monolithic"
 
 run_sbcl <<EOF
-  (setq *features* (union *features* sb-impl:+internal-features+))
-  #-(and mark-region-gc (not immobile-space) (not win32)) (exit :code 2)
+  (unless (sb-impl::link-save-supported-p) (exit :code 2))
   (defvar *first* (loop for i below 100000 collect (format nil "first ~D" i)))
   (defun first-sum () (reduce #'+ *first* :key #'length))
   (save-lisp-and-die "$first" :link t)
@@ -45,6 +44,10 @@ run_sbcl_with_core "$second" --noinform --disable-debugger \
                             (loop for i below 100000 sum (length (format nil "first ~D" i))))))
   (assert (= (second-count) 50000))
   (assert (eq (second (gethash "k49999" *second*)) *first*))
+  ;; The process knows the files its pages came from.
+  (dolist (file (list "$first" "$second"))
+    (assert (member (native-namestring (truename file)) (sb-impl::core-sources)
+                    :test #'string=)))
   (setf (extern-alien "verify_gens" char) 0)
   (gc :full t)
   (assert (equal (first (gethash "k123" *second*)) 123))
