@@ -9,7 +9,7 @@ use_test_subdirectory
 
 tmpcore=$TEST_FILESTEM.core
 
-run_sbcl_with_args --dynamic-space-size 256MB --noinform --disable-debugger \
+run_sbcl_with_args --dynamic-space-size 512MB --noinform --disable-debugger \
     --no-userinit --no-sysinit --noprint <<EOF
   (setq *features* (union *features* sb-impl:+internal-features+))
   #-(and 64-bit soft-card-marks) (exit :code 2)
@@ -62,14 +62,14 @@ status=$?
 if [ "$status" -eq 2 ]; then
     exit $EXIT_TEST_WIN
 fi
-check_status_maybe_lose "saving core at 256MB" "$status" 0 "saved"
+check_status_maybe_lose "saving core at 512MB" "$status" 0 "saved"
 
-run_sbcl_with_core "$tmpcore" --dynamic-space-size 1GB --noinform \
+run_sbcl_with_core "$tmpcore" --dynamic-space-size 2GB --noinform \
     --disable-debugger --no-userinit --no-sysinit --noprint <<EOF
   #+(or x86-64 arm64) (assert (= (extern-alien "gc_card_table_mask" int) (expected-mask)))
-  (let ((aliased (check-stores 512)))
+  (let ((aliased (check-stores 768)))
     (declare (ignorable aliased))
-    ;; With the mask in memory the saving process sized its table for 256MB,
+    ;; With the mask in memory the saving process sized its table for 512MB,
     ;; so some of these cards alias under the mask it had.
     #+(or x86-64 arm64) (assert (plusp aliased)))
   (gc :full t)
@@ -77,7 +77,7 @@ run_sbcl_with_core "$tmpcore" --dynamic-space-size 1GB --noinform \
 EOF
 check_status_maybe_lose "stores at a larger heap" "$?" "$EXIT_LISP_WIN" "marked"
 
-run_sbcl_with_core "$tmpcore" --dynamic-space-size 128MB --noinform \
+run_sbcl_with_core "$tmpcore" --dynamic-space-size 256MB --noinform \
     --disable-debugger --no-userinit --no-sysinit --noprint <<EOF
   #+(or x86-64 arm64) (assert (= (extern-alien "gc_card_table_mask" int) (expected-mask)))
   (check-stores 32)
