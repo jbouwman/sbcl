@@ -69,7 +69,7 @@
 (defconstant +violation-detail-entries+ 64)
 
 ;;; Words per entry in the runtime's record: LOCAL_HEAP_VIOLATION_WORDS.
-(defconstant +violation-words+ 5)
+(defconstant +violation-words+ 6)
 (define-alien-routine ("local_heap_reset_violations" %heap-reset-violations) void)
 
 (define-alien-routine ("local_heap_seal" %heap-seal) int
@@ -758,12 +758,13 @@ is adopted into HEAP without copying."
 
 ;;; A violation as the runtime records it, decoded from the words at
 ;;; INDEX in the alien word array WORDS: (SOURCE-OBJECT SLOT-ADDRESS
-;;; TARGET-ADDRESS ORIGIN STORE-PC).  ORIGIN is :COLLECTION for a pointer a
-;;; collection or verification found, :RECORDED-STORE for a store the
-;;; barrier recorded and let proceed, and :SIGNALED-STORE for one it
+;;; TARGET-ADDRESS ORIGIN STORE-PC KIND).  ORIGIN is :COLLECTION for a
+;;; pointer a collection or verification found, :RECORDED-STORE for a store
+;;; the barrier recorded and let proceed, and :SIGNALED-STORE for one it
 ;;; signaled HEAP-STORE-ERROR for, which refused the store unless a
 ;;; handler continued it.  STORE-PC is the return address into the code
 ;;; that made the store, or NIL for a collection; STORE-SITE names it.
+;;; KIND is the store's HEAP-STORE-ERROR-KIND, or NIL for a collection.
 (declaim (inline %decode-violation))
 (defun %decode-violation (words index)
   (flet ((word (n) (sb-alien:deref words (+ (* +violation-words+ index) n))))
@@ -777,14 +778,20 @@ is adopted into HEAP without copying."
               (1 :recorded-store)
               (2 :signaled-store)
               (t (word 3)))
-            (if (zerop pc) nil pc)))))
+            (if (zerop pc) nil pc)
+            (case (word 5)
+              (0 nil)
+              (1 :escape)
+              (2 :cross-heap)
+              (3 :global)
+              (t (word 5)))))))
 
 (defun %collect-violations ()
   (let ((n (%heap-violation-count))
         (result '()))
     ;; The dimension is +VIOLATION-WORDS+; it has to be a literal, since
     ;; the whole file is read as one form before any of it is evaluated.
-    (sb-alien:with-alien ((out (sb-alien:array sb-alien:unsigned-long 5)))
+    (sb-alien:with-alien ((out (sb-alien:array sb-alien:unsigned-long 6)))
       (dotimes (i n)
         (sb-alien:alien-funcall
          (sb-alien:extern-alien "local_heap_get_violation"
@@ -808,7 +815,7 @@ holds PC then."
 (defun verify-heap (&optional (heap (current-heap)))
   "Check every pointer held by HEAP's objects against the ownership
 rules.  Returns a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS
-ORIGIN STORE-PC), as TAKE-HEAP-VIOLATIONS describes, for each pointer
+ORIGIN STORE-PC KIND), as TAKE-HEAP-VIOLATIONS describes, for each pointer
 into another local heap or a freed page.  HEAP must be installed on the
 current thread."
   (unless heap
@@ -833,7 +840,7 @@ current thread."
 (defun heap-violations ()
   "The ownership violations recorded by collections and the store
 barrier since the last reset, as a list of (SOURCE-OBJECT SLOT-ADDRESS
-TARGET-ADDRESS ORIGIN STORE-PC), as TAKE-HEAP-VIOLATIONS describes."
+TARGET-ADDRESS ORIGIN STORE-PC KIND), as TAKE-HEAP-VIOLATIONS describes."
   (without-heap (%collect-violations)))
 
 (defun reset-heap-violations ()
@@ -843,9 +850,9 @@ TARGET-ADDRESS ORIGIN STORE-PC), as TAKE-HEAP-VIOLATIONS describes."
 (defun take-heap-violations ()
   "Remove and return the ownership violations recorded since the last
 call: a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS ORIGIN
-STORE-PC), and as a second value the number noted, which is exact and may
-exceed the length of the list -- a burst larger than the record keeps its
-first entries.
+STORE-PC KIND), and as a second value the number noted, which is exact and
+may exceed the length of the list -- a burst larger than the record keeps
+its first entries.
 
 ORIGIN tells a pointer that exists from a store that was stopped:
 :COLLECTION for a pointer a collection or verification found,
@@ -855,6 +862,14 @@ signaled HEAP-STORE-ERROR for under :CHECK-STORES :ERROR, which left the
 object as it was unless a handler chose CONTINUE.  For a store,
 SLOT-ADDRESS is 0 and STORE-PC is the return address into the code that
 made it, which STORE-SITE names; for a collection STORE-PC is NIL.
+
+KIND is how the barrier classified a store, as HEAP-STORE-ERROR-KIND
+names it: :ESCAPE for a pointer into a local heap stored into a global
+object, :CROSS-HEAP for one stored into another heap's object, and
+:GLOBAL for a strict heap's store into a global object of a value that
+is not an escape.  It is NIL for a collection.  It is recorded at the
+store because it cannot be recovered after the fact: the heap that owned
+an escaped value may have been released by the time the record is read.
 
 Clearing the record and copying it out happen in one step.  Violations
 are noted from collections and from the store barrier on any thread,
@@ -866,10 +881,10 @@ threads are running."
   ;; finishes, so it must not allocate per call.  The runtime copies at
   ;; most as many entries as it is offered room for, and the count it
   ;; returns is exact whether or not they all fit.
-  ;; 320 words is +VIOLATION-DETAIL-ENTRIES+ entries of +VIOLATION-WORDS+;
+  ;; 384 words is +VIOLATION-DETAIL-ENTRIES+ entries of +VIOLATION-WORDS+;
   ;; the array dimension has to be a literal, since the whole file is read
   ;; as one form before any of it is evaluated.
-  (sb-alien:with-alien ((buffer (sb-alien:array sb-alien:unsigned-long 320))
+  (sb-alien:with-alien ((buffer (sb-alien:array sb-alien:unsigned-long 384))
                         (ndetails sb-alien:int 0))
     (let ((total (sb-alien:alien-funcall
                   (sb-alien:extern-alien

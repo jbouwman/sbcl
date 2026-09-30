@@ -488,7 +488,7 @@ int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
                                     signaled
                                     ? LOCAL_HEAP_STORE_SIGNALED_ORIGIN
                                     : LOCAL_HEAP_STORE_RECORDED_ORIGIN,
-                                    pc);
+                                    pc, kind);
     if (local_heap_debug)
         fprintf(stderr, "ph store violation kind %d: object %p value %p pc %p\n",
                 kind, (void*)object, (void*)value, (void*)pc);
@@ -526,14 +526,17 @@ uword_t local_heap_take_exhausted(void)
 /* Each entry is LOCAL_HEAP_VIOLATION_WORDS words: the source object (0
  * when unknown), the slot address (0 for a store, whose slot the barrier
  * is not given), the target, the origin (enum
- * local_heap_violation_origin), and for a store the return address into
- * the code that made it (0 for a collection). */
+ * local_heap_violation_origin), for a store the return address into the
+ * code that made it (0 for a collection), and for a store its kind (enum
+ * local_heap_store_kind; 0 for a collection).  The kind is kept because
+ * it cannot be recovered later: the heap that owned the target of an
+ * escape may be released before the record is read. */
 #define MAX_VIOLATIONS 64
 static lispobj violations[MAX_VIOLATIONS][LOCAL_HEAP_VIOLATION_WORDS];
 static int nviolations;
 
 static void note_violation(lispobj *source, lispobj *slot, lispobj target,
-                           int origin, uword_t pc)
+                           int origin, uword_t pc, int kind)
 {
     int i = __atomic_fetch_add(&nviolations, 1, __ATOMIC_ACQ_REL);
     if (i < MAX_VIOLATIONS) {
@@ -542,21 +545,23 @@ static void note_violation(lispobj *source, lispobj *slot, lispobj target,
         violations[i][2] = target;
         violations[i][3] = (lispobj)origin;
         violations[i][4] = (lispobj)pc;
+        violations[i][5] = (lispobj)kind;
     }
 }
 
 /* A pointer a collection or a verification found. */
 void local_heap_note_violation(lispobj *source, lispobj *slot, lispobj target)
 {
-    note_violation(source, slot, target, LOCAL_HEAP_FOUND_BY_COLLECTION, 0);
+    note_violation(source, slot, target, LOCAL_HEAP_FOUND_BY_COLLECTION, 0, 0);
 }
 
-/* A store the barrier classified as a violation, made by the code
- * returning to PC. */
+/* A store of KIND the barrier classified as a violation, made by the
+ * code returning to PC. */
 void local_heap_note_store_violation(lispobj *object, lispobj value,
-                                     int origin, uword_t pc)
+                                     int origin, uword_t pc,
+                                     enum local_heap_store_kind kind)
 {
-    note_violation(object, NULL, value, origin, pc);
+    note_violation(object, NULL, value, origin, pc, kind);
 }
 
 int local_heap_violation_count(void)

@@ -246,15 +246,17 @@ enum local_heap_violation_origin {
     LOCAL_HEAP_STORE_SIGNALED_ORIGIN = LOCAL_HEAP_STORES_SIGNALED
 };
 
-/* Words per violation record entry: source, slot, target, origin, and
- * for a store the return address into the code that made it. */
-#define LOCAL_HEAP_VIOLATION_WORDS 5
+/* Words per violation record entry: source, slot, target, origin, for a
+ * store the return address into the code that made it, and for a store
+ * its enum local_heap_store_kind. */
+#define LOCAL_HEAP_VIOLATION_WORDS 6
 
 /* Ownership verification. */
 int  local_heap_verify(struct local_heap *h);
 void local_heap_note_violation(lispobj *source, lispobj *slot, lispobj target);
 void local_heap_note_store_violation(lispobj *object, lispobj value,
-                                     int origin, uword_t pc);
+                                     int origin, uword_t pc,
+                                     enum local_heap_store_kind kind);
 int  local_heap_violation_count(void);
 int  local_heap_violation_capacity(void);
 int  local_heap_get_violation(int i, lispobj *out);
