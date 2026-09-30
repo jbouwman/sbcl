@@ -402,6 +402,8 @@
           ":SB-LOCAL-HEAPS requires :MARK-REGION-GC")
          ("(and sb-local-heaps (not sb-thread))"
           ":SB-LOCAL-HEAPS requires :SB-THREAD")
+         ("(and sb-local-heaps (not system-tlabs))"
+          ":SB-LOCAL-HEAPS requires :SYSTEM-TLABS")
          ("(and sb-local-heaps sb-safepoint)"
           ":SB-LOCAL-HEAPS and :SB-SAFEPOINT are incompatible")
          ("(and sb-local-heaps win32)"

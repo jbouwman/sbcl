@@ -1388,10 +1388,12 @@ lisp_alloc(__attribute__((unused)) int flags,
 #endif
 #ifdef LISP_FEATURE_SB_LOCAL_HEAPS
     /* User allocations while a local heap is installed claim that
-     * heap's pages. System allocations always go to the global heap. */
-    struct local_heap *local_heap =
-        (page_type != PAGE_TYPE_CODE && !(flags & SYSTEM_ALLOCATION_FLAG))
-        ? thread_extra_data(thread)->current_heap : NULL;
+     * heap's pages. System and code allocations go to the global heap,
+     * unless the heap is a build heap, which takes them all. */
+    struct local_heap *local_heap = thread_extra_data(thread)->current_heap;
+    if (local_heap && local_heap->kind != LOCAL_HEAP_BUILD
+        && (page_type == PAGE_TYPE_CODE || (flags & SYSTEM_ALLOCATION_FLAG)))
+        local_heap = NULL;
 #endif
 
     ++thread->slow_path_allocs;

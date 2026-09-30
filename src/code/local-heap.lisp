@@ -57,10 +57,22 @@ immediate or lives in the global heap."
     int
   (heap unsigned-long))
 
+(define-alien-routine ("local_heap_stat" %local-heap-stat) unsigned-long
+  (heap unsigned-long)
+  (which int))
+
+;;; LOCAL_HEAP_BUILD, and the stat that reads a heap's kind.
+(defconstant build-heap-kind 3)
+(defconstant heap-kind-stat 26)
+
+;;; A build heap takes what the global heap would otherwise get: its
+;;; objects are the fragment being built, which owns them whether or not
+;;; global objects refer to them.
 (defun sb-kernel::call-with-global-heap (thunk)
   (declare (function thunk) (dynamic-extent thunk))
   (let ((prev (current-local-heap-address)))
-    (if (zerop prev)
+    (if (or (zerop prev)
+            (= (%local-heap-stat prev heap-kind-stat) build-heap-kind))
         (funcall thunk)
         (progn
           (%switch-local-heap 0)
@@ -134,10 +146,6 @@ success."
 
 (define-alien-routine ("local_heap_take_alloc_trap" take-local-heap-allocation-trap)
     unsigned-long)
-
-(define-alien-routine ("local_heap_stat" %local-heap-stat) unsigned-long
-  (heap unsigned-long)
-  (which int))
 
 (defvar sb-kernel::*heap-allocation-trap-function* nil)
 (declaim (type (or function null) sb-kernel::*heap-allocation-trap-function*)

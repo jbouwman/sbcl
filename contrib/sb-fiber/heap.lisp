@@ -82,6 +82,7 @@
 
 (defconstant +heap-kind-process+ 1)
 (defconstant +heap-kind-fragment+ 2)
+(defconstant +heap-kind-build+ 3)
 
 (defconstant +stat-bytes-allocated+ 0)
 (defconstant +stat-bytes-live+ 1)
@@ -109,6 +110,7 @@
 (defconstant +stat-installed-on+ 12)
 (defconstant +stat-bytes-claimed+ 24)
 (defconstant +stat-alloc-trap+ 25)
+(defconstant +stat-kind+ 26)
 
 (defconstant +flag-record-stores+ 1)
 (defconstant +flag-signal-stores+ 2)
@@ -245,6 +247,7 @@ current thread. Restores the previous heap on exit."
        (call-with-heap ,heap #',thunk))))
 
 (defun make-heap (&key name
+                       (kind :process)
                        (gc-threshold *default-heap-gc-threshold*)
                        (hard-limit 0)
                        (fullsweep-after 16)
@@ -267,11 +270,20 @@ check.  STRICT additionally treats any store into a global object as a
 violation, so that a process can only mutate its own data.  Neither mode
 checks a store whose value the compiler knows to be global: a literal
 constant, or a value whose type admits only immediates, NIL, T and
-symbols of the initial core."
+symbols of the initial core.
+
+KIND :BUILD makes a heap for building a core fragment.  While installed
+it takes every allocation of its thread, including code, system
+allocations and WITH-GLOBAL-HEAP bodies; it claims whole pages and is
+never collected, so GC-THRESHOLD and FULLSWEEP-AFTER do not apply."
   (declare (type (integer 0) gc-threshold hard-limit fullsweep-after)
+           (type (member :process :build) kind)
            (type (member nil :record :error) check-stores))
   (without-heap
-    (let ((sap (%heap-create +heap-kind-process+ gc-threshold hard-limit
+    (let ((sap (%heap-create (ecase kind
+                               (:process +heap-kind-process+)
+                               (:build +heap-kind-build+))
+                             gc-threshold hard-limit
                              (%heap-flags check-stores strict))))
       (when (zerop (sb-sys:sap-int sap))
         (error "failed to allocate a local heap"))
@@ -286,9 +298,12 @@ symbols of the initial core."
 (defun release-heap (heap)
   "Return every page of HEAP to the global free pool, along with any
 queued messages.  Objects that were in HEAP must not be used afterwards.
-HEAP must not be installed on another thread."
+HEAP must not be installed on another thread.  A build heap cannot be
+released: global tables refer into it once it has been used."
   (declare (type heap heap))
   (unless (heap-released-p heap)
+    (when (eq (heap-kind heap) :build)
+      (error "~S is a build heap, which cannot be released" heap))
     (let ((sap (heap-sap heap)))
       (when (= (current-heap-address) (sb-sys:sap-int sap))
         (%switch-heap 0))
@@ -303,6 +318,15 @@ HEAP must not be installed on another thread."
               (heap-sap heap) (sb-sys:int-sap 0))
         (remhash (heap-id heap) *heaps*))))
   heap)
+
+(defun heap-kind (heap)
+  "The kind HEAP was made with: :PROCESS, :BUILD or :FRAGMENT."
+  (declare (type heap heap))
+  (let ((kind (%heap-stat (heap-sap-or-lose heap) +stat-kind+)))
+    (cond ((= kind +heap-kind-process+) :process)
+          ((= kind +heap-kind-build+) :build)
+          ((= kind +heap-kind-fragment+) :fragment)
+          (t (error "heap ~S has unknown kind ~D" heap kind)))))
 
 (defun %heap-from-id (id)
   (if (zerop id) nil (gethash id *heaps*)))
@@ -500,6 +524,7 @@ HEAP's objects are traced and swept; other threads keep running."
       (0 t)
       (-1 (error 'heap-not-current-error :heap heap))
       (-2 (error 'dead-heap-error :heap heap))
+      (-3 (error "~S is a build heap, which is never collected" heap))
       (t (error "unexpected return code ~D collecting heap" rc)))))
 
 ;;; --- Copying objects between heaps ---
