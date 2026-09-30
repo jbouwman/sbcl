@@ -979,6 +979,41 @@ NOTE: This interface is experimental and subject to change."
   #-(and sb-local-heaps (not sb-xc-host))
   `(progn ,@body))
 
+;;; The recorder of the core fragment being built on this thread, or NIL.
+;;; See CALL-WITH-FRAGMENT-RECORD.
+(defvar sb-kernel::*fragment-recorder* nil)
+(declaim (always-bound sb-kernel::*fragment-recorder*))
+
+;;; Run BODY as a definer's effect on TARGET, a global object outside the
+;;; fragment being built: while a fragment is being built, the effect is
+;;; noted as a record of KIND with ARGS, from which activating the
+;;; fragment replays it, and every store BODY makes into a global object
+;;; is accounted to that record.  A no-op unless a fragment is being
+;;; built, when TARGET belongs to the fragment, and inside another record.
+(defmacro sb-kernel::with-fragment-record ((kind target &rest args) &body body)
+  #+(and sb-local-heaps (not sb-xc-host))
+  (with-unique-names (thunk arglist)
+    `(dx-flet ((,thunk () ,@body)
+               (,arglist () (list ,@args)))
+       (if sb-kernel::*fragment-recorder*
+           (sb-kernel::call-with-fragment-record ,kind ,target #',arglist #',thunk)
+           (,thunk))))
+  #-(and sb-local-heaps (not sb-xc-host))
+  (progn kind target args `(progn ,@body)))
+
+;;; Run BODY as the filling of a cache: stores it makes into global objects
+;;; while a fragment is being built are cache entries, which a fragment
+;;; does not carry.
+(defmacro sb-kernel::with-fragment-cache (&body body)
+  #+(and sb-local-heaps (not sb-xc-host))
+  (with-unique-names (thunk)
+    `(dx-flet ((,thunk () ,@body))
+       (if sb-kernel::*fragment-recorder*
+           (sb-kernel::call-with-fragment-record :cache nil #'list #',thunk)
+           (,thunk))))
+  #-(and sb-local-heaps (not sb-xc-host))
+  `(progn ,@body))
+
 ;;; Run BODY with the store barrier's checking suspended.  For a store the
 ;;; runtime makes into a global object on a thread's behalf -- the wait
 ;;; mark on the thread struct itself -- which is bookkeeping rather than

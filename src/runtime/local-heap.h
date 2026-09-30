@@ -219,6 +219,7 @@ uword_t local_heap_take_exhausted(void);
  * and the return address into the code that made the store. */
 void local_heap_check_store(lispobj value, lispobj object, uword_t pc);
 int  local_heap_classify_store(lispobj value, lispobj object, uword_t pc);
+uword_t local_heap_last_store_pc(void);
 int  local_heap_switch_address(uword_t heap);
 int  local_heap_install_global(void);
 uword_t local_heap_current_address(void);
