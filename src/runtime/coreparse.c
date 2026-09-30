@@ -42,6 +42,7 @@
 #include "local-heap.h"
 #include "code.h"
 #include "graphvisit.h"
+#include "corefrag.h"
 #include "genesis/instance.h"
 #include "genesis/symbol.h"
 
@@ -743,13 +744,62 @@ static __attribute__((unused)) uword_t corespace_checksum(uword_t* base, int nwo
 lispobj* linkage_space;
 int linkage_table_count;
 
+/* What a core's header says about where its pages are. Source 0 is the core
+ * being loaded; a link core's PARENT-CORES entry adds the others. */
+struct core_sources {
+    int n;
+    int fd[1+MAX_CORE_PARENTS];
+    os_vm_offset_t core_start[1+MAX_CORE_PARENTS];
+    int corefrag_source[1+MAX_CORE_PARENTS]; // -1 if the pages are not to be recorded
+    struct corefrag_stored_run *runs;        // from SPACE-RUNS, only in a link core
+    int n_runs;
+};
+
+static void load_space_bytes(int id, int fd, os_vm_offset_t file_pos,
+                             os_vm_address_t addr, os_vm_size_t len)
+{
+#ifdef LISP_FEATURE_DARWIN_JIT
+    if (id == DYNAMIC_CORE_SPACE_ID || id == STATIC_CODE_CORE_SPACE_ID || id == READ_ONLY_CORE_SPACE_ID) {
+        load_core_bytes_jit(fd, file_pos, addr, len);
+        return;
+    }
+#endif
+    load_core_bytes(fd, file_pos, addr, len, id == READ_ONLY_CORE_SPACE_ID);
+}
+
+/* Load the pages of space ID at ADDR from the runs a link core lists for it.
+ * Pages no run covers stay as allocated, which is zero. */
+static void load_space_runs(int id, os_vm_address_t addr, os_vm_size_t len,
+                            struct core_sources *sources)
+{
+    if (!sources->runs) lose("space %d is in runs, but the core lists none", id);
+    int i;
+    for (i = 0; i < sources->n_runs; ++i) {
+        struct corefrag_stored_run *run = &sources->runs[i];
+        if (run->space_id != id) continue;
+        if (run->source < 0 || run->source >= sources->n)
+            lose("space run %d names source %d of %d", i, (int)run->source, sources->n);
+        if (run->space_offset < 0 || run->len <= 0
+            || (os_vm_size_t)(run->space_offset + run->len) > len)
+            lose("space run %d of space %d lies outside it", i, id);
+        os_vm_offset_t file_pos = sources->core_start[run->source]
+            + (1 + run->data_page) * os_vm_page_size;
+        os_vm_address_t where = addr + run->space_offset;
+        load_space_bytes(id, sources->fd[run->source], file_pos, where, run->len);
+        int recorded = sources->corefrag_source[run->source];
+        if (recorded >= 0)
+            corefrag_add_run((uword_t)where, run->len, recorded, file_pos);
+    }
+}
+
 static void
 process_directory(int count, struct ndir_entry *entry,
                   __attribute__((unused)) sword_t linkage_table_data_page,
                   int fd, os_vm_offset_t file_offset,
                   int __attribute__((unused)) merge_core_pages,
                   struct coreparse_space *spaces,
-                  struct heap_adjust *adj)
+                  struct heap_adjust *adj,
+                  struct core_sources *sources)
 {
     // If ELF core is supported, then test whether the weak symbol
     // 'lisp_code_start' exists in this executable. If it does, then parse
@@ -871,17 +921,16 @@ process_directory(int count, struct ndir_entry *entry,
             if (id == READ_ONLY_CORE_SPACE_ID)
                 os_protect((os_vm_address_t)addr, len, OS_VM_PROT_WRITE);
 #endif
-            if (compressed) {
+            if (entry->data_page == LINK_CORE_DATA_PAGE) {
+                if (compressed) lose("space %ld of a link core is compressed", id);
+                load_space_runs(id, (os_vm_address_t)addr, len, sources);
+            } else if (compressed) {
                 inflate_core_bytes(fd, offset + file_offset, (os_vm_address_t)addr, len);
-            }
-            else
-#ifdef LISP_FEATURE_DARWIN_JIT
-            if (id == DYNAMIC_CORE_SPACE_ID || id == STATIC_CODE_CORE_SPACE_ID || id == READ_ONLY_CORE_SPACE_ID) {
-                load_core_bytes_jit(fd, offset + file_offset, (os_vm_address_t)addr, len);
-            } else
-#endif
-            {
-                load_core_bytes(fd, offset + file_offset, (os_vm_address_t)addr, len, id == READ_ONLY_CORE_SPACE_ID);
+            } else {
+                load_space_bytes(id, fd, offset + file_offset, (os_vm_address_t)addr, len);
+                if (sources->corefrag_source[0] >= 0)
+                    corefrag_add_run(addr, len, sources->corefrag_source[0],
+                                     offset + file_offset);
             }
 
 #ifdef LISP_FEATURE_DARWIN_JIT
@@ -1448,6 +1497,71 @@ static void construct_tls_map(int starting_tlsoffset)
     tls_map_starting_offset = starting_tlsoffset; // for later save_to_filehandle()
 }
 
+static char* absolute_path(char *file)
+{
+#ifdef LISP_FEATURE_WIN32
+    return _fullpath(NULL, file, 0);
+#else
+    return realpath(file, NULL);
+#endif
+}
+
+/* A link core whose parent is gone or was replaced cannot be loaded. This is
+ * not heap corruption, so say what happened and exit rather than lose(). */
+static void __attribute__((noreturn))
+parent_core_unusable(char *file, char *parent, char *why)
+{
+    fprintf(stderr, "fatal error: core %s takes pages from %s, which %s\n",
+            file, parent, why);
+    exit(1);
+}
+
+/* Open and check each core a link core names in its PARENT-CORES entry. */
+static void read_parent_cores(core_entry_elt_t *ptr, os_vm_size_t nwords,
+                              struct core_sources *sources, char *file)
+{
+    core_entry_elt_t *end = ptr + nwords;
+    int n = *ptr++, i;
+    if (n < 0 || n > MAX_CORE_PARENTS)
+        lose("core %s names %d parent cores", file, n);
+    for (i = 0; i < n; ++i) {
+        if (ptr + 4 > end) lose("truncated PARENT-CORES entry in %s", file);
+        uword_t id[COREFRAG_ID_WORDS];
+        memcpy(id, ptr, sizeof id);
+        os_vm_offset_t core_start = ptr[2];
+        size_t pathlen = ptr[3];
+        size_t pathwords = ALIGN_UP(pathlen, N_WORD_BYTES) / N_WORD_BYTES;
+        if (ptr + 4 + pathwords > end) lose("truncated PARENT-CORES entry in %s", file);
+        char *path = checked_malloc(pathlen + 1);
+        memcpy(path, ptr + 4, pathlen);
+        path[pathlen] = 0;
+        int parent_fd = open_binary(path, O_RDONLY);
+        if (parent_fd < 0) parent_core_unusable(file, path, "cannot be opened");
+        uword_t actual[COREFRAG_ID_WORDS];
+        if (!corefrag_read_core_id(parent_fd, core_start, actual)
+            || memcmp(actual, id, sizeof id))
+            parent_core_unusable(file, path, "is no longer the core it was saved against");
+        int k = sources->n++;
+        sources->fd[k] = parent_fd;
+        sources->core_start[k] = core_start;
+        sources->corefrag_source[k] = corefrag_add_source(path, id, core_start);
+        ptr += 4 + pathwords;
+    }
+}
+
+static void read_space_runs(int fd, os_vm_offset_t file_pos, sword_t n,
+                            struct core_sources *sources)
+{
+    size_t nbytes = n * sizeof (struct corefrag_stored_run);
+    sources->runs = checked_malloc(nbytes);
+    sources->n_runs = n;
+    os_vm_offset_t old = lseek(fd, 0, SEEK_CUR);
+    if (lseek(fd, file_pos, SEEK_SET) != file_pos
+        || read(fd, sources->runs, nbytes) != (ssize_t)nbytes)
+        lose("failed to read the space runs of a link core");
+    lseek(fd, old, SEEK_SET);
+}
+
 /* 'merge_core_pages': Tri-state flag to determine whether we attempt to mark
  * pages as targets for virtual memory deduplication via MADV_MERGEABLE.
  * 1: Yes
@@ -1472,6 +1586,12 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
         perror("open");
         exit(1);
     }
+    struct core_sources sources;
+    memset(&sources, 0, sizeof sources);
+    sources.n = 1;
+    sources.fd[0] = fd;
+    sources.core_start[0] = file_offset;
+    sources.corefrag_source[0] = -1; // until the CORE-ID entry, if there is one
 
     lseek(fd, file_offset, SEEK_SET);
     header = calloc(os_vm_page_size, 1);
@@ -1575,12 +1695,29 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
             memcpy(base, ptr, nwords<<WORD_SHIFT);
             break;
         }
+        case CORE_ID_CORE_ENTRY_TYPE_CODE:
+            // Precedes the directory, so the spaces' pages can be recorded as they load.
+            if (remaining_len == COREFRAG_ID_WORDS) {
+                char *path = absolute_path(file);
+                if (path)
+                    sources.corefrag_source[0] =
+                        corefrag_add_source(path, (uword_t*)ptr, file_offset);
+            }
+            break;
+        case PARENT_CORES_CORE_ENTRY_TYPE_CODE:
+            read_parent_cores(ptr, remaining_len, &sources, file);
+            break;
+        case SPACE_RUNS_CORE_ENTRY_TYPE_CODE:
+            // elements = n-runs, data-page
+            read_space_runs(fd, file_offset + (ptr[1] + 1) * os_vm_page_size, ptr[0],
+                            &sources);
+            break;
         case DIRECTORY_CORE_ENTRY_TYPE_CODE:
             process_directory(remaining_len / NDIR_ENTRY_LENGTH,
                               (struct ndir_entry*)ptr,
                               linkage_table_data_page,
                               fd, file_offset,
-                              merge_core_pages, spaces, &adj);
+                              merge_core_pages, spaces, &adj, &sources);
             break;
         case LISP_LINKAGE_SPACE_CORE_ENTRY_TYPE_CODE:
             linkage_table_count = ptr[0];
@@ -1606,6 +1743,11 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
         case END_CORE_ENTRY_TYPE_CODE:
             free(header);
             close(fd);
+            {
+                int i;
+                for (i = 1; i < sources.n; ++i) close(sources.fd[i]);
+                free(sources.runs);
+            }
 #ifdef LISP_FEATURE_SB_THREAD
             if ((int)SymbolValue(FREE_TLS_INDEX,0) >= dynamic_values_bytes) {
                 dynamic_values_bytes = (int)SymbolValue(FREE_TLS_INDEX,0) * 2;

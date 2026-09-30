@@ -12,6 +12,8 @@
 #ifndef LISP_FEATURE_WIN32
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 #include <stdlib.h>
 #include <stdio.h>
@@ -39,6 +41,7 @@
 #include "genesis/vector.h"
 #include "immobile-space.h"
 #include "search.h"
+#include "corefrag.h"
 
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
 # include <zstd.h>
@@ -281,6 +284,144 @@ static lispobj required_foreign_symbols()
     return ht->pairs;
 }
 
+static void write_build_id(FILE *file)
+{
+    int stringlen = strlen((const char *)build_id);
+    int string_words = ALIGN_UP(stringlen, sizeof (core_entry_elt_t))
+        / sizeof (core_entry_elt_t);
+    int pad = string_words * sizeof (core_entry_elt_t) - stringlen;
+    /* Write 6 word entry header: a word for entry-type-code, the length in words,
+     * the GC enum, card table bit width, address of NIL, and string length */
+    write_lispobj(BUILD_ID_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(6 + string_words, file);
+#ifdef LISP_FEATURE_GENCGC
+    write_lispobj(1, file);
+#endif
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    write_lispobj(2, file);
+#endif
+    write_lispobj(gc_card_table_nbits, file);
+    write_lispobj(NIL, file);
+    write_lispobj(stringlen, file);
+    int nwrote = fwrite(build_id, 1, stringlen, file);
+    /* Write padding bytes to align to core_entry_elt_t */
+    while (pad--) nwrote += (fputc(0xff, file) != EOF);
+    if (nwrote != (int)(sizeof (core_entry_elt_t) * string_words))
+        perror(GENERAL_WRITE_FAILURE_MSG);
+}
+
+/* Every core has an identifier, so that a link core can name it as a parent.
+ * It precedes the directory, which the loader records pages against. */
+static void write_core_id(FILE *file)
+{
+    uword_t id[COREFRAG_ID_WORDS];
+    int i;
+    corefrag_new_id(id);
+    write_lispobj(CORE_ID_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(2 + COREFRAG_ID_WORDS, file);
+    for (i = 0; i < COREFRAG_ID_WORDS; ++i) write_lispobj(id[i], file);
+}
+
+static void write_linkage_space(FILE *file, os_vm_offset_t core_start_pos)
+{
+#ifdef LISP_FEATURE_LINKAGE_SPACE
+    // Lisp linkage space precedes the general space directory
+    int i;
+    extern void illegal_linkage_space_call();
+    /* The C runtime is theoretically position-independent so don't write out the address
+     * of the unused entry sentinel. The affected elements needn't be restored on restart.
+     * (Maybe add a renumbering pass in Lisp to ensure the table is 100% dense) */
+    for (i=FIRST_USABLE_LINKAGE_ELT; i<linkage_table_count; ++i)
+        if (linkage_space[i] == (uword_t)illegal_linkage_space_call)
+            linkage_space[i] = 0;
+    int nbytes = ALIGN_UP(linkage_table_count<<WORD_SHIFT, BACKEND_PAGE_BYTES);
+    if (!lisp_startup_options.noinform)
+        printf("writing %lu bytes from the %s space at %p\n",
+               (long unsigned)nbytes, "linkage", linkage_space);
+
+    write_lispobj(LISP_LINKAGE_SPACE_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(5, file); // number of words in this core header entry
+    write_lispobj(linkage_table_count, file);
+    sword_t data_page =
+        write_bytes(file, (char*)linkage_space,
+                    nbytes, core_start_pos, COMPRESSION_LEVEL_NONE);
+    write_lispobj(data_page, file);
+    write_lispobj(0, file); // address of ELF-based linkage entries
+#else
+    (void)file; (void)core_start_pos;
+#endif
+}
+
+#ifdef LISP_FEATURE_PERMGEN
+static void clear_permgen_remembered_bits()
+{
+#define REMEMBERED_BIT (uword_t)0x80000000
+    lispobj* where = (void*)PERMGEN_SPACE_START;
+    // clear every object's bit
+    for ( ; where < permgen_space_free_pointer ; where += object_size(where) )
+        *where &= ~REMEMBERED_BIT;
+}
+#endif
+
+static void write_initial_function(FILE *file, lispobj init_function)
+{
+    extern int tls_map_starting_offset;
+    write_lispobj(INITIAL_FUN_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(6, file); // length in lispobjs (including this field)
+    // a 'struct initfunctions' from core.h. (Consider a struct-writing function perhaps)
+    write_lispobj(alien_linkage_table_n_prelinked, file);
+    write_lispobj(required_foreign_symbols(), file);
+    write_lispobj(tls_map_starting_offset, file);
+    write_lispobj(init_function, file);
+}
+
+static void write_page_table(FILE *file, os_vm_offset_t core_start_pos)
+{
+#ifdef LISP_FEATURE_GENERATIONAL
+    extern void gc_store_corefile_ptes(struct corefile_pte*);
+    sword_t bitmapsize = 0;
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    bitmapsize = bitmap_size(next_free_page);
+#endif
+    size_t ptes_nbytes = next_free_page * sizeof(struct corefile_pte);
+    size_t aligned_size = ALIGN_UP((bitmapsize+ptes_nbytes), N_WORD_BYTES);
+    char* data = checked_malloc(aligned_size);
+    // Zeroize the final few bytes of data that get written out
+    // but might be untouched by gc_store_corefile_ptes().
+    memset(data + aligned_size - N_WORD_BYTES, 0, N_WORD_BYTES);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    memcpy(data, allocation_bitmap, bitmapsize);
+#endif
+    gc_store_corefile_ptes((struct corefile_pte*)(data + bitmapsize));
+    write_lispobj(PAGE_TABLE_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(5, file); // number of words in this core header entry
+    write_lispobj(next_free_page, file);
+    write_lispobj(aligned_size, file);
+    sword_t offset = write_bytes(file, data, aligned_size, core_start_pos,
+                                 COMPRESSION_LEVEL_NONE);
+    write_lispobj(offset, file);
+    free(data);
+#else
+    (void)file; (void)core_start_pos;
+#endif
+}
+
+/* Write a trailing header, ignored when parsing the core normally.
+ * This is used to locate the start of the core when the runtime is
+ * prepended to it. Then close the file. */
+static void write_trailer(FILE *file, os_vm_offset_t core_start_pos)
+{
+    FSEEK(file, 0, SEEK_END);
+
+    if (1 != fwrite(&core_start_pos, sizeof(os_vm_offset_t), 1, file)) {
+        perror("Error writing core starting position to file");
+        fclose(file);
+    } else {
+        write_lispobj(CORE_MAGIC, file);
+        fclose(file);
+    }
+}
+
 void save_to_filehandle(FILE *file, char *filename, lispobj init_function,
                         bool make_executable,
                         int save_runtime_options,
@@ -308,53 +449,11 @@ void save_to_filehandle(FILE *file, char *filename, lispobj init_function,
     if (save_runtime_options)
         write_memsize_options(file, save_runtime_options);
 
-    int stringlen = strlen((const char *)build_id);
-    int string_words = ALIGN_UP(stringlen, sizeof (core_entry_elt_t))
-        / sizeof (core_entry_elt_t);
-    int pad = string_words * sizeof (core_entry_elt_t) - stringlen;
-    /* Write 6 word entry header: a word for entry-type-code, the length in words,
-     * the GC enum, card table bit width, address of NIL, and string length */
-    write_lispobj(BUILD_ID_CORE_ENTRY_TYPE_CODE, file);
-    write_lispobj(6 + string_words, file);
-#ifdef LISP_FEATURE_GENCGC
-    write_lispobj(1, file);
-#endif
-#ifdef LISP_FEATURE_MARK_REGION_GC
-    write_lispobj(2, file);
-#endif
-    write_lispobj(gc_card_table_nbits, file);
-    write_lispobj(NIL, file);
-    write_lispobj(stringlen, file);
-    int nwrote = fwrite(build_id, 1, stringlen, file);
-    /* Write padding bytes to align to core_entry_elt_t */
-    while (pad--) nwrote += (fputc(0xff, file) != EOF);
-    if (nwrote != (int)(sizeof (core_entry_elt_t) * string_words))
-        perror(GENERAL_WRITE_FAILURE_MSG);
-
-#ifdef LISP_FEATURE_LINKAGE_SPACE
-    // Lisp linkage space precedes the general space directory
-    int i;
-    extern void illegal_linkage_space_call();
-    /* The C runtime is theoretically position-independent so don't write out the address
-     * of the unused entry sentinel. The affected elements needn't be restored on restart.
-     * (Maybe add a renumbering pass in Lisp to ensure the table is 100% dense) */
-    for (i=FIRST_USABLE_LINKAGE_ELT; i<linkage_table_count; ++i)
-        if (linkage_space[i] == (uword_t)illegal_linkage_space_call)
-            linkage_space[i] = 0;
-    int nbytes = ALIGN_UP(linkage_table_count<<WORD_SHIFT, BACKEND_PAGE_BYTES);
-    if (!lisp_startup_options.noinform)
-        printf("writing %lu bytes from the %s space at %p\n",
-               (long unsigned)nbytes, "linkage", linkage_space);
-
-    write_lispobj(LISP_LINKAGE_SPACE_CORE_ENTRY_TYPE_CODE, file);
-    write_lispobj(5, file); // number of words in this core header entry
-    write_lispobj(linkage_table_count, file);
-    sword_t data_page =
-        write_bytes(file, (char*)linkage_space,
-                    nbytes, core_start_pos, COMPRESSION_LEVEL_NONE);
-    write_lispobj(data_page, file);
-    write_lispobj(0, file); // address of ELF-based linkage entries
-#endif
+    write_build_id(file);
+    // An uncompressed core can be the parent of a link core.
+    if (core_compression_level == COMPRESSION_LEVEL_NONE)
+        write_core_id(file);
+    write_linkage_space(file, core_start_pos);
 
     write_lispobj(DIRECTORY_CORE_ENTRY_TYPE_CODE, file);
     ftell_type spacecount_pos = FTELL(file);
@@ -381,13 +480,7 @@ void save_to_filehandle(FILE *file, char *filename, lispobj init_function,
                  core_start_pos,
                  core_compression_level), ++count;
 #ifdef LISP_FEATURE_PERMGEN
-    {
-#define REMEMBERED_BIT (uword_t)0x80000000
-        lispobj* where = (void*)PERMGEN_SPACE_START;
-        // clear every object's bit
-        for ( ; where < permgen_space_free_pointer ; where += object_size(where) )
-            *where &= ~REMEMBERED_BIT;
-    }
+    clear_permgen_remembered_bits();
     output_space(file,
                  PERMGEN_CORE_SPACE_ID,
                  (lispobj *)PERMGEN_SPACE_START,
@@ -432,60 +525,15 @@ void save_to_filehandle(FILE *file, char *filename, lispobj init_function,
 #ifdef LISP_FEATURE_X86_64
     write_static_space_constants(file);
 #endif
-
-    extern int tls_map_starting_offset;
-    write_lispobj(INITIAL_FUN_CORE_ENTRY_TYPE_CODE, file);
-    write_lispobj(6, file); // length in lispobjs (including this field)
-    // a 'struct initfunctions' from core.h. (Consider a struct-writing function perhaps)
-    write_lispobj(alien_linkage_table_n_prelinked, file);
-    write_lispobj(required_foreign_symbols(), file);
-    write_lispobj(tls_map_starting_offset, file);
-    write_lispobj(init_function, file);
-
-#ifdef LISP_FEATURE_GENERATIONAL
-    {
-        extern void gc_store_corefile_ptes(struct corefile_pte*);
-        sword_t bitmapsize = 0;
-#ifdef LISP_FEATURE_MARK_REGION_GC
-        bitmapsize = bitmap_size(next_free_page);
-#endif
-        size_t ptes_nbytes = next_free_page * sizeof(struct corefile_pte);
-        size_t aligned_size = ALIGN_UP((bitmapsize+ptes_nbytes), N_WORD_BYTES);
-        char* data = checked_malloc(aligned_size);
-        // Zeroize the final few bytes of data that get written out
-        // but might be untouched by gc_store_corefile_ptes().
-        memset(data + aligned_size - N_WORD_BYTES, 0, N_WORD_BYTES);
-#ifdef LISP_FEATURE_MARK_REGION_GC
-        memcpy(data, allocation_bitmap, bitmapsize);
-#endif
-        gc_store_corefile_ptes((struct corefile_pte*)(data + bitmapsize));
-        write_lispobj(PAGE_TABLE_CORE_ENTRY_TYPE_CODE, file);
-        write_lispobj(5, file); // number of words in this core header entry
-        write_lispobj(next_free_page, file);
-        write_lispobj(aligned_size, file);
-        sword_t offset = write_bytes(file, data, aligned_size, core_start_pos,
-                                     COMPRESSION_LEVEL_NONE);
-        write_lispobj(offset, file);
-    }
-#endif
+    write_initial_function(file, init_function);
+    write_page_table(file, core_start_pos);
 
     write_lispobj(END_CORE_ENTRY_TYPE_CODE, file);
     FSEEK(file, spacecount_pos, SEEK_SET);
     // 5 = length of (struct ndir_entry) in words, plus 2 fixed words
     write_lispobj(2 + count * 5, file);
 
-    /* Write a trailing header, ignored when parsing the core normally.
-     * This is used to locate the start of the core when the runtime is
-     * prepended to it. */
-    FSEEK(file, 0, SEEK_END);
-
-    if (1 != fwrite(&core_start_pos, sizeof(os_vm_offset_t), 1, file)) {
-        perror("Error writing core starting position to file");
-        fclose(file);
-    } else {
-        write_lispobj(CORE_MAGIC, file);
-        fclose(file);
-    }
+    write_trailer(file, core_start_pos);
 
 #ifndef LISP_FEATURE_WIN32
     if (make_executable)
@@ -494,6 +542,256 @@ void save_to_filehandle(FILE *file, char *filename, lispobj init_function,
 
     if (verbose) printf("done]\n");
 }
+
+#if !defined LISP_FEATURE_WIN32 && !defined LISP_FEATURE_IMMOBILE_SPACE && defined LISP_FEATURE_MARK_REGION_GC
+/* A link save writes each page that differs from the page this process loaded
+ * it from, and for the rest refers to the files it loaded them from. */
+struct link_writer {
+    FILE *file;
+    os_vm_offset_t core_start_pos;
+    int *source_fd;             // per corefrag source: -1 not yet opened, -2 unusable
+    int *parent_number;         // per corefrag source: 1 + its PARENT-CORES index, or 0
+    int parent_source[MAX_CORE_PARENTS];
+    int n_parents;
+    struct corefrag_stored_run *runs;
+    int n_runs, runs_capacity;
+    char *buffer;               // one page of a source file
+    int hint;                   // the corefrag run that held the previous page
+    long referenced, written, free;
+};
+
+static void link_add_run(struct link_writer *w, int space_id, uword_t space_offset,
+                         uword_t len, int source, sword_t data_page)
+{
+    if (w->n_runs) {
+        struct corefrag_stored_run *prev = &w->runs[w->n_runs-1];
+        if (prev->space_id == space_id && prev->source == source
+            && (uword_t)(prev->space_offset + prev->len) == space_offset
+            && prev->data_page + prev->len / (sword_t)os_vm_page_size == data_page) {
+            prev->len += len;
+            return;
+        }
+    }
+    if (w->n_runs == w->runs_capacity) {
+        w->runs_capacity = w->runs_capacity ? 2 * w->runs_capacity : 256;
+        w->runs = realloc(w->runs, w->runs_capacity * sizeof (struct corefrag_stored_run));
+        if (!w->runs) lose("link save: out of memory");
+    }
+    struct corefrag_stored_run *run = &w->runs[w->n_runs++];
+    run->space_id = space_id;
+    run->space_offset = space_offset;
+    run->len = len;
+    run->source = source;
+    run->data_page = data_page;
+}
+
+/* The recorded run that holds the whole page at ADDR, or NULL. */
+static struct corefrag_run* link_find_run(struct link_writer *w, uword_t addr)
+{
+    int i;
+    for (i = 0; i < corefrag_n_runs; ++i) {
+        int k = (w->hint + i) % corefrag_n_runs;
+        struct corefrag_run *run = &corefrag_runs[k];
+        if (addr >= run->addr && addr + os_vm_page_size <= run->addr + run->len) {
+            w->hint = k;
+            return run;
+        }
+    }
+    return NULL;
+}
+
+/* Whether the page at ADDR holds what SOURCE holds at OFFSET. A source file
+ * that cannot be opened, or is no longer the core it was loaded from, holds
+ * nothing any page can refer to. */
+static bool link_page_unchanged(struct link_writer *w, int source,
+                                os_vm_offset_t offset, char *addr)
+{
+    int fd = w->source_fd[source];
+    if (fd == -1) {
+        struct corefrag_source *s = &corefrag_sources[source];
+        uword_t id[COREFRAG_ID_WORDS];
+        fd = open(s->path, O_RDONLY);
+        if (fd >= 0 && !(corefrag_read_core_id(fd, s->core_start, id)
+                         && !memcmp(id, s->id, sizeof id))) {
+            close(fd);
+            fd = -2;
+        }
+        if (fd < 0) fd = -2;
+        w->source_fd[source] = fd;
+    }
+    if (fd < 0) return 0;
+    if (lseek(fd, offset, SEEK_SET) != offset
+        || read(fd, w->buffer, os_vm_page_size) != (ssize_t)os_vm_page_size)
+        return 0;
+    return !memcmp(w->buffer, addr, os_vm_page_size);
+}
+
+static int link_parent_number(struct link_writer *w, int source)
+{
+    if (!w->parent_number[source]) {
+        if (w->n_parents == MAX_CORE_PARENTS)
+            lose("link save: more than %d parent cores", MAX_CORE_PARENTS);
+        w->parent_source[w->n_parents] = source;
+        w->parent_number[source] = ++w->n_parents;
+    }
+    return w->parent_number[source];
+}
+
+static void link_space(struct link_writer *w, int id, lispobj *start, lispobj *end,
+                       struct ndir_entry *dir)
+{
+    uword_t bytes = (char*)end - (char*)start;
+    uword_t npages = ALIGN_UP(bytes, os_vm_page_size) / os_vm_page_size;
+    // As output_space does, so that the last page compares equal when it is.
+    if (npages * os_vm_page_size > bytes && id != READ_ONLY_CORE_SPACE_ID)
+        memset((char*)start + bytes, 0, npages * os_vm_page_size - bytes);
+    dir->identifier = id;
+    dir->nwords = end - start;
+    dir->data_page = LINK_CORE_DATA_PAGE;
+    dir->address = (uword_t)start;
+    dir->page_count = npages;
+
+    uword_t page, batch_start = 0, batch_pages = 0;
+#define FLUSH_BATCH() \
+    if (batch_pages) { \
+        sword_t data_page = write_bytes(w->file, (char*)start + batch_start * os_vm_page_size, \
+                                        batch_pages * os_vm_page_size, w->core_start_pos, \
+                                        COMPRESSION_LEVEL_NONE); \
+        link_add_run(w, id, batch_start * os_vm_page_size, batch_pages * os_vm_page_size, \
+                     0, data_page); \
+        w->written += batch_pages; \
+        batch_pages = 0; \
+    }
+    for (page = 0; page < npages; ++page) {
+        char *addr = (char*)start + page * os_vm_page_size;
+        if (id == DYNAMIC_CORE_SPACE_ID) {
+            page_index_t index = find_page_index(addr);
+            if (index >= 0 && !page_words_used(index)) { // free: loads as zeros
+                FLUSH_BATCH();
+                ++w->free;
+                continue;
+            }
+        }
+        struct corefrag_run *run = link_find_run(w, (uword_t)addr);
+        if (run) {
+            os_vm_offset_t offset = run->offset + ((uword_t)addr - run->addr);
+            if (link_page_unchanged(w, run->source, offset, addr)) {
+                FLUSH_BATCH();
+                sword_t data_page = (offset - corefrag_sources[run->source].core_start)
+                    / os_vm_page_size - 1;
+                link_add_run(w, id, page * os_vm_page_size, os_vm_page_size,
+                             link_parent_number(w, run->source), data_page);
+                ++w->referenced;
+                continue;
+            }
+        }
+        if (!batch_pages) batch_start = page;
+        ++batch_pages;
+    }
+    FLUSH_BATCH();
+#undef FLUSH_BATCH
+}
+
+static void save_link_core(FILE *file, char *filename, lispobj init_function,
+                           int save_runtime_options)
+{
+    bool verbose = !lisp_startup_options.noinform;
+    if (verbose) {
+        printf("[saving current Lisp image into %s, linked to the cores it was loaded from:\n",
+               filename);
+        fflush(stdout);
+    }
+    struct link_writer w;
+    memset(&w, 0, sizeof w);
+    w.file = file;
+    w.core_start_pos = FTELL(file);
+    w.source_fd = checked_malloc((1 + corefrag_n_sources) * sizeof (int));
+    w.parent_number = checked_malloc((1 + corefrag_n_sources) * sizeof (int));
+    int i;
+    for (i = 0; i < corefrag_n_sources; ++i) {
+        w.source_fd[i] = -1;
+        w.parent_number[i] = 0;
+    }
+    w.buffer = checked_malloc(os_vm_page_size);
+
+    write_lispobj(CORE_MAGIC, file);
+    if (save_runtime_options)
+        write_memsize_options(file, save_runtime_options);
+    write_build_id(file);
+    write_core_id(file);
+    write_linkage_space(file, w.core_start_pos);
+
+    struct ndir_entry dir[MAX_CORE_SPACE_ID];
+    int count = 0;
+    link_space(&w, STATIC_CORE_SPACE_ID, (lispobj *)STATIC_SPACE_START,
+               static_space_free_pointer, &dir[count++]);
+#ifdef LISP_FEATURE_PERMGEN
+    clear_permgen_remembered_bits();
+    link_space(&w, PERMGEN_CORE_SPACE_ID, (lispobj *)PERMGEN_SPACE_START,
+               permgen_space_free_pointer, &dir[count++]);
+#endif
+#ifdef LISP_FEATURE_DARWIN_JIT
+    link_space(&w, STATIC_CODE_CORE_SPACE_ID, (lispobj *)STATIC_CODE_SPACE_START,
+               static_code_space_free_pointer, &dir[count++]);
+#endif
+    link_space(&w, DYNAMIC_CORE_SPACE_ID, (lispobj*)DYNAMIC_SPACE_START,
+               (lispobj*)dynamic_space_highwatermark(), &dir[count++]);
+    link_space(&w, READ_ONLY_CORE_SPACE_ID, (lispobj *)READ_ONLY_SPACE_START,
+               read_only_space_free_pointer, &dir[count++]);
+    link_space(&w, IMMOBILE_TEXT_CORE_SPACE_ID, (lispobj *)TEXT_SPACE_START,
+               text_space_highwatermark, &dir[count++]);
+
+    // The parents, before the runs that name them and the directory that uses both.
+    sword_t nwords = 3;
+    for (i = 0; i < w.n_parents; ++i)
+        nwords += 4 + ALIGN_UP(strlen(corefrag_sources[w.parent_source[i]].path),
+                               N_WORD_BYTES) / N_WORD_BYTES;
+    write_lispobj(PARENT_CORES_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(nwords, file);
+    write_lispobj(w.n_parents, file);
+    for (i = 0; i < w.n_parents; ++i) {
+        struct corefrag_source *s = &corefrag_sources[w.parent_source[i]];
+        size_t pathlen = strlen(s->path);
+        size_t padded = ALIGN_UP(pathlen, N_WORD_BYTES);
+        int k;
+        for (k = 0; k < COREFRAG_ID_WORDS; ++k) write_lispobj(s->id[k], file);
+        write_lispobj(s->core_start, file);
+        write_lispobj(pathlen, file);
+        if (fwrite(s->path, 1, pathlen, file) != pathlen) perror(GENERAL_WRITE_FAILURE_MSG);
+        for ( ; pathlen < padded ; ++pathlen) fputc(0, file);
+    }
+
+    write_lispobj(SPACE_RUNS_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(4, file); // number of words in this core header entry
+    write_lispobj(w.n_runs, file);
+    write_lispobj(write_bytes(file, (char*)w.runs, w.n_runs * sizeof (struct corefrag_stored_run),
+                              w.core_start_pos, COMPRESSION_LEVEL_NONE),
+                  file);
+
+    write_lispobj(DIRECTORY_CORE_ENTRY_TYPE_CODE, file);
+    write_lispobj(2 + count * NDIR_ENTRY_LENGTH, file);
+    if (fwrite(dir, sizeof dir[0], count, file) != (size_t)count)
+        perror(GENERAL_WRITE_FAILURE_MSG);
+
+#ifdef LISP_FEATURE_X86_64
+    write_static_space_constants(file);
+#endif
+    write_initial_function(file, init_function);
+    write_page_table(file, w.core_start_pos);
+    write_lispobj(END_CORE_ENTRY_TYPE_CODE, file);
+    // The loader reads the header as one page.
+    if (FTELL(file) - w.core_start_pos > (ftell_type)os_vm_page_size)
+        lose("link core header exceeds %d bytes", (int)os_vm_page_size);
+
+    write_trailer(file, w.core_start_pos);
+    for (i = 0; i < corefrag_n_sources; ++i)
+        if (w.source_fd[i] >= 0) close(w.source_fd[i]);
+
+    if (verbose)
+        printf("%ld pages refer to %d parent cores, %ld written, %ld free]\n",
+               w.referenced, w.n_parents, w.written, w.free);
+}
+#endif
 
 /* Check if the build_id for the current runtime is present in a
  * buffer. */
@@ -728,6 +1026,54 @@ static void prepare_dynamic_space_for_final_gc(struct thread* thread)
  * plus literal strings in code compiled to memory. */
 char gc_coalesce_string_literals = 0;
 
+/* SAVE-LISP-AND-DIE :LINK T. The pages loaded from cores stay where they are
+ * and as they are: no collection of the pseudo-static generation, which holds
+ * them, and no compaction, move to read-only space or coalescing, each of
+ * which rewrites pages across the heap. */
+static void link_and_save(FILE *file, char *filename, int save_runtime_options)
+{
+#if defined LISP_FEATURE_WIN32 || defined LISP_FEATURE_IMMOBILE_SPACE || !defined LISP_FEATURE_MARK_REGION_GC
+    (void)file; (void)filename; (void)save_runtime_options;
+    lose("this runtime can't save a link core"); // SAVE-LISP-AND-DIE checks first
+#else
+    conservative_stack = 0;
+    struct thread *thread = get_sb_vm_thread();
+    gc_close_thread_regions(thread, 0);
+    gc_close_collector_regions(0);
+    unwind_binding_stack(thread);
+    // As gc_and_save does: dynamic bindings disappear on restart.
+    char *start = (char*)&thread->lisp_thread;
+    char *end = (char*)thread + dynamic_values_bytes;
+    memset(start, 0, end-start);
+    write_TLS(PINNED_OBJECTS, NIL, thread);
+    /* Compact the objects made since the cores were loaded into as few pages
+     * as they fit, as gc_and_save does for the whole heap. Compaction takes
+     * pages below the pseudo-static generation only, so the loaded pages
+     * stay where they are. */
+    force_compaction = 1;
+    page_overhead_threshold = 0.0;
+    page_utilisation_threshold = 1.0;
+    minimum_compact_gen = 0;
+    bytes_to_copy = dynamic_space_size;
+    collect_garbage(PSEUDO_STATIC_GENERATION);
+    /* Then the non-moving collection of every generation. The collection of
+     * the others does not sweep the loaded pages, and objects made since on
+     * their free lines would keep no allocation bits. Free lines are left as
+     * they are, not zeroed: zeroing the lines of dead objects on loaded
+     * pages would make those pages differ from their files, and the loader
+     * makes every line of a saved page unavailable to the allocator, so what
+     * the free lines hold is never read. */
+    collect_garbage(1+PSEUDO_STATIC_GENERATION);
+    THREAD_JIT_WP(0);
+#ifdef LISP_FEATURE_X86_64
+    untune_asm_routines_for_microarch();
+#endif
+    os_unlink_runtime();
+    save_link_core(file, filename, lisp_init_function, save_runtime_options);
+    exit(0);
+#endif
+}
+
 extern void move_rospace_to_dynamic(int), prepare_readonly_space(int,int);
 extern bool generate_elfcore_obj(const char *filename, FILE* input_core,
                                  char **syms, int sym_count);
@@ -773,6 +1119,7 @@ gc_and_save(char *filename, int core_format, bool purify,
 {
     int prepend_runtime = core_format == 1;
     int elf_object = core_format == 2;
+    int link = core_format == 3;
 
     // FIXME: Instead of disabling purify for static space relocation,
     // we should make r/o space read-only after fixing up pointers to
@@ -816,6 +1163,11 @@ gc_and_save(char *filename, int core_format, bool purify,
      * possibly be handled in Lisp. The installed signal handler closures should
      * be clobbered since new ones will be made by ENABLE-INTERRUPT on restart */
     memset(lisp_sig_handlers, 0, sizeof lisp_sig_handlers);
+
+    if (link) {
+        link_and_save(file, filename, save_runtime_options);
+        return; // only on failure
+    }
 
     conservative_stack = 0;
     gencgc_oldest_gen_to_gc = 0;
