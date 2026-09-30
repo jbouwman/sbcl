@@ -994,6 +994,10 @@
            (format nil "Build ID [~a] len=~D ptr=~D actual-len=~D, gc=~A~%"
                    string len ptr (length string) *heap-arrangement*)))
         (#.runtime-options-magic) ; ignore
+        ;; An edited core is a different core, so it does not keep the ID.
+        (#.core-id-core-entry-type-code)
+        ((#.parent-cores-core-entry-type-code #.space-runs-core-entry-type-code)
+         (error "This is a link core, whose pages are partly in other files"))
         (#.static-constants-core-entry-type-code
          ;; DO-CORE-HEADER-ENTRY subtracts 2 from LEN, but we want _all_ the words
          (setq constants (loop for i from (- ptr 2) repeat (+ len 2)

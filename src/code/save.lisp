@@ -102,6 +102,7 @@
                                          (root-structures ())
                                          (environment-name "auxiliary")
                                          (compression nil)
+                                         (link nil)
                                          #+win32
                                          (application-type :console))
   #.(format nil
@@ -183,6 +184,16 @@ The following &KEY arguments are defined:
     to 22, corresponding to zstd compression levels, or T (which is
     equivalent to the default compression level, 9).
 
+- :LINK
+
+    If true, write only the pages that differ from the pages this process
+    loaded from its core, and for the others refer to the core files it
+    loaded them from, which must then stay where they are and unchanged
+    for the saved core to load. The pages loaded from a core stay as they
+    are: the save skips the collection of their generation, the move to
+    read-only space and the coalescing of similar objects that a save
+    otherwise does. Not with :EXECUTABLE or :COMPRESSION.
+
 - `:APPLICATION-TYPE`
 
     Present only on Windows and is meaningful only with :EXECUTABLE T.
@@ -232,6 +243,13 @@ sufficiently motivated to do lengthy fixes."
   (declare (ignorable root-structures))
   (when (and callable-exports toplevel-supplied)
     (error ":TOPLEVEL cannot be supplied when there are callable exports."))
+  (when link
+    (unless (link-save-supported-p)
+      (error "This runtime can't save a link core."))
+    (when executable
+      (error ":LINK cannot be combined with :EXECUTABLE."))
+    (when compression
+      (error ":LINK cannot be combined with :COMPRESSION.")))
   ;; If the toplevel function is not defined, this will signal an
   ;; error before saving, not at startup time.
   (let ((toplevel (%coerce-callable-to-fun toplevel))
@@ -256,7 +274,7 @@ sufficiently motivated to do lengthy fixes."
       (let ((name (native-namestring (physicalize-pathname core-file-name)
                                      :as-file t))
             (startfun (start-lisp toplevel callable-exports)))
-        (deinit)
+        (deinit :tune-image (not link))
         #+generational
         (progn
           ;; Scan roots as close as possible to GC-AND-SAVE, in case anything
@@ -280,8 +298,9 @@ sufficiently motivated to do lengthy fixes."
           ;; since the GC will invalidate the stack.
           (sb-kernel::unsafe-clear-roots sb-vm:+highest-normal-generation+)
           (gc-and-save name
-                       #+elf (if (eq executable :elf-object) 2 (foreign-bool executable))
-                       #-elf (foreign-bool executable)
+                       (cond (link 3)
+                             #+elf ((eq executable :elf-object) 2)
+                             (t (foreign-bool executable)))
                        (foreign-bool purify)
                        (case save-runtime-options
                          (:accept-runtime-options 2)
@@ -315,6 +334,19 @@ sufficiently motivated to do lengthy fixes."
     (reinit nil)
     (error 'save-error)))
 
+(defun link-save-supported-p ()
+  "True when SAVE-LISP-AND-DIE :LINK T works in this runtime."
+  (/= 0 (extern-alien "corefrag_link_saves_supported" int)))
+
+(defun core-sources ()
+  "The core files this process loaded pages from: the files a link core it
+saves may take pages from."
+  (loop for i from 0
+        for path = (alien-funcall (extern-alien "corefrag_source_path"
+                                                (function c-string int))
+                                  i)
+        while path collect path))
+
 (defun tune-image-for-dump ()
   ;; C code will GC again (nonconservatively if pertinent), but the coalescing
   ;; steps done below will be more efficient if some junk is removed now.
@@ -337,7 +369,7 @@ sufficiently motivated to do lengthy fixes."
   #+sb-fasteval (sb-interpreter::flush-everything)
   (tune-hashset-sizes-of-all-packages))
 
-(defun deinit ()
+(defun deinit (&key (tune-image t))
   (call-hooks "save" *save-hooks*)
   #+win32 (itimer-emulation-deinit)
   #+sb-thread
@@ -374,7 +406,8 @@ sufficiently motivated to do lengthy fixes."
     (when error (error error))
     #+allocator-metrics (setq sb-thread::*allocator-metrics* nil)
     (setq sb-thread::*sprof-data* nil))
-  (tune-image-for-dump)
+  ;; A link save leaves the pages loaded from cores as they are.
+  (when tune-image (tune-image-for-dump))
   (float-deinit)
   (profile-deinit)
   (foreign-deinit)

@@ -7,6 +7,9 @@
            #:directory-core-entry-type-code
            #:initial-fun-core-entry-type-code
            #:static-constants-core-entry-type-code
+           #:core-id-core-entry-type-code
+           #:parent-cores-core-entry-type-code
+           #:space-runs-core-entry-type-code
            #:page-table-core-entry-type-code
            #:alien-linkage-table-core-entry-type-code
            #:lisp-linkage-space-core-entry-type-code
@@ -51,6 +54,14 @@
 (defconstant alien-linkage-table-core-entry-type-code 3881)
 (defconstant lisp-linkage-space-core-entry-type-code 3882)
 (defconstant static-constants-core-entry-type-code 3883)
+;;; A random identifier each save writes, which a core that refers to this
+;;; one for some of its pages records and checks.
+(defconstant core-id-core-entry-type-code 3884)
+;;; The cores a link core takes pages from, by path and core ID.
+(defconstant parent-cores-core-entry-type-code 3885)
+;;; For each space of a link core, the runs of pages it is made of: from
+;;; this file or from one of its parents.
+(defconstant space-runs-core-entry-type-code 3886)
 (defconstant end-core-entry-type-code 3840)
 
 (defconstant dynamic-core-space-id 1)
