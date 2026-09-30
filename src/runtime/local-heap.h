@@ -152,6 +152,14 @@ struct local_heap {
     lispobj root;
     struct local_heap *next_in_mailbox;
     uint32_t sender_id;
+
+    /* Kind BUILD only.  A sealed heap is never installed again: its
+     * allocation is over and its objects are a core fragment.  MEMBERS
+     * holds the fragment's objects once traced, tagged and sorted by
+     * address; see corefrag-members.c. */
+    uint32_t sealed;
+    lispobj *members;
+    uword_t nmembers;
 };
 
 /* Ownership metadata: one entry per block (0 = free or global), and per
@@ -278,6 +286,9 @@ void local_heap_reset_violations(void);
 
 /* Mailbox: fragments are local heaps of kind FRAGMENT. */
 int  local_heap_seal(struct local_heap *fragment);
+/* Core fragments (corefrag-members.c). */
+sword_t local_heap_fragment_trace(struct local_heap *h, lispobj root);
+lispobj local_heap_fragment_member(struct local_heap *h, uword_t i);
 int  local_heap_send(struct local_heap *dest, struct local_heap *fragment,
                        uint32_t sender_id);
 lispobj local_heap_receive(struct local_heap *h, int *found,

@@ -229,3 +229,57 @@
           (assert (find #'print-object (records-of-kind recorder :add-method)
                         :key #'fragment-record-target))
           (assert (= 7 (funcall (find-symbol "BUMP" "BHR") 6))))))))
+
+;;; --- Sealing ---
+
+(defun build-heap-sealed-hook () :global)
+(defvar *build-heap-sealed-value* nil)
+
+;;; A sealed fragment's objects are those of its heap that the recorder
+;;; reaches, with each record's replayed value; what the load or anything
+;;; else left in the heap beyond them is not part of it.
+(with-test (:name (:build-heap :seal :members))
+  (with-scratch-file (source "lisp")
+    (with-scratch-file (fasl "fasl")
+      (with-open-file (s source :direction :output :if-exists :supersede)
+        (write-string "(defpackage \"BUILD-HEAP-SEALED\" (:use \"CL\"))
+(in-package \"BUILD-HEAP-SEALED\")
+(defstruct point x y)
+(defun norm (p) (+ (abs (point-x p)) (abs (point-y p))))
+(setf (fdefinition 'cl-user::build-heap-sealed-hook) #'norm)
+(setq cl-user::*build-heap-sealed-value* (list :sealed))
+(let ((temporary (make-list 100))) (length temporary))
+" s))
+      (compile-file source :output-file fasl)
+      (delete-package "BUILD-HEAP-SEALED")
+      (let* ((heap (make-heap :kind :build :check-stores :error))
+             (recorder (make-fragment-recorder heap)))
+        (with-open-file (stream fasl :element-type '(unsigned-byte 8))
+          (with-fragment-recorder (recorder)
+            (with-heap (heap) (load stream))))
+        (assert-all-accounted recorder)
+        (let ((stray (with-heap (heap) (list :stray)))
+              (count (seal-fragment recorder))
+              (members (make-hash-table :test 'eq)))
+          (map-fragment-members (lambda (x) (setf (gethash x members) t)) recorder)
+          (assert (= count (hash-table-count members)))
+          (flet ((member-p (x) (gethash x members)))
+            (let ((norm (fdefinition (find-symbol "NORM" "BUILD-HEAP-SEALED"))))
+              (assert (member-p recorder))
+              (assert (member-p (find-package "BUILD-HEAP-SEALED")))
+              (assert (member-p (sb-kernel:find-layout
+                                 (find-symbol "POINT" "BUILD-HEAP-SEALED"))))
+              (assert (member-p (sb-kernel:fun-code-header (sb-kernel:%fun-fun norm))))
+              (assert (member-p *build-heap-sealed-value*))
+              (assert (not (member-p stray)))
+              ;; Global objects are never members, whatever refers to them.
+              (assert (not (member-p (find-package "CL"))))
+              (let ((record (find (sb-int:find-fdefn 'build-heap-sealed-hook)
+                                  (records-of-kind recorder :set-function)
+                                  :key #'fragment-record-target)))
+                (assert record)
+                (assert (equal (fragment-record-replay-values record) (list norm))))))
+          ;; Its allocation is over.
+          (assert-error (with-heap (heap) (list 1)))
+          (sb-ext:gc :full t)
+          (assert (equal *build-heap-sealed-value* '(:sealed))))))))

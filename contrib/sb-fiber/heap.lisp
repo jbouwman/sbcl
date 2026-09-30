@@ -568,6 +568,11 @@ a hash table.  Outside a build, BODY runs as it is."
 (defun fragment-record-escapes (record)
   "The number of escapes RECORD accounts for."
   (sb-vm::fragment-record-escapes record))
+(defun fragment-record-replay-values (record)
+  "What RECORD's target held when its fragment was sealed, which replaying
+RECORD installs, for the kinds whose effect is a value: :SET-FUNCTION,
+:SET-VALUE and :SET-INFO."
+  (sb-vm::fragment-record-replay-values record))
 
 (defun fragment-unaccounted-escapes (recorder)
   "The escapes no record or cache accounts for, oldest first, as lists
@@ -578,6 +583,20 @@ fragment, by the code STORE-SITE names for STORE-PC."
 (defun fragment-cache-escapes (recorder)
   "The number of escapes RECORDER accounted to caches."
   (sb-vm::fragment-recorder-cache-escapes recorder))
+
+(defun seal-fragment (recorder)
+  "Finish the fragment RECORDER was recording.  Each record notes the value
+it replays, the build heap is sealed so that it is never installed again,
+and the fragment's objects are found: those of the heap RECORDER reaches.
+What else the load left in the heap is not part of the fragment.  Returns
+the number of the fragment's objects.  The heap must not be installed;
+sealing a fragment with unaccounted escapes is a continuable error."
+  (sb-vm::seal-fragment recorder))
+
+(defun map-fragment-members (function recorder)
+  "Call FUNCTION on each object of the fragment RECORDER was recording, in
+address order.  RECORDER's fragment must be sealed."
+  (sb-vm::map-fragment-members (coerce function (quote function)) recorder))
 
 ;;; --- Copying objects between heaps ---
 

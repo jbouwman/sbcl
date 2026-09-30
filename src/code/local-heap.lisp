@@ -282,7 +282,11 @@ strict heap. A CONTINUE restart performs the store anyway.")
   (target nil :read-only t)
   (args nil :type list :read-only t)
   ;; Escapes the record accounts for.
-  (escapes 0 :type fixnum))
+  (escapes 0 :type fixnum)
+  ;; What the target holds once the fragment is built, which replaying
+  ;; the record installs: set by SEAL-FRAGMENT for the kinds whose effect
+  ;; is a value rather than their arguments.
+  (replay-values nil :type list))
 
 (defstruct (fragment-recorder
             (:constructor %make-fragment-recorder (heap-address heap-id))
@@ -383,6 +387,76 @@ this thread."
                (push (list object value (local-heap-last-store-pc))
                      (fragment-recorder-unaccounted recorder)))))
       t)))
+
+;;; --- Sealing a fragment ---
+
+(define-alien-routine ("local_heap_seal" %seal-local-heap) int
+  (heap unsigned-long))
+
+(define-alien-routine ("local_heap_fragment_trace" %trace-fragment) long
+  (heap unsigned-long)
+  (root unsigned-long))
+
+(define-alien-routine ("local_heap_fragment_member" %fragment-member) unsigned-long
+  (heap unsigned-long)
+  (index unsigned-long))
+
+(defconstant heap-member-count-stat 28)
+
+;;; The value RECORD's target holds now, for the kinds that replay a value:
+;;; a function definition, a global value, a globaldb entry.
+(defun fragment-record-current-values (record)
+  (let ((target (fragment-record-target record)))
+    (case (fragment-record-kind record)
+      (:set-function
+       (let ((function (if (sb-kernel:fdefn-p target)
+                           (sb-kernel:fdefn-fun target)
+                           (sb-kernel:%symbol-function target))))
+         (and function (list function))))
+      (:set-value
+       (handler-case (list (sb-ext:symbol-global-value target))
+         (unbound-variable () nil)))
+      (:set-info
+       (destructuring-bind (name info-number) (fragment-record-args record)
+         (multiple-value-bind (value found) (sb-impl::get-info-value name info-number)
+           (and found (list value))))))))
+
+(defun seal-fragment (recorder)
+  "Finish the fragment RECORDER was recording: note in each record the value
+it replays, seal the build heap so that nothing more is allocated in it, and
+find the fragment's objects, the heap's objects that RECORDER reaches.
+Return their number.  The heap must not be installed."
+  (let ((heap (fragment-recorder-heap-address recorder)))
+    (when (fragment-recorder-unaccounted recorder)
+      (cerror "Seal it anyway."
+              "~D escapes from the fragment are accounted to no record."
+              (length (fragment-recorder-unaccounted recorder))))
+    (when (= (current-local-heap-address) heap)
+      (error "The build heap of a fragment being sealed is installed."))
+    ;; The values are consed in the heap, where the trace can follow them.
+    (dolist (record (fragment-recorder-records recorder))
+      (let ((current (fragment-record-current-values record)))
+        (when current
+          (unless (nth-value 1 (sb-kernel::call-with-heap-of
+                                recorder
+                                (lambda ()
+                                  (setf (fragment-record-replay-values record)
+                                        (copy-list current)))))
+            (error "The build heap of a fragment being sealed is sealed ~
+                    or installed on another thread.")))))
+    (let ((rc (%seal-local-heap heap)))
+      (unless (zerop rc)
+        (error "Sealing the build heap failed: ~D" rc)))
+    (without-gcing
+      (%trace-fragment heap (get-lisp-obj-address recorder)))))
+
+(defun map-fragment-members (function recorder)
+  "Call FUNCTION on each object of the fragment RECORDER was recording, in
+address order, once SEAL-FRAGMENT has found them."
+  (declare (function function))
+  (let ((heap (fragment-recorder-heap-address recorder)))
+    (dotimes (i (%local-heap-stat heap heap-member-count-stat))
+      (funcall function (%make-lisp-obj (%fragment-member heap i))))))
 
 ;;; Called from C (local_heap_exhausted).  The runtime has already
 ;;; uninstalled the exhausted heap, so the condition is built in the
