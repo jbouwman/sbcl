@@ -201,6 +201,7 @@ static void free_descriptor(struct local_heap *h)
     pthread_mutex_destroy(&h->mailbox_lock);
     free(h->pages);
     free(h->outgoing);
+    free(h->members);
     free(h);
 }
 
@@ -296,6 +297,7 @@ int local_heap_switch_in_pa(struct thread *th, struct local_heap *to)
     struct local_heap *from = ed->current_heap;
     if (from == to) return 0;
     if (to && to->state != LOCAL_HEAP_LIVE) return -2;
+    if (to && to->sealed) return -3;
     if (to && to->installed_on && to->installed_on != th) return -1;
     if (from) {
         from->parked_mixed = th->mixed_tlab;
@@ -650,9 +652,13 @@ void local_heap_reset_violations(void)
 
 /* --- Mailbox --- */
 
+/* Seal a message fragment before it is sent, or a build heap whose
+ * module is built: close its regions, and for a build heap make its
+ * objects enumerable and refuse to install it again. */
 int local_heap_seal(struct local_heap *f)
 {
-    if (f->kind != LOCAL_HEAP_FRAGMENT || f->state != LOCAL_HEAP_LIVE)
+    if ((f->kind != LOCAL_HEAP_FRAGMENT && f->kind != LOCAL_HEAP_BUILD)
+        || f->state != LOCAL_HEAP_LIVE)
         return -3;
     if (f->installed_on) return -1;
     /* Closing touches page metadata that a concurrent global GC would
@@ -661,6 +667,13 @@ int local_heap_seal(struct local_heap *f)
     block_blockable_signals(&old);
     ensure_region_closed(&f->parked_mixed, PAGE_TYPE_MIXED);
     ensure_region_closed(&f->parked_cons, PAGE_TYPE_CONS);
+    if (f->kind == LOCAL_HEAP_BUILD) {
+        ensure_region_closed(&f->parked_sys_mixed, PAGE_TYPE_MIXED);
+        ensure_region_closed(&f->parked_sys_cons, PAGE_TYPE_CONS);
+        ensure_region_closed(&f->code_alloc, PAGE_TYPE_CODE);
+        local_heap_materialize(f);
+        f->sealed = 1;
+    }
     thread_sigmask(SIG_SETMASK, &old, 0);
     return 0;
 }
@@ -798,6 +811,8 @@ uword_t local_heap_stat(struct local_heap *h, int which)
     case 24: return h->bytes_claimed;
     case 25: return h->alloc_trap;
     case 26: return h->kind;
+    case 27: return h->sealed;
+    case 28: return h->nmembers;
     default: return 0;
     }
 }
