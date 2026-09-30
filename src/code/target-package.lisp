@@ -1903,6 +1903,7 @@ it is not already present."
 external symbols of the used packages are accessible as internal symbols in
 PACKAGE."
   (let ((target (find-package package)))
+    (declare (ignorable target)) ; unused without local heaps
     (sb-kernel::with-fragment-record (:use-package target target packages-to-use)
       (%use-package packages-to-use package))))
 
