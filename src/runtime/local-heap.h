@@ -37,7 +37,13 @@ struct thread;
 
 enum local_heap_kind {
     LOCAL_HEAP_PROCESS  = 1,  /* attached to a process; collected locally */
-    LOCAL_HEAP_FRAGMENT = 2   /* a sealed message; adopted by the receiver */
+    LOCAL_HEAP_FRAGMENT = 2,  /* a sealed message; adopted by the receiver */
+    /* A module being built into a core fragment.  While installed it
+     * takes every allocation of its thread: code, the system TLABs and
+     * WITH-GLOBAL-HEAP included.  It claims whole pages, which it shares
+     * with no other heap, and is never collected locally: a global
+     * collection walks all of it as roots and frees none of it. */
+    LOCAL_HEAP_BUILD    = 3
 };
 
 enum local_heap_state {
@@ -87,6 +93,11 @@ struct local_heap {
     /* Parked allocation regions while the heap is not installed on a thread. */
     struct alloc_region parked_cons;
     struct alloc_region parked_mixed;
+    /* Kind BUILD only: the parked system TLABs, and the region code is
+     * allocated from, which stays here while the heap is installed. */
+    struct alloc_region parked_sys_cons;
+    struct alloc_region parked_sys_mixed;
+    struct alloc_region code_alloc;
 
     /* Every page on which this heap owns a block, small and large alike. */
     page_index_t *pages;

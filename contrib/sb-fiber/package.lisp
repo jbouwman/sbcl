@@ -70,6 +70,7 @@
    #:heap-id
    #:heap-fiber
    #:heap-alive-p
+   #:heap-kind
    #:heap-released-p
    #:current-heap
    #:object-heap

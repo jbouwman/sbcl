@@ -203,9 +203,13 @@ struct local_heap *local_heap_create(int kind, uword_t gc_threshold,
     if (!h) return NULL;
     gc_set_region_empty(&h->parked_cons);
     gc_set_region_empty(&h->parked_mixed);
+    gc_set_region_empty(&h->parked_sys_cons);
+    gc_set_region_empty(&h->parked_sys_mixed);
+    gc_set_region_empty(&h->code_alloc);
     h->kind = kind;
     h->state = LOCAL_HEAP_LIVE;
-    h->gc_threshold = gc_threshold;
+    /* A build heap keeps everything it allocates. */
+    h->gc_threshold = kind == LOCAL_HEAP_BUILD ? 0 : gc_threshold;
     h->hard_limit = hard_limit;
     h->fullsweep_after = 16;
     local_heap_set_flags(h, flags);
@@ -234,6 +238,9 @@ int local_heap_release_internal(struct local_heap *h, int force)
 {
     struct thread *th = get_sb_vm_thread();
     if (h->state != LOCAL_HEAP_LIVE && h->state != LOCAL_HEAP_RELEASING) return -2;
+    /* Global tables refer into a build heap once it has been used: its
+     * objects stay part of the process. */
+    if (h->kind == LOCAL_HEAP_BUILD && !force) return -3;
     if (h->installed_on) {
         if (h->installed_on == th) local_heap_switch(th, NULL);
         else if (!force) return -1;
@@ -293,6 +300,10 @@ int local_heap_release_id(uint32_t id, uint32_t epoch)
         table_unlock(&old);
         return -1;
     }
+    if (h->kind == LOCAL_HEAP_BUILD) {
+        ignore_value(mutex_release(&local_heap_table_lock));
+        return -3;
+    }
     h->state = LOCAL_HEAP_RELEASING;
     table_unlock(&old);
     return local_heap_release_internal(h, 0);
@@ -330,6 +341,26 @@ int local_heap_switch_in_pa(struct thread *th, struct local_heap *to)
     } else {
         th->mixed_tlab = ed->saved_mixed_tlab;
         th->cons_tlab  = ed->saved_cons_tlab;
+    }
+    /* A build heap takes the system TLABs as well.  The thread's own are
+     * saved while any build heap is installed. */
+    bool from_build = from && from->kind == LOCAL_HEAP_BUILD;
+    bool to_build = to && to->kind == LOCAL_HEAP_BUILD;
+    if (from_build) {
+        from->parked_sys_mixed = th->sys_mixed_tlab;
+        from->parked_sys_cons  = th->sys_cons_tlab;
+    } else if (to_build) {
+        ed->saved_sys_mixed_tlab = th->sys_mixed_tlab;
+        ed->saved_sys_cons_tlab  = th->sys_cons_tlab;
+    }
+    if (to_build) {
+        th->sys_mixed_tlab = to->parked_sys_mixed;
+        th->sys_cons_tlab  = to->parked_sys_cons;
+        gc_set_region_empty(&to->parked_sys_mixed);
+        gc_set_region_empty(&to->parked_sys_cons);
+    } else if (from_build) {
+        th->sys_mixed_tlab = ed->saved_sys_mixed_tlab;
+        th->sys_cons_tlab  = ed->saved_sys_cons_tlab;
     }
     ed->current_heap = to;
     th->local_heap = to;
@@ -809,6 +840,7 @@ uword_t local_heap_stat(struct local_heap *h, int which)
     case 23: return h->epoch;
     case 24: return h->bytes_claimed;
     case 25: return h->alloc_trap;
+    case 26: return h->kind;
     default: return 0;
     }
 }
