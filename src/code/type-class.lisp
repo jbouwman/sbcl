@@ -798,10 +798,11 @@
 #-sb-xc-host
 (defun ctype-hashset-insert-if-absent (hashset key function)
   (or (hashset-find hashset key)
-      (let ((flags (funcall function key)))
-        (with-system-mutex ((hashset-mutex hashset))
-          (or (hashset-find hashset key)
-              (hashset-insert hashset (copy-ctype key flags)))))))
+      (sb-kernel::with-fragment-record (:interned hashset)
+        (let ((flags (funcall function key)))
+          (with-system-mutex ((hashset-mutex hashset))
+            (or (hashset-find hashset key)
+                (hashset-insert hashset (copy-ctype key flags))))))))
 
 (defvar *hashsets-preloaded* nil)
 (defmacro new-ctype (metatype flags-expr &rest initargs)

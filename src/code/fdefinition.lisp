@@ -24,7 +24,8 @@
   (declare (type (or fdefn symbol list) fname))
   (setf (fdefn-fun (if (fdefn-p fname) fname (find-or-create-fdefn fname))) fun))
 (defun (setf fdefn-fun) (fun fdefn)
-  (%primitive sb-vm::set-fdefn-fun fun fdefn)
+  (sb-kernel::with-fragment-record (:set-function fdefn fdefn)
+    (%primitive sb-vm::set-fdefn-fun fun fdefn))
   fun))
 
 ;;; Return the FDEFN object for NAME, or NIL if there is no fdefn.
@@ -112,23 +113,26 @@
     (t
       ;; We won't reach here if the name was not legal
       (sb-kernel::with-global-heap
-      (let (made-new)
-        (dx-flet ((new (name)
-                    (setq made-new t)
-                    (make-fdefn name)))
-          (let ((fdefn (with-globaldb-name (key1 key2) name
-                        :simple (get-info-value-initializing
-                                 :function :definition name (new name))
-                        :hairy (get-fancily-named-fdefn name #'new))))
-            ;; Slot accessors spring into existence as soon as a reference
-            ;; is made to the respective fdefn, but we can't do this in
-            ;; (flet NEW) because ENSURE-ACCESSOR calls (SETF FDEFINITION)
-            ;; which would recurse, as the fdefn would not have been
-            ;; installed yet.
-            (when (and made-new
-                       (typep name '(cons (eql sb-pcl::slot-accessor))))
-              (sb-pcl::ensure-accessor name))
-            fdefn)))))))
+      (sb-kernel::with-fragment-record
+          (:fdefn (with-globaldb-name (key1 key2) name :simple (progn key2 key1) :hairy nil)
+           name)
+        (let (made-new)
+          (dx-flet ((new (name)
+                      (setq made-new t)
+                      (make-fdefn name)))
+            (let ((fdefn (with-globaldb-name (key1 key2) name
+                          :simple (get-info-value-initializing
+                                   :function :definition name (new name))
+                          :hairy (get-fancily-named-fdefn name #'new))))
+              ;; Slot accessors spring into existence as soon as a reference
+              ;; is made to the respective fdefn, but we can't do this in
+              ;; (flet NEW) because ENSURE-ACCESSOR calls (SETF FDEFINITION)
+              ;; which would recurse, as the fdefn would not have been
+              ;; installed yet.
+              (when (and made-new
+                         (typep name '(cons (eql sb-pcl::slot-accessor))))
+                (sb-pcl::ensure-accessor name))
+              fdefn))))))))
 
 ;;; Remove NAME's FTYPE information unless it was explicitly PROCLAIMED.
 ;;; The NEW-FUNCTION argument is presently unused, but could be used
@@ -500,19 +504,20 @@
               (if (fdefn-p result)
                   result
                   (let ((new-fdefn (funcall constructor name)))
-                    (if (<= (incf (cdr fdefns)) (ash (length vector) -1)) ; under 50% full
-                        ;; It might even be less full than that due to GC.
-                        (setf (svref vector result) new-fdefn)
-                        ;; The actual count is unknown without re-counting.
-                        (let* ((count (count-if #'fdefn-p vector))
-                               (new-size (power-of-two-ceiling
-                                          (ceiling (* count 2))))
-                               (new-vect (make-array new-size :initial-element 0))
-                               (new-mask (1- new-size)))
-                          (dovector (item vector)
-                            (when (fdefn-p item)
-                              (insert (globaldb-sxhashoid (fdefn-name item)) item
-                                      new-vect new-mask)))
-                          (insert hash new-fdefn new-vect new-mask)
-                          (setf *fdefns* (cons new-vect (1+ count)))))
+                    (sb-kernel::with-fragment-record (:fdefn nil name new-fdefn)
+                      (if (<= (incf (cdr fdefns)) (ash (length vector) -1)) ; under 50% full
+                          ;; It might even be less full than that due to GC.
+                          (setf (svref vector result) new-fdefn)
+                          ;; The actual count is unknown without re-counting.
+                          (let* ((count (count-if #'fdefn-p vector))
+                                 (new-size (power-of-two-ceiling
+                                            (ceiling (* count 2))))
+                                 (new-vect (make-array new-size :initial-element 0))
+                                 (new-mask (1- new-size)))
+                            (dovector (item vector)
+                              (when (fdefn-p item)
+                                (insert (globaldb-sxhashoid (fdefn-name item)) item
+                                        new-vect new-mask)))
+                            (insert hash new-fdefn new-vect new-mask)
+                            (setf *fdefns* (cons new-vect (1+ count))))))
                     new-fdefn))))))))

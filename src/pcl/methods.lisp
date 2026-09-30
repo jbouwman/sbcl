@@ -411,31 +411,32 @@
 (defmethod reinitialize-instance :around
     ((gf standard-generic-function) &rest args &key
      (lambda-list nil lambda-list-p) (argument-precedence-order nil apo-p))
-  (let* ((old-mc (generic-function-method-combination gf))
-         (mc (getf args :method-combination old-mc))
-         (keys (arg-info-keys (gf-arg-info gf))))
-    (unless (eq mc old-mc)
-      (aver (weak-hashset-memberp gf (method-combination-%generic-functions old-mc)))
-      (aver (not (weak-hashset-memberp gf (method-combination-%generic-functions mc)))))
-    (prog1 (call-next-method)
+  (sb-kernel::with-fragment-record (:reinitialize-generic-function gf gf (copy-list args))
+    (let* ((old-mc (generic-function-method-combination gf))
+           (mc (getf args :method-combination old-mc))
+           (keys (arg-info-keys (gf-arg-info gf))))
       (unless (eq mc old-mc)
-        (remove-from-weak-hashset gf (method-combination-%generic-functions old-mc))
-        (add-to-weak-hashset gf (method-combination-%generic-functions mc)))
-      (sb-thread::with-recursive-system-lock ((gf-lock gf))
-        (cond
-          ((and lambda-list-p apo-p)
-           (set-arg-info gf
-                         :lambda-list lambda-list
-                         :argument-precedence-order argument-precedence-order))
-          (lambda-list-p (set-arg-info gf :lambda-list lambda-list))
-          (t (set-arg-info gf)))
-        (let ((arg-info (gf-arg-info gf)))
-          (unless (and (eq mc old-mc) (equal keys (arg-info-keys arg-info)))
-            (flush-effective-method-cache gf))
-          (when (arg-info-valid-p arg-info)
-            (update-dfun gf)))
-        (map-dependents gf (lambda (dependent)
-                             (apply #'update-dependent gf dependent args)))))))
+        (aver (weak-hashset-memberp gf (method-combination-%generic-functions old-mc)))
+        (aver (not (weak-hashset-memberp gf (method-combination-%generic-functions mc)))))
+      (prog1 (call-next-method)
+        (unless (eq mc old-mc)
+          (remove-from-weak-hashset gf (method-combination-%generic-functions old-mc))
+          (add-to-weak-hashset gf (method-combination-%generic-functions mc)))
+        (sb-thread::with-recursive-system-lock ((gf-lock gf))
+          (cond
+            ((and lambda-list-p apo-p)
+             (set-arg-info gf
+                           :lambda-list lambda-list
+                           :argument-precedence-order argument-precedence-order))
+            (lambda-list-p (set-arg-info gf :lambda-list lambda-list))
+            (t (set-arg-info gf)))
+          (let ((arg-info (gf-arg-info gf)))
+            (unless (and (eq mc old-mc) (equal keys (arg-info-keys arg-info)))
+              (flush-effective-method-cache gf))
+            (when (arg-info-valid-p arg-info)
+              (update-dfun gf)))
+          (map-dependents gf (lambda (dependent)
+                               (apply #'update-dependent gf dependent args))))))))
 
 (defun set-methods (gf methods)
   (setf (generic-function-methods gf) nil)
@@ -529,6 +530,7 @@
            (sb-c::ftype-from-definition name)))))
 
 (defun real-add-method (generic-function method &optional skip-dfun-update-p)
+  (sb-kernel::with-fragment-record (:add-method generic-function generic-function method)
   (sb-kernel::with-global-heap
   (flet ((similar-lambda-lists-p (old-method new-lambda-list)
            (binding* (((a-llks a-nreq a-nopt)
@@ -632,7 +634,7 @@
                                                   dep 'add-method method)))))
         (serious-condition (c)
           (error c)))))
-  generic-function))
+  generic-function)))
 
 (defun real-remove-method (generic-function method)
   (sb-kernel::with-global-heap

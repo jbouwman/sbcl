@@ -734,17 +734,21 @@ This is interpreted as
                    (let ((copy (copy-packed-info packed-info)))
                      (setf (%info-ref copy index) new-value)
                      copy)))))
+      ;; A name outside the fragment being built gets a record, which
+      ;; replays the value the name has once the fragment is built.
       (with-globaldb-name (key1 key2) name
         :simple
         ;; UPDATE-SYMBOL-INFO never supplies OLD-INFO as NIL.
-        (update-symbol-info key1 (lambda (old-info)
-                                   (augment old-info key2)))
+        (sb-kernel::with-fragment-record (:set-info key1 name info-number)
+          (update-symbol-info key1 (lambda (old-info)
+                                     (augment old-info key2))))
         :hairy
         ;; INFO-PUTHASH supplies NIL for OLD-INFO if NAME was absent.
-        (info-puthash *info-environment* name
-                      (lambda (old-info)
-                        (augment (or old-info +nil-packed-infos+)
-                                 +no-auxiliary-key+))))))
+        (sb-kernel::with-fragment-record (:set-info nil name info-number)
+          (info-puthash *info-environment* name
+                        (lambda (old-info)
+                          (augment (or old-info +nil-packed-infos+)
+                                   +no-auxiliary-key+)))))))
   new-value)
 
 ;; Instead of accepting a new-value, call NEW-VALUE-FUN to compute it
@@ -775,17 +779,21 @@ This is interpreted as
                          (let ((copy (copy-packed-info packed-info)))
                            (setf (%info-ref copy index) new-value)
                            copy)))))))
+      ;; A name outside the fragment being built gets a record, which
+      ;; replays the value the name has once the fragment is built.
       (with-globaldb-name (key1 key2) name
         :simple
         ;; UPDATE-SYMBOL-INFO never supplies OLD-INFO as NIL.
-        (update-symbol-info key1 (lambda (old-info)
-                                   (augment old-info key2)))
+        (sb-kernel::with-fragment-record (:set-info key1 name info-number)
+          (update-symbol-info key1 (lambda (old-info)
+                                     (augment old-info key2))))
         :hairy
         ;; INFO-PUTHASH supplies NIL for OLD-INFO if NAME was absent.
-        (info-puthash *info-environment* name
-                      (lambda (old-info)
-                        (augment (or old-info +nil-packed-infos+)
-                                 +no-auxiliary-key+)))))
+        (sb-kernel::with-fragment-record (:set-info nil name info-number)
+          (info-puthash *info-environment* name
+                        (lambda (old-info)
+                          (augment (or old-info +nil-packed-infos+)
+                                   +no-auxiliary-key+))))))
     new-value))
 
 ;; %GET-INFO-VALUE-INITIALIZING is provided as a low-level operation similar
@@ -820,17 +828,19 @@ This is interpreted as
       (with-globaldb-name (key1 key2) name
         :simple
         ;; UPDATE-SYMBOL-INFO never supplies OLD-INFO as NIL.
-        (update-symbol-info key1 (lambda (old-info)
-                                   (get-or-set old-info key2)))
+        (sb-kernel::with-fragment-record (:set-info key1 name info-number)
+          (update-symbol-info key1 (lambda (old-info)
+                                     (get-or-set old-info key2))))
         :hairy
         ;; INFO-PUTHASH supplies NIL for OLD-INFO if NAME was absent.
-        (info-puthash *info-environment* name
-                      (lambda (old-info)
-                        (or (get-or-set (or old-info +nil-packed-infos+)
-                                        +no-auxiliary-key+)
-                            ;; Return OLD-INFO to elide writeback. Unlike for
-                            ;; UPDATE-SYMBOL-INFO, NIL is not a no-op marker.
-                            old-info)))))
+        (sb-kernel::with-fragment-record (:set-info nil name info-number)
+          (info-puthash *info-environment* name
+                        (lambda (old-info)
+                          (or (get-or-set (or old-info +nil-packed-infos+)
+                                          +no-auxiliary-key+)
+                              ;; Return OLD-INFO to elide writeback. Unlike for
+                              ;; UPDATE-SYMBOL-INFO, NIL is not a no-op marker.
+                              old-info))))))
     result))
 
 ;;; Disassembling these proves that SYS-ALLOC-TRAMP gets called

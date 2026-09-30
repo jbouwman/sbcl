@@ -1057,6 +1057,9 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
 (defvar *cache-miss-values-stack* ()) ; define-thread-local is in target-signal-common
 
 (defun cache-miss-values (gf args state)
+  (sb-kernel::with-fragment-cache (%cache-miss-values gf args state)))
+
+(defun %cache-miss-values (gf args state)
   (multiple-value-bind (nreq applyp metatypes nkeys arg-info)
       (get-generic-fun-info gf)
     (declare (ignore nreq applyp nkeys))
@@ -1734,7 +1737,10 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
                  (when (eql-specializer-p spec) (return t)))
            (return t)))))
 
+;;; A generic function's discriminating function is derived from its
+;;; methods, and recomputed when it misses: a cache.
 (defun update-dfun (generic-function &optional dfun cache info)
+  (sb-kernel::with-fragment-cache
   (sb-kernel::with-global-heap
   (let ((early-p (early-gf-p generic-function)))
     (flet ((update ()
@@ -1780,7 +1786,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
             ;; where we can end up in a metacircular loop here? In
             ;; case there are, better fetch it while interrupts are
             ;; still enabled...
-            (sb-thread::call-with-recursive-system-lock #'update lock)))))))
+            (sb-thread::call-with-recursive-system-lock #'update lock))))))))
 
 ;;; These functions aren't used in SBCL, or documented anywhere that
 ;;; I'm aware of, but they look like they might be useful for

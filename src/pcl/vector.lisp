@@ -75,8 +75,9 @@
             snl *pv-tables*
             (make-pv-table :slot-name-lists snl
                            :pv-size (* 2 (reduce #'+ snl :key #'length))))))
-    (with-system-mutex (*pv-lock*)
-      (%intern-pv-table (mapcar #'intern-slot-names slot-name-lists)))))
+    (sb-kernel::with-fragment-record (:pv-table nil slot-name-lists)
+      (with-system-mutex (*pv-lock*)
+        (%intern-pv-table (mapcar #'intern-slot-names slot-name-lists))))))
 
 (defun use-standard-slot-access-p (class slot-name type)
   (or (not (eq **boot-state** 'complete))

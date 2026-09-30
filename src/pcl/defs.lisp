@@ -569,9 +569,10 @@
 (defun intern-eql-specializer (object)
   ;; Avoid style-warning about compiler-macro being unavailable.
   (declare (notinline make-instance))
-  (with-system-mutex ((hash-table-lock *eql-specializer-table*))
-    (ensure-gethash object *eql-specializer-table*
-                    (make-instance 'eql-specializer :object object))))
+  (sb-kernel::with-fragment-record (:eql-specializer nil object)
+    (with-system-mutex ((hash-table-lock *eql-specializer-table*))
+      (ensure-gethash object *eql-specializer-table*
+                      (make-instance 'eql-specializer :object object)))))
 
 (defclass class (dependent-update-mixin
                  definition-source-mixin

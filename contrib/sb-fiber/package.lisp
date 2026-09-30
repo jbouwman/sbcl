@@ -71,6 +71,16 @@
    #:heap-fiber
    #:heap-alive-p
    #:heap-kind
+   #:make-fragment-recorder
+   #:with-fragment-recorder
+   #:with-fragment-record
+   #:fragment-records
+   #:fragment-record-kind
+   #:fragment-record-target
+   #:fragment-record-args
+   #:fragment-record-escapes
+   #:fragment-unaccounted-escapes
+   #:fragment-cache-escapes
    #:heap-released-p
    #:current-heap
    #:object-heap

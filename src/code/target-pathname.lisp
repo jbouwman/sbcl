@@ -1242,10 +1242,12 @@ system's syntax for files."
       (when pathname
         (or (%pathname-namestring pathname)
             (let ((host (pathname-host-or-no-namestring pathname)))
-              (setf (%pathname-namestring pathname)
-                    (logically-readonlyize
-                     (possibly-base-stringize-to-heap
-                      (funcall (host-unparse host) pathname)))))))))
+              ;; A memo on a global pathname is a cache.
+              (sb-kernel::with-fragment-cache
+                (setf (%pathname-namestring pathname)
+                      (logically-readonlyize
+                       (possibly-base-stringize-to-heap
+                        (funcall (host-unparse host) pathname))))))))))
 
   (defun host-namestring (pathname)
     "Return a string representation of the name of the host in PATHNAME."

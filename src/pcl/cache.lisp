@@ -513,7 +513,8 @@
                 (%fill-cache (copy-cache cache) layouts value t))
                (t
                 (copy-and-expand-cache cache layouts value)))))
-    (%fill-cache cache (ensure-list layouts) value nil)))
+    (sb-kernel::with-fragment-cache
+      (%fill-cache cache (ensure-list layouts) value nil))))
 
 ;;; Calls FUNCTION with all layouts and values in cache.
 (defun map-cache (function cache)

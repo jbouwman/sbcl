@@ -2043,6 +2043,8 @@ core and return a descriptor to it."
   (cold-set 'sb-c::*code-serialno* (make-fixnum-descriptor (1+ sb-c::*code-serialno*)))
 
   (cold-set 'sb-impl::*setf-fdefinition-hook* *nil-descriptor*)
+  ;; Read by definers that run during cold init.
+  (cold-set 'sb-kernel::*fragment-recorder* *nil-descriptor*)
   (cold-set 'sb-impl::*user-hash-table-tests* *nil-descriptor*)
   (cold-set 'sb-lockless:+tail+ *lflist-tail-atom*)
 

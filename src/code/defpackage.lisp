@@ -404,6 +404,20 @@ SB-MANUAL:@PACKAGE-LOCAL-NICKNAMES."
                        imports interns
                        exports implement local-nicknames
                        lock doc-string)
+  (sb-kernel::with-fragment-record (:update-package package package)
+    (%update-package package nicknames source-location
+                     shadows shadowing-imports
+                     use
+                     imports interns
+                     exports implement local-nicknames
+                     lock doc-string)))
+
+(defun %update-package (package nicknames source-location
+                        shadows shadowing-imports
+                        use
+                        imports interns
+                        exports implement local-nicknames
+                        lock doc-string)
   (rename-package package (package-name package) nicknames)
   ;; 1. :shadow and :shadowing-import-from
   ;;

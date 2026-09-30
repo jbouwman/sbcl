@@ -136,3 +136,96 @@
           (funcall remember :k (funcall point :x 1 :y 2))
           (assert (typep (funcall recall :k) (find-symbol "POINT" "BUILD-HEAP-MODULE")))
           (assert (eql 0 (funcall area (make-instance shape :name "s")))))))))
+
+;;; --- Records ---
+
+;;; Run BODY with a checked build heap installed and a recorder bound, and
+;;; return the recorder.
+(defmacro recording ((&optional (heap (gensym "HEAP"))) &body body)
+  (let ((recorder (gensym "RECORDER")))
+    `(let* ((,heap (make-heap :kind :build :check-stores :error))
+            (,recorder (make-fragment-recorder ,heap)))
+       (with-fragment-recorder (,recorder)
+         (with-heap (,heap) ,@body))
+       ,recorder)))
+
+(defun assert-all-accounted (recorder)
+  (let ((unaccounted (fragment-unaccounted-escapes recorder)))
+    (assert (null unaccounted) ()
+            "Unaccounted escapes:~{~%  ~S~}"
+            (mapcar (lambda (escape)
+                      (destructuring-bind (object value pc) escape
+                        (list (type-of object) (type-of value) (store-site pc))))
+                    unaccounted))))
+
+(defun records-of-kind (recorder kind)
+  (remove kind (fragment-records recorder) :key #'fragment-record-kind :test-not #'eq))
+
+(with-test (:name (:build-heap :records :intern-into-a-global-package))
+  (let* ((recorder (recording () (intern "BUILD-HEAP-FRESH-KEYWORD" :keyword)))
+         (record (first (records-of-kind recorder :intern))))
+    (assert-all-accounted recorder)
+    (assert record)
+    (assert (eq (fragment-record-target record) (find-package :keyword)))
+    (assert (plusp (fragment-record-escapes record)))))
+
+(defvar *build-heap-global-value* nil)
+
+(with-test (:name (:build-heap :records :global-value-set))
+  (let* ((recorder (recording () (setq *build-heap-global-value* (list :built))))
+         (record (first (records-of-kind recorder :set-value))))
+    (assert-all-accounted recorder)
+    (assert record)
+    (assert (eq (fragment-record-target record) '*build-heap-global-value*))))
+
+(defvar *build-heap-global-cons* (list :global))
+
+(with-test (:name (:build-heap :records :unrecorded-store-is-unaccounted))
+  (let ((recorder (recording () (setf (car *build-heap-global-cons*) (list :built)))))
+    (destructuring-bind ((object value pc)) (fragment-unaccounted-escapes recorder)
+      (assert (eq object *build-heap-global-cons*))
+      (assert (equal value '(:built)))
+      (assert (typep pc 'sb-ext:word)))))
+
+(with-test (:name (:build-heap :records :type-caches-are-not-records))
+  (let ((recorder (recording ()
+                    (sb-kernel:specifier-type
+                     '(or (integer 3 17) (member :build-heap-a :build-heap-b))))))
+    (assert-all-accounted recorder)
+    (assert (plusp (fragment-cache-escapes recorder)))))
+
+;;; A module's definitions leave nothing unaccounted: each store into a
+;;; global object belongs to a record or a cache.
+(with-test (:name (:build-heap :records :module-is-accounted-for))
+  (with-scratch-file (source "lisp")
+    (with-scratch-file (fasl "fasl")
+      (with-open-file (s source :direction :output :if-exists :supersede)
+        (write-string "(defpackage \"BUILD-HEAP-RECORDED\" (:use \"CL\") (:nicknames \"BHR\"))
+(in-package \"BUILD-HEAP-RECORDED\")
+(defstruct point x y)
+(defclass shape (standard-object) ((name :initarg :name :reader shape-name)))
+(defclass circle (shape) ((radius :initarg :radius)))
+(define-condition shape-error (error) ((shape :initarg :shape)))
+(deftype small () '(integer 0 7))
+(defgeneric area (shape))
+(defmethod area ((shape circle)) (* pi (expt (slot-value shape 'radius) 2)))
+(defmethod print-object ((point point) stream) (format stream \"#<point>\"))
+(defmacro twice (x) `(progn ,x ,x))
+(defvar *shapes* (make-hash-table))
+(defun remember (k v) (setf (gethash k *shapes*) v))
+(declaim (ftype (function (small) small) bump))
+(defun bump (n) (min 7 (1+ n)))
+(export '(point shape circle area))
+" s))
+      (compile-file source :output-file fasl)
+      (delete-package "BUILD-HEAP-RECORDED")
+      ;; The stream is the builder's; the load is the module's.
+      (with-open-file (stream fasl :element-type '(unsigned-byte 8))
+        (let ((recorder (recording () (load stream))))
+          (assert-all-accounted recorder)
+          (assert (find (find-package "BUILD-HEAP-RECORDED")
+                        (records-of-kind recorder :register-package)
+                        :key (lambda (record) (first (fragment-record-args record)))))
+          (assert (find #'print-object (records-of-kind recorder :add-method)
+                        :key #'fragment-record-target))
+          (assert (= 7 (funcall (find-symbol "BUMP" "BHR") 6))))))))

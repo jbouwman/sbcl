@@ -226,11 +226,12 @@
 
 ;;; Keep this a separate function for testing.
 (defun make-ctor (function-name class-name initargs safe-p)
+  (sb-kernel::with-fragment-record (:ctor nil function-name class-name initargs safe-p)
   (sb-kernel::with-global-heap
   (let ((ctor (%make-ctor 'ctor class-name nil initargs nil safe-p)))
     (install-initial-constructor ctor t)
     (setf (gethash function-name *all-ctors*) ctor)
-    ctor)))
+    ctor))))
 
 (defun ensure-allocator (function-name class-name)
   (with-world-lock ()
@@ -1271,8 +1272,9 @@
                             (list* 'initialize-instance class-proto initargs)
                             (list* 'shared-initialize class-proto t initargs))
                       t nil)))
-                (setf (plist-value class 'mi-initargs)
-                      (acons keys invalid cache))
+                (sb-kernel::with-fragment-cache
+                  (setf (plist-value class 'mi-initargs)
+                        (acons keys invalid cache)))
                 invalid))))
     (when invalid-keys
       ;; FIXME: should have an operation here, and maybe a set of
@@ -1296,8 +1298,9 @@
                       (list (list* 'reinitialize-instance instance initargs)
                             (list* 'shared-initialize instance nil initargs))
                       t nil)))
-                (setf (plist-value class 'ri-initargs)
-                      (acons keys invalid cache))
+                (sb-kernel::with-fragment-cache
+                  (setf (plist-value class 'ri-initargs)
+                        (acons keys invalid cache)))
                 invalid))))
     (when invalid-keys
       (initarg-error class invalid-keys))))

@@ -245,7 +245,9 @@ between the ~A definition and the ~A definition"
                    (when classoid
                      (setf (layout-classoid new-layout) classoid))
                    (or (and classoid (classoid-layout classoid))
-                       (ensure-gethash name table new-layout))))))
+                       (sb-kernel::with-fragment-record
+                           (:forward-layout nil name new-layout)
+                         (ensure-gethash name table new-layout)))))))
          (classoid
            (or (find-classoid name nil) (layout-classoid existing-layout))))
     (cond ((or (eq (layout-invalid existing-layout) :uninitialized)
@@ -269,6 +271,11 @@ between the ~A definition and the ~A definition"
         (if (eq oldval nil) lock oldval))))
 
 (defun add-subclassoid (super sub layout)
+  (declare (sb-c::tlab :system))
+  (sb-kernel::with-fragment-record (:add-subclassoid super super sub layout)
+    (%add-subclassoid super sub layout)))
+
+(defun %add-subclassoid (super sub layout)
   (declare (sb-c::tlab :system))
   (with-system-mutex ((classoid-lock super))
     (let ((table (classoid-subclasses super))
@@ -759,6 +766,12 @@ between the ~A definition and the ~A definition"
 ;;; Again, this should be compiler-only, but easier to make this
 ;;; thread-safe.
 (defun insured-find-classoid (name predicate constructor)
+  (declare (type function predicate)
+           (type (or function symbol) constructor))
+  (sb-kernel::with-fragment-record (:insured-find-classoid nil name)
+    (%insured-find-classoid name predicate constructor)))
+
+(defun %insured-find-classoid (name predicate constructor)
   (declare (type function predicate)
            (type (or function symbol) constructor))
   (let ((table *forward-referenced-layouts*))
