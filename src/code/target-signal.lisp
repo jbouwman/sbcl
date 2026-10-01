@@ -170,7 +170,7 @@
   ;; EXIT in a system thread only ends that thread, leaving the process
   ;; running and the exit lock held. Always initiate shutdown on the main
   ;; thread, even when SIGTERM arrives while that thread blocks signals in GC.
-  (if (sb-thread::main-thread-p)
+  (if (eq sb-thread:*current-thread* (sb-thread::main-thread))
       (exit)
       (sb-thread:interrupt-thread (sb-thread::main-thread) #'exit)))
 
