@@ -32,6 +32,7 @@
                              (:file "../../sb-aclrepl/manual")
                              (:file "../../sb-concurrency/manual")
                              (:file "../../sb-cover/manual")
+                             (:file "../../sb-fiber/manual" :if-feature :sb-fiber)
                              (:file "../../sb-grovel/manual")
                              (:file "../../sb-introspect/manual")
                              (:file "../../sb-md5/manual")
