@@ -3054,7 +3054,11 @@
     (with-open-file (f namestring :if-does-not-exist nil)
       (when f
         (let ((*readtable* (safe-readtable)))
-          (cond ((and (eql (debug-source-created d-source) (file-write-date f))
+          ;; The recorded date is the write date as the compiler records
+          ;; it, clamped to SOURCE_DATE_EPOCH when that is set; compare
+          ;; against the same for the file now.
+          (cond ((and (eql (debug-source-created d-source)
+                           (sb-c::debug-source-write-date (file-write-date f)))
                       start-positions)
                  (file-position f (aref start-positions tlf-offset)))
                 (t

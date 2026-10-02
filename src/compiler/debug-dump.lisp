@@ -413,6 +413,26 @@
 
 ;;; Return DEBUG-SOURCE structure containing information derived from
 ;;; INFO.
+;;; The write date a debug source records for a file whose write date
+;;; is FILE-WRITE-DATE. When SOURCE_DATE_EPOCH is set and earlier, it
+;;; is the epoch, so that a fasl does not depend on when its source was
+;;; checked out. The debugger compares a debug source's recorded date
+;;; against this function's value for the file as it is now, so under
+;;; the variable every source newer than the epoch compares equal to
+;;; the one compiled, as the variable's dating asks.
+#-sb-xc-host
+(defun debug-source-write-date (file-write-date)
+  (let ((source-date-epoch (posix-getenv "SOURCE_DATE_EPOCH")))
+    (if source-date-epoch
+        (multiple-value-bind (val end)
+            (parse-integer source-date-epoch :junk-allowed t)
+          (if (and (= end (length source-date-epoch))
+                   (and val file-write-date)
+                   (< (+ val unix-to-universal-time) file-write-date))
+              (+ val unix-to-universal-time)
+              file-write-date))
+        file-write-date)))
+
 (defun debug-source-for-info (info &key core)
   (declare (type source-info info))
   (let ((file-info (get-toplevelish-file-info info)))
@@ -428,17 +448,7 @@
                       file-info))
       :created
       #+sb-xc-host (file-info-write-date file-info)
-      #-sb-xc-host (let ((source-date-epoch (posix-getenv "SOURCE_DATE_EPOCH"))
-                         (file-write-date (file-info-write-date file-info)))
-                     (if source-date-epoch
-                         (multiple-value-bind (val end)
-                             (parse-integer source-date-epoch :junk-allowed t)
-                           (if (and (= end (length source-date-epoch))
-                                    (and val file-write-date)
-                                    (< (+ val unix-to-universal-time) file-write-date))
-                               (+ val unix-to-universal-time)
-                               file-write-date))
-                         file-write-date))
+      #-sb-xc-host (debug-source-write-date (file-info-write-date file-info))
       :start-positions (coerce-to-smallest-eltype
                         (file-info-positions file-info))
      (if core
