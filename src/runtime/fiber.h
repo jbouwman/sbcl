@@ -115,6 +115,12 @@ void  sb_fiber_rebind_thread(struct sb_fiber_ctx *f, struct thread *new_owner);
  * (up to MAX). Return the count actually written. */
 int   sb_fiber_gc_regs(const struct sb_fiber_ctx *f, lispobj *out, int max);
 
+/* GC-side entry points (shared body in fiber.c).  Each GC TU provides
+ * gc_preserve_fiber_word and gc_scav_fiber_binding_stack as leaf
+ * functions; the shared scanners call them by name. */
+void gc_scan_fiber_stacks         (struct thread *th);
+void gc_scav_fiber_binding_stacks (struct thread *th);
+
 /* The collection count that decides when a suspended fiber's stack is
  * zeroed (arm64; see sb_fiber_lisp_stack_resume).  The collector bumps
  * it with the world stopped. */
