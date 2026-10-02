@@ -566,6 +566,8 @@ during backtrace.
   ;; Statistical CPU profiler data recording buffer
   (sprof-data)
   (sprof-enable :special sb-thread::*sprof-enable*) ; = 0 to block SIGPROF
+  ;; A fixnum SB-SPROF records with each sample; 0 in a new thread.
+  (sprof-tag :special sb-thread::*sprof-tag*)
   ;;
   (arena)
   ;; Miscellaneous arch-specific thread-local state for breakpoints.
