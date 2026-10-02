@@ -2336,6 +2336,9 @@ implementations consider such usage to be well-defined.
           :late ("SBCL" "1.2.15")
           (function destroy-thread :replacement terminate-thread)))
 
+;;; The thread slot SB-SPROF:SAMPLE-TAG reads and sets.
+(declaim (type fixnum *sprof-tag*))
+
 (defvar *interrupt-handler* nil
   "A function which is called with the function argument to SB-THREAD:INTERRUPT-THREAD
 when the interrupt is ready to run.
