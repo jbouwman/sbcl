@@ -729,8 +729,9 @@
 
 (define-vop (bignum-mult-and-add-4-arg)
   (:translate sb-bignum:%multiply-and-add)
+  ;; HI is written before Y is read, so they may not share a register.
   (:args (x :scs (unsigned-reg) :to :result)
-         (y :scs (unsigned-reg) :target lo)
+         (y :scs (unsigned-reg) :to :result)
          (prev :scs (unsigned-reg) :to (:eval 3))
          (carry-in :scs (unsigned-reg) :to (:eval 4)))
   (:arg-types unsigned-num unsigned-num unsigned-num unsigned-num)
