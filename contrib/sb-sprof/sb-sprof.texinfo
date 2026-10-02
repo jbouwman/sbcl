@@ -122,6 +122,21 @@ sampling runs.
 ;      6DC: L3:   83F900           CMP ECX, 0         ; 4/242 samples
 @end example
 
+@strong{Sample tags}
+
+A program that multiplexes its work over a pool of threads, such as a
+scheduler running many tasks on a few workers, cannot tell from a
+worker thread's samples which task they belong to. Each thread has a
+fixnum tag, read and set with @code{sb-sprof:sample-tag}, that the profiler
+records with every sample taken on that thread; the program sets it as
+it switches between tasks. The tag is part of a trace's identity, so
+equal stacks sampled under different tags are counted apart.
+@code{sb-sprof:trace-tag} returns the tag of a trace passed to the function
+given to @code{sb-sprof:map-traces}, and @code{sb-sprof:harvest-traces} hands each
+trace's tag, thread, count and frame names to a function and releases
+the samples, so a program can attribute samples while sampling
+continues. The reports do not use the tag.
+
 @strong{Platform support}
 
 @cindex garbage collector, generational
@@ -203,7 +218,8 @@ The signature of @code{function} must be compatible with (thread trace).
 
 @code{function} is called once for each trace where @code{thread} is the
 @code{sb-thread:thread} instance that was sampled to produce @code{trace}, and @code{trace}
-is an opaque object to be passed to @code{map-trace-pc-locs}.
+is an opaque object to be passed to @code{map-trace-pc-locs}.  @code{trace-tag}
+returns the @code{sample-tag} the thread had when @code{trace} was sampled.
 
 EXPERIMENTAL: Interface subject to change.
 @end deffn
@@ -216,6 +232,28 @@ Can be applied to the arguments passed by @code{map-trace-pc-locs} and
 @code{map-all-pc-locs}.
 
 EXPERIMENTAL: Interface subject to change.
+@end deffn
+@anchor{Function sb-sprof sample-tag}
+@ffindex @sortas{sample-tag sb-sprof} sample-tag [sb-sprof]
+@deffn{Function} sb-sprof:sample-tag
+The fixnum the profiler records with each sample taken on the current
+thread, 0 unless set. Set it with @code{setf}; it is part of a trace's identity,
+so equal stacks sampled under different tags are counted apart.
+@end deffn
+@anchor{Function sb-sprof trace-tag}
+@ffindex @sortas{trace-tag sb-sprof} trace-tag [sb-sprof]
+@deffn{Function} sb-sprof:trace-tag trace
+The @code{sample-tag} the sampled thread had when @code{trace}, an object passed to
+the function given to @code{map-traces}, was sampled.
+@end deffn
+@anchor{Function sb-sprof harvest-traces}
+@ffindex @sortas{harvest-traces sb-sprof} harvest-traces [sb-sprof]
+@deffn{Function} sb-sprof:harvest-traces function
+Call @code{function} on each distinct trace sampled so far, with the sample tag,
+the thread, the number of times the trace was sampled and the names of its
+frames from the outermost to the innermost, as the reports print them; then
+release the samples. Sampling need not be stopped: samples taken afterwards
+are kept for the next harvest or report.
 @end deffn
 @anchor{Function sb-sprof report}
 @ffindex @sortas{report sb-sprof} report [sb-sprof]

@@ -135,6 +135,21 @@
       ;      6DA:       8BC3             MOV EAX, EBX       ; 5/242 samples
       ;      6DC: L3:   83F900           CMP ECX, 0         ; 4/242 samples
 
+  __Sample tags__
+
+  A program that multiplexes its work over a pool of threads, such as a
+  scheduler running many tasks on a few workers, cannot tell from a
+  worker thread's samples which task they belong to. Each thread has a
+  fixnum tag, read and set with SB-SPROF:SAMPLE-TAG, that the profiler
+  records with every sample taken on that thread; the program sets it as
+  it switches between tasks. The tag is part of a trace's identity, so
+  equal stacks sampled under different tags are counted apart.
+  SB-SPROF:TRACE-TAG returns the tag of a trace passed to the function
+  given to SB-SPROF:MAP-TRACES, and SB-SPROF:HARVEST-TRACES hands each
+  trace's tag, thread, count and frame names to a function and releases
+  the samples, so a program can attribute samples while sampling
+  continues. The reports do not use the tag.
+
   __Platform support__
 
   Allocation profiling is only supported on SBCL builds that use the
@@ -147,6 +162,9 @@
   "__Functions__"
   (sb-sprof:map-traces function)
   (sb-sprof:sample-pc function)
+  (sb-sprof:sample-tag function)
+  (sb-sprof:trace-tag function)
+  (sb-sprof:harvest-traces function)
   (sb-sprof:report function)
   (sb-sprof:reset function)
   (sb-sprof:start-profiling function)
