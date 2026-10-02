@@ -194,7 +194,11 @@
                    ((alien-array-type-p type)
                     (let* ((elt (alien-array-type-element-type type))
                            (elt-bytes (ceiling (alien-type-bits elt) 8))
-                           (n (or (first (alien-array-type-dimensions type)) 0)))
+                           ;; Every element, whatever the array's rank.
+                           (dims (alien-array-type-dimensions type))
+                           (n (if (and dims (every #'integerp dims))
+                                  (reduce #'* dims)
+                                  0)))
                       (dotimes (i n)
                         (walk elt (+ offset-bytes (* i elt-bytes))))))
                    ;; Leaf scalar
