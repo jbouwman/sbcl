@@ -11,8 +11,8 @@ tag is reachable.
 | branch | role |
 |---|---|
 | `master` | Mirrors upstream master. Fast-forwarded after each monthly SBCL release; nothing is committed to it. |
-| `sb-local-heaps` | The integration branch, and the only branch that `sbcl/SBCL_REV` in epsilon-internal may name. It is upstream master, the `upstream/*` branches and the fork-only commits (the workflows, the version fallback), and is rebuilt from them after each release. Nothing is committed to it directly except fork-only commits. |
-| `upstream/<name>` | One upstream candidate each: a fix, or a feature series, based on upstream master and rebased after each monthly release. A fix goes to sbcl/sbcl as a pull request; a feature opens an sbcl-devel thread first. Commits carry no `Co-Authored-By` or `Claude-Session` trailers. |
+| `sb-local-heaps` | The integration branch, and the only branch that `sbcl/SBCL_REV` in epsilon-internal may name. It is upstream master, the `upstream-*` branches and the fork-only commits (the workflows, the version fallback), and is rebuilt from them after each release. Nothing is committed to it directly except fork-only commits. |
+| `upstream-<name>` | One upstream candidate each: a fix, or a feature series, based on upstream master and rebased after each monthly release. A fix goes to sbcl/sbcl as a pull request; a feature opens an sbcl-devel thread first. Commits carry no `Co-Authored-By` or `Claude-Session` trailers. |
 | `fix/<issue>-<name>` | Work in progress that has not yet reached an upstream branch or the integration branch; deleted once it has. |
 
 A change lands in an upstream branch first and reaches Epsilon through
@@ -29,3 +29,9 @@ Epsilon configuration on arm64 Linux and on both Darwin architectures;
 core's callbacks. The test suites run with `--slow`, which includes
 the five slow fiber tests. The tag fetch step stays in every workflow
 until the version fallback is on every branch CI builds.
+
+The upstream candidates are named `upstream-<name>` rather than
+`upstream/<name>`: upstream's Windows workflows build an installer
+whose product name carries the version string, which
+generate-version.sh derives from the branch name, and WiX rejects a
+slash in it.
