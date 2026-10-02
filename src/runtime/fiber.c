@@ -10,6 +10,7 @@
 #include "genesis/static-symbols.h"
 #include "lispobj.h"
 #include <sys/mman.h>
+#include <sched.h>
 #include <string.h>
 #include <assert.h>
 #include <stdint.h>
@@ -20,6 +21,31 @@
 
 extern void gc_preserve_fiber_word(lispobj word);
 extern void gc_scav_fiber_binding_stack(lispobj *base, lispobj *end);
+
+/* A thread's fiber list is a singly linked list whose unlink of an
+ * interior element is a plain store to its predecessor's NEXT: correct
+ * only while nothing else changes the list.  Migration changes a list
+ * from a thread other than its owner, so every change takes the owner's
+ * lock.  Holders run pseudo-atomic or with the blockable signals blocked
+ * (see fiber.h), so a holder is never stopped for GC nor interrupted
+ * into code that takes the same lock, and the sections are short. */
+void sb_fiber_list_lock(struct thread *th)
+{
+    int *lock = &thread_extra_data(th)->fiber_list_lock;
+    for (unsigned spins = 0;
+         __atomic_exchange_n(lock, 1, __ATOMIC_ACQUIRE);
+         spins++) {
+        while (__atomic_load_n(lock, __ATOMIC_RELAXED)) {
+            if (++spins > 1000) { sched_yield(); spins = 0; }
+        }
+    }
+}
+
+void sb_fiber_list_unlock(struct thread *th)
+{
+    __atomic_store_n(&thread_extra_data(th)->fiber_list_lock, 0,
+                     __ATOMIC_RELEASE);
+}
 
 void gc_scan_fiber_stacks(struct thread *th)
 {
@@ -85,8 +111,13 @@ static void fiber_free(struct sb_fiber_ctx *f)
 void sb_fiber_release_registered(struct thread *th)
 {
     struct extra_thread_data *ed = thread_extra_data(th);
+    sigset_t saved;
+    block_blockable_signals(&saved);
+    sb_fiber_list_lock(th);
     struct sb_fiber_ctx *f = ed->fiber_list;
     ed->fiber_list = NULL;
+    sb_fiber_list_unlock(th);
+    thread_sigmask(SIG_SETMASK, &saved, 0);
     while (f) {
         struct sb_fiber_ctx *next = f->next;
         f->owner = NULL;
@@ -162,27 +193,56 @@ struct sb_fiber_ctx *sb_fiber_create_main(struct thread *th)
     return f;
 }
 
+static int fiber_list_remove(struct thread *src, struct sb_fiber_ctx *fiber);
+static void fiber_list_insert(struct thread *dest, struct sb_fiber_ctx *fiber);
 static inline void sb_fiber_enter_pa(struct thread *th);
+
+/* Take the lock of FIBER's owner, rechecking the owner under it: a
+ * concurrent migration may move FIBER between the read and the lock.
+ * Returns the owner with its lock held, or NULL, holding nothing, if
+ * FIBER has none.  The caller is pseudo-atomic. */
+static struct thread *fiber_lock_owner(struct sb_fiber_ctx *fiber)
+{
+    for (;;) {
+        struct thread *owner = __atomic_load_n(&fiber->owner, __ATOMIC_ACQUIRE);
+        if (!owner) return NULL;
+        sb_fiber_list_lock(owner);
+        if (__atomic_load_n(&fiber->owner, __ATOMIC_ACQUIRE) == owner)
+            return owner;
+        sb_fiber_list_unlock(owner);
+    }
+}
 
 void sb_fiber_release(struct sb_fiber_ctx *f)
 {
     if (!f) return;
-    if (f->owner) sb_fiber_unregister(f->owner, f);
+    struct thread *self = get_sb_vm_thread();
+    sb_fiber_enter_pa(self);
+    struct thread *owner = fiber_lock_owner(f);
+    if (owner) {
+        if (thread_extra_data(owner)->current_fiber == f)
+            thread_extra_data(owner)->current_fiber = NULL;
+        if (fiber_list_remove(owner, f) == 0) {
+            f->next = NULL;
+            f->owner = NULL;
+        }
+        sb_fiber_list_unlock(owner);
+    }
+    sb_fiber_exit_pa(self);
     fiber_free(f);
 }
 
 /* Registering a fiber does not make it current, even a main fiber, which
- * is always RUNNING: sb_fiber_set_current does that.  The list changes
- * pseudo-atomic, so that a collection does not see it half made. */
+ * is always RUNNING: sb_fiber_set_current does that. */
 void sb_fiber_register(struct thread *th, struct sb_fiber_ctx *fiber)
 {
     assert(fiber->owner == NULL);
     struct thread *self = get_sb_vm_thread();
     sb_fiber_enter_pa(self);
+    sb_fiber_list_lock(th);
     fiber->owner = th;
-    fiber->next = thread_extra_data(th)->fiber_list;
-    __atomic_store_n(&thread_extra_data(th)->fiber_list, fiber,
-                     __ATOMIC_RELEASE);
+    fiber_list_insert(th, fiber);
+    sb_fiber_list_unlock(th);
     sb_fiber_exit_pa(self);
 }
 
@@ -200,16 +260,73 @@ void sb_fiber_unregister(struct thread *th, struct sb_fiber_ctx *fiber)
 {
     struct thread *self = get_sb_vm_thread();
     sb_fiber_enter_pa(self);
+    sb_fiber_list_lock(th);
     if (thread_extra_data(th)->current_fiber == fiber)
         thread_extra_data(th)->current_fiber = NULL;
-    struct sb_fiber_ctx **pp = &thread_extra_data(th)->fiber_list;
-    while (*pp && *pp != fiber) pp = &(*pp)->next;
-    if (*pp) {
-        *pp = fiber->next;
+    if (fiber->owner == th && fiber_list_remove(th, fiber) == 0) {
         fiber->next = NULL;
         fiber->owner = NULL;
     }
+    sb_fiber_list_unlock(th);
     sb_fiber_exit_pa(self);
+}
+
+/* Both list operations run holding the list owner's lock. */
+static int fiber_list_remove(struct thread *src, struct sb_fiber_ctx *fiber)
+{
+    struct sb_fiber_ctx **pp = &thread_extra_data(src)->fiber_list;
+    while (*pp && *pp != fiber) pp = &(*pp)->next;
+    if (!*pp) return -1;               /* fiber not on this list */
+    *pp = fiber->next;
+    return 0;
+}
+
+static void fiber_list_insert(struct thread *dest, struct sb_fiber_ctx *fiber)
+{
+    struct extra_thread_data *ed = thread_extra_data(dest);
+    fiber->next = ed->fiber_list;
+    __atomic_store_n(&ed->fiber_list, fiber, __ATOMIC_RELEASE);
+}
+
+/* Callable from any thread, including one that is neither FIBER's owner
+ * nor DEST.  It holds both lists' locks, taken in address order, so the
+ * move is atomic to every other list operation.  The caller guarantees
+ * that nothing resumes FIBER meanwhile. */
+int sb_fiber_migrate(struct sb_fiber_ctx *fiber, struct thread *dest)
+{
+    if (fiber->state != FIBER_RUNNABLE) return -1;
+
+    struct thread *self = get_sb_vm_thread();
+    sb_fiber_enter_pa(self);
+    struct thread *src;
+    for (;;) {
+        src = __atomic_load_n(&fiber->owner, __ATOMIC_ACQUIRE);
+        if (!src || src == dest) break;
+        struct thread *first  = src < dest ? src : dest;
+        struct thread *second = src < dest ? dest : src;
+        sb_fiber_list_lock(first);
+        sb_fiber_list_lock(second);
+        if (__atomic_load_n(&fiber->owner, __ATOMIC_ACQUIRE) == src) break;
+        sb_fiber_list_unlock(second);
+        sb_fiber_list_unlock(first);
+    }
+    int rc;
+    if (!src) {
+        rc = -2;
+    } else if (src == dest) {
+        rc = 0;
+    } else {
+        rc = fiber_list_remove(src, fiber);
+        if (rc == 0) {
+            sb_fiber_rebind_thread(fiber, dest);
+            __atomic_store_n(&fiber->owner, dest, __ATOMIC_RELEASE);
+            fiber_list_insert(dest, fiber);
+        }
+        sb_fiber_list_unlock(src);
+        sb_fiber_list_unlock(dest);
+    }
+    sb_fiber_exit_pa(self);
+    return rc;
 }
 
 static inline void swap_bindings_forward (struct thread *th,
@@ -259,7 +376,10 @@ int sb_fiber_handle_bs_fault(void *context_, void *addr, struct thread *th)
 {
     os_context_t *context = (os_context_t *)context_;
     struct sb_fiber_ctx *f = NULL;
+    /* The handler runs with the blockable signals blocked. */
+    sb_fiber_list_lock(th);
     int kind = sb_fiber_classify_bs_fault(th, addr, &f);
+    sb_fiber_list_unlock(th);
     if (kind == 1) {                    /* HARD guard hit */
         fake_foreign_function_call(context);
         lose("Fiber binding stack exhausted, fault: %p, PC: %p",
