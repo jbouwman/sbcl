@@ -17,6 +17,8 @@ jobs:
           - { arch: x86-64, subfeatures: fasteval, options: --with-sb-fasteval --without-sb-eval --with-nonstop-foreign-call }
           - { arch: x86-64, options: --with-mark-region-gc --with-nonstop-foreign-call }
           - { arch: x86-64, options: --fancy --with-sb-fiber --without-gencgc --with-mark-region-gc --with-sb-local-heaps }
+          - { arch: x86-64, options: --with-sb-thread --with-sb-fiber }
+          - { arch: x86-64, options: --with-mark-region-gc --with-sb-fiber }
 
       fail-fast: false
 

@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        options: [""]
+        options: ["", "--fancy --with-sb-fiber --without-gencgc --with-mark-region-gc --with-sb-local-heaps"]
         # subfeatures: ['']
         # include:
         #   - { subfeatures: fasteval, options: --with-sb-fasteval --without-sb-eval }
@@ -37,6 +37,7 @@ jobs:
       if: matrix.subfeatures == 'fasteval'
       run: cd tests; ./run-tests.sh --evaluator-mode interpret
     - name: make binary
+      if: matrix.options == ''
       run: |
         name=sbcl-`cat version.lisp-expr | ./run-sbcl.sh --noinform --noprint --eval '(write-line (read))'`-linux-arm64
         mkdir sbcl-linux-binary-arm64${{ matrix.options }}
@@ -47,6 +48,7 @@ jobs:
         mv $name sbcl
         mv $name-binary.tar.bz2 sbcl/sbcl-linux-binary-arm64${{ matrix.options }}
     - name: save binary
+      if: matrix.options == ''
       uses: actions/upload-artifact@v4
       with:
         name: sbcl-linux-binary-arm64${{ matrix.options }}
