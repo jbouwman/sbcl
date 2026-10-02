@@ -564,6 +564,12 @@
                              thereis (= (ldb (byte 2 slot) zerop-mask) #b11))))
       (when (eq (tn-ref-type obj-ref) (specifier-type 'layout))
         (bug "unexpected set-multiple"))
+      ;; The card mark is shared, but a strict ownership check can signal.
+      ;; Preserve the effects of earlier stores before checking the next one.
+      #+sb-local-heaps
+      (when (require-gengc-barrier-p instance values nil)
+        (emit-gengc-barrier instance nil val-temp t))
+      #-sb-local-heaps
       (emit-gengc-barrier instance nil val-temp values)
       (when use-xmm-p
         (inst xorps xmm-temp xmm-temp))
@@ -572,6 +578,8 @@
               (val (tn-ref-tn values))
               (ea (object-slot-ea instance (+ instance-slots-offset index)
                                   instance-pointer-lowtag)))
+         #+sb-local-heaps
+         (emit-local-heap-store-check instance values val-temp t t)
          (setq values (tn-ref-across values))
          ;; If the xmm temp was loaded with 0 and this value is 0,
          ;; and possibly the next, then store through the temp
