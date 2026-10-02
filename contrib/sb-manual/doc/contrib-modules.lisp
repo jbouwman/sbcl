@@ -12,6 +12,8 @@
   (@sb-concurrency section)
   #+#.(sb-manual::package-exists-p/reader '#:sb-cover)
   (@sb-cover section)
+  #+sb-fiber
+  (@sb-fiber section)
   #+#.(sb-manual::package-exists-p/reader '#:sb-grovel)
   (@sb-grovel section)
   #+#.(sb-manual::package-exists-p/reader '#:sb-introspect)

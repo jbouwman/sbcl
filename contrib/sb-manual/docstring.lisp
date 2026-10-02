@@ -29,6 +29,7 @@
     ("SB-COVER" "SB-COVER")
     ("SB-DEBUG" "SB-DEBUG")
     ("SB-EXT" "SB-IMPL")
+    ("SB-FIBER" "SB-FIBER")
     ("SB-GRAY" "SB-GRAY")
     ("SB-GROVEL" "SB-GROVEL")
     ("SB-INTROSPECT" "SB-INTROSPECT")

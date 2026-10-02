@@ -275,6 +275,8 @@
     (@sb-aclrepl "../../contrib/sb-aclrepl/sb-aclrepl.texinfo")
     (@sb-concurrency "../../contrib/sb-concurrency/sb-concurrency.texinfo")
     (@sb-cover "../../contrib/sb-cover/sb-cover.texinfo")
+    #+sb-fiber
+    (@sb-fiber "../../contrib/sb-fiber/sb-fiber.texinfo")
     (@sb-grovel "../../contrib/sb-grovel/sb-grovel.texinfo")
     (@sb-introspect "../../contrib/sb-introspect/sb-introspect.texinfo")
     (@sb-manual "../../contrib/sb-manual/sb-manual.texinfo")

@@ -7,6 +7,7 @@
 * sb-aclrepl: sb aclrepl.
 * sb-concurrency: sb concurrency.
 * sb-cover: sb cover.
+* sb-fiber: sb fiber.
 * sb-grovel: sb grovel.
 * sb-introspect: sb introspect.
 * sb-manual: sb manual.
@@ -26,6 +27,7 @@ contributed modules.
 @include ../../contrib/sb-aclrepl/sb-aclrepl.texinfo
 @include ../../contrib/sb-concurrency/sb-concurrency.texinfo
 @include ../../contrib/sb-cover/sb-cover.texinfo
+@include ../../contrib/sb-fiber/sb-fiber.texinfo
 @include ../../contrib/sb-grovel/sb-grovel.texinfo
 @include ../../contrib/sb-introspect/sb-introspect.texinfo
 @include ../../contrib/sb-manual/sb-manual.texinfo
