@@ -81,20 +81,74 @@ write_lispobj(lispobj obj, FILE *file)
 }
 
 static void
-write_bytes_to_file(FILE * file, char *addr, size_t bytes, int compression)
+write_or_lose(FILE *file, char *addr, size_t bytes)
 {
-    if (compression == COMPRESSION_LEVEL_NONE) {
-        while (bytes > 0) {
-            sword_t count = fwrite(addr, 1, bytes, file);
-            if (count > 0) {
-                bytes -= count;
-                addr += count;
-            }
-            else {
+    while (bytes > 0) {
+        sword_t count = fwrite(addr, 1, bytes, file);
+        if (count > 0) {
+            bytes -= count;
+            addr += count;
+        }
+        else {
+            perror(GENERAL_WRITE_FAILURE_MSG);
+            lose("core file is incomplete or corrupt");
+        }
+    }
+}
+
+/* An uncompressed space is written with its all-zero blocks of this size
+ * seeked over rather than written. The core format is unchanged: every
+ * filesystem reads the gap back as zeros, and one that supports sparse files
+ * allocates nothing for it. A non-compacting collector leaves most of a
+ * saved dynamic space as free pages, which save zeroes. */
+#define SPARSE_BLOCK_BYTES 4096
+
+static bool
+zero_block_p(char *addr, size_t bytes)
+{
+    size_t i = 0;
+    if ((uword_t)addr % sizeof (uword_t) == 0)
+        for ( ; i + sizeof (uword_t) <= bytes; i += sizeof (uword_t))
+            if (*(uword_t*)(addr + i)) return 0;
+    for ( ; i < bytes; ++i)
+        if (addr[i]) return 0;
+    return 1;
+}
+
+/* Write BYTES from ADDR, seeking over each all-zero block. The last block is
+ * always written, so the file reaches the full length that the next space's
+ * offset is computed from, whatever the data ends with. */
+static void
+write_sparse(FILE *file, char *addr, size_t bytes)
+{
+    char *end = addr + bytes;
+    while (addr < end) {
+        char *run = addr;
+        size_t n;
+        for ( ; run < end; run += n) {
+            n = (size_t)(end - run) < SPARSE_BLOCK_BYTES ? (size_t)(end - run) : SPARSE_BLOCK_BYTES;
+            if (run + n < end && zero_block_p(run, n)) break;
+        }
+        write_or_lose(file, addr, run - addr);
+        for (addr = run; run < end; run += n) {
+            n = (size_t)(end - run) < SPARSE_BLOCK_BYTES ? (size_t)(end - run) : SPARSE_BLOCK_BYTES;
+            if (run + n >= end || !zero_block_p(run, n)) break;
+        }
+        if (run > addr) {
+            if (FSEEK(file, (ftell_type)(run - addr), SEEK_CUR) != 0) {
                 perror(GENERAL_WRITE_FAILURE_MSG);
                 lose("core file is incomplete or corrupt");
             }
+            addr = run;
         }
+    }
+}
+
+static void
+write_bytes_to_file(FILE * file, char *addr, size_t bytes, int compression)
+{
+    if (compression == COMPRESSION_LEVEL_NONE) {
+        write_sparse(file, addr, bytes);
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
     } else if ((compression >= -7) && (compression <= 22)) {
         int ret;
