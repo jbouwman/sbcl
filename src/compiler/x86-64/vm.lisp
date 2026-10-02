@@ -83,7 +83,8 @@
 (export 'card-table-reg)
 (defconstant card-table-reg 12)
 (define-symbol-macro null-tn r12-tn)
-(define-symbol-macro card-index-mask (make-fixup nil :card-table-index-mask))
+;;; A memory operand, not an immediate: see CARD-TABLE-MASK in parms.
+(define-symbol-macro card-index-mask (static-constant-ea card-table-mask))
 
 (defconstant most-positive-fixnum-repr
   #+sb-xc #.most-positive-fixnum-repr ; or else error "SB-KERNEL:%MASK-FIELD is undefined"
