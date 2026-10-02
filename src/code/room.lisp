@@ -204,6 +204,8 @@
 (progn
 (define-alien-variable "allocation_bitmap" (* unsigned-char))
 (define-alien-variable "line_bytemap" (* unsigned-char))
+#+sb-local-heaps
+(define-alien-variable "ph_process_page" (* unsigned-char))
 
 ;;; A small-object page is divided into lines.  Each line has a byte in
 ;;; LINE_BYTEMAP holding its generation plus one, a mark bit (16) and a
@@ -498,8 +500,11 @@ We could try a few things to mitigate this:
                 (funcall fun obj widetag (primitive-object-size obj))))
             (map-objects-in-small-page
              fun page generation-mask
-             ;; Another thread may be allocating into an open region.
-             (not (logtest flags 32)))))))) ; OPEN_REGION_PAGE_FLAG
+             ;; Another thread may be allocating into an open region.  The
+             ;; lines of a page of local heaps can belong to regions of
+             ;; several heaps, and the page carries no open flag.
+             (and (not (logtest flags 32)) ; OPEN_REGION_PAGE_FLAG
+                  #+sb-local-heaps (zerop (deref ph-process-page page)))))))))
 
 ;; Users are often surprised to learn that a just-consed object can't
 ;; necessarily be seen by MAP-ALLOCATED-OBJECTS, so close the region

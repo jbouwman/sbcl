@@ -9,6 +9,7 @@
 #include "genesis/symbol.h"
 #include "genesis/static-symbols.h"
 #include "lispobj.h"
+#include "local-heap.h"
 #include <sys/mman.h>
 #include <sched.h>
 #include <string.h>
@@ -90,6 +91,7 @@ void gc_scav_fiber_binding_stacks(struct thread *th)
 }
 
 uword_t sb_fiber_gc_epoch;
+uword_t sb_fiber_local_gc_epoch;
 
 /* With the world stopped: no fiber switch is in progress, since a switch
  * runs pseudo-atomic. */
@@ -98,8 +100,37 @@ void sb_fiber_note_global_gc(void)
     sb_fiber_gc_epoch++;
 }
 
+/* Before the collection frees anything.  A fiber that resumes after this
+ * zeroes its stack if its stack may refer into the heap collected. */
+void sb_fiber_note_local_gc(void)
+{
+    __atomic_fetch_add(&sb_fiber_local_gc_epoch, 1, __ATOMIC_ACQ_REL);
+}
+
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+void sb_fiber_note_heap_installed(struct thread *th, struct local_heap *h)
+{
+#ifdef LISP_FEATURE_ARM64
+    struct extra_thread_data *ed = thread_extra_data(th);
+    struct sb_fiber_ctx *f = ed->current_fiber;
+    /* A main fiber runs on the thread's own stack, and a later main
+     * fiber over the same stack inherits the flag at capture. */
+    if (!f || !f->control_stack_alloc_size) ed->heap_on_main_stack = 1;
+    if (f && h != f->heap) f->ran_other_heap = 1;
+#else
+    (void)th; (void)h;
+#endif
+}
+#endif
+
 static void fiber_free(struct sb_fiber_ctx *f)
 {
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    if (f->heap) {
+        local_heap_release_internal(f->heap, 1);
+        f->heap = f->active_heap = NULL;
+    }
+#endif
     if (f->stack_base && f->stack_base != MAP_FAILED)
         munmap(f->stack_base, f->stack_alloc_size);
     if (f->binding_stack_base)
@@ -248,11 +279,15 @@ void sb_fiber_register(struct thread *th, struct sb_fiber_ctx *fiber)
 
 /* Make FIBER, a main fiber registered with TH, or no fiber when NULL, the
  * one TH is running.  The Lisp side keeps its own current-fiber slot in
- * step. */
+ * step.  FIBER takes the heap installed on TH, which a switch away from
+ * it will restore. */
 void sb_fiber_set_current(struct thread *th, struct sb_fiber_ctx *fiber)
 {
     sb_fiber_enter_pa(th);
     thread_extra_data(th)->current_fiber = fiber;
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    if (fiber) fiber->active_heap = thread_extra_data(th)->current_heap;
+#endif
     sb_fiber_exit_pa(th);
 }
 
@@ -508,6 +543,10 @@ void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to)
     sb_fiber_enter_pa(th);
 
     thread_extra_data(th)->current_fiber = to;
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    /* Park FROM's allocation regions and install TO's. */
+    local_heap_switch_in_pa(th, to->active_heap);
+#endif
 
     from->binding_stack_pointer = get_binding_stack_pointer(th);
 
@@ -538,6 +577,20 @@ void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to)
         nth_interrupt_context(i, th) = NULL;
 }
 
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+/* Attach heap H to F, which must not be running. */
+int sb_fiber_set_heap(struct sb_fiber_ctx *f, struct local_heap *h)
+{
+    if (f->state == FIBER_RUNNING) return -1;
+    if (h && h->installed_on) return -2;
+    f->heap = h;
+    f->active_heap = h;
+    return 0;
+}
+
+void *sb_fiber_heap(struct sb_fiber_ctx *f) { return f->heap; }
+void *sb_fiber_active_heap(struct sb_fiber_ctx *f) { return f->active_heap; }
+#endif
 
 static inline void sb_fiber_enter_pa(struct thread *th)
 {

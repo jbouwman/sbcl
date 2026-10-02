@@ -36,6 +36,9 @@ void assert_on_stack(struct thread *th, void *esp);
 #ifdef LISP_FEATURE_SB_FIBER
 struct sb_fiber_ctx;
 #endif
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+struct local_heap;
+#endif
 
 /* The thread struct is generated from lisp during genesis and it
  * needs to know the sizes of all its members, but some types may have
@@ -100,6 +103,20 @@ struct extra_thread_data
     struct sb_fiber_ctx *fiber_list; // head of registered fiber list
     int fiber_list_lock;             // see sb_fiber_list_lock
     struct sb_fiber_ctx *current_fiber; // the RUNNING fiber, if any registered
+    // A local heap has been installed while the thread's own stack was
+    // the running stack (see sb_fiber_note_heap_installed).
+    unsigned char heap_on_main_stack;
+#endif
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    // Local heap whose regions are installed in mixed_tlab/cons_tlab, or NULL.
+    struct local_heap *current_heap;
+    // Heap that hit its hard limit; uninstalled while the error is signaled.
+    struct local_heap *exhausted_heap;
+    // The thread's own (global) user TLABs while a local heap is installed.
+    struct alloc_region saved_mixed_tlab;
+    struct alloc_region saved_cons_tlab;
+    // State of this thread's local collections (struct ph_local_gc), or NULL.
+    void *local_gc;
 #endif
     int arena_count; // number of structures in arena_saveareas
     arena_state* arena_savearea;

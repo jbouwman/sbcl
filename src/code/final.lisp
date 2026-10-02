@@ -241,6 +241,10 @@ Examples:
           ; -> ERROR, caught, WARNING signalled
 ```"
   (declare (sb-c::tlab :system))
+  #+sb-local-heaps
+  (when (or (sb-vm::locally-owned-p object) (sb-vm::locally-owned-p function))
+    (error "~S: finalizers are not supported for objects in a local heap: ~S"
+           'finalize object))
   (let ((space (heap-allocated-p object)))
     ;; Rule out immediate, stack, arena, readonly, and static objects.
     ;; (Is it really an error for a readonly? Maybe a warning? I'll leave it this way unless
