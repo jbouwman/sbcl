@@ -481,6 +481,32 @@ uint64_t sum_mem_first(StructMemFirst s) {
     return (uint64_t)s.pad + (uint64_t)s.unaligned + s.b;
 }
 
+/* AAPCS64 counts a union by its largest member: one float, in s0, and
+   x in s1. */
+union float_union_2 { float a; float b; };
+
+float float_union_2_plus(union float_union_2 u, float x) { return u.a + x; }
+union float_union_2 float_union_2_make(float a) {
+    union float_union_2 u;
+    u.a = a;
+    return u;
+}
+
+/* A homogeneous aggregate of four doubles on AAPCS64 (d0-d3), in memory
+   on SysV x86-64. */
+struct double_2x2 { double m[2][2]; };
+
+double double_2x2_plus(struct double_2x2 s, double y) { return s.m[1][1] + y; }
+struct double_2x2 double_2x2_identity(struct double_2x2 s) { return s; }
+
+/* Two SSE eightbytes on SysV x86-64, four singles on AAPCS64. */
+struct float_2x2 { float m[2][2]; };
+
+float float_2x2_sum(struct float_2x2 s) {
+    return s.m[0][0] + s.m[0][1] + s.m[1][0] + s.m[1][1];
+}
+struct float_2x2 float_2x2_identity(struct float_2x2 s) { return s; }
+
 typedef struct {
     unsigned __int128 val;
 } StructInt128;

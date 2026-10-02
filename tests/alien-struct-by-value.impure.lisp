@@ -868,6 +868,64 @@
           (sb-alien:slot s 'b) 5000)
     (assert (= (sum-mem-first s) 5307))))
 
+;;; AAPCS64 counts a union by its largest member: a union of two floats is
+;;; a homogeneous aggregate of one member, passed in s0, and the float
+;;; after it goes in s1. Counting both members put it in s0 and s1 and
+;;; shifted every later floating-point argument by one register.
+(define-alien-type nil (union float-union-2 (a single-float) (b single-float)))
+
+(define-alien-routine float-union-2-plus single-float
+  (u (union float-union-2)) (x single-float))
+(define-alien-routine float-union-2-make (union float-union-2) (a single-float))
+
+(with-test (:name :struct-by-value-float-union-2)
+  (with-alien ((u (union float-union-2)))
+    (setf (slot u 'a) 1.5)
+    (assert (= (float-union-2-plus u 2.25) 3.75)))
+  (let ((result (float-union-2-make 4.5)))
+    (assert (= (slot result 'a) 4.5))
+    (assert (= (slot result 'b) 4.5))))
+
+;;; An array of arrays of doubles is a homogeneous aggregate of their
+;;; product: double m[2][2] goes in d0-d3 on AAPCS64, and at 32 bytes in
+;;; memory on SysV x86-64.
+(define-alien-type nil (struct double-2x2 (m (array (array double-float 2) 2))))
+
+(define-alien-routine double-2x2-plus double-float
+  (s (struct double-2x2)) (y double-float))
+(define-alien-routine double-2x2-identity (struct double-2x2) (s (struct double-2x2)))
+
+(with-test (:name :struct-by-value-double-2x2)
+  (with-alien ((s (struct double-2x2)))
+    (dotimes (i 2)
+      (dotimes (j 2)
+        (setf (deref (deref (slot s 'm) i) j) (+ (* 10d0 i) j))))
+    (assert (= (double-2x2-plus s 0.5d0) 11.5d0))
+    (let ((result (double-2x2-identity s)))
+      (dotimes (i 2)
+        (dotimes (j 2)
+          (assert (= (deref (deref (slot result 'm) i) j) (+ (* 10d0 i) j))))))))
+
+;;; A multi-dimensional array has as many elements as the product of its
+;;; dimensions: float m[2][2] is two SSE eightbytes on SysV x86-64 and a
+;;; homogeneous aggregate of four on AAPCS64. Walking the first dimension's
+;;; count of elements covered only its first eightbyte.
+(define-alien-type nil (struct float-2x2 (m (array single-float 2 2))))
+
+(define-alien-routine float-2x2-sum single-float (s (struct float-2x2)))
+(define-alien-routine float-2x2-identity (struct float-2x2) (s (struct float-2x2)))
+
+(with-test (:name :struct-by-value-float-2x2)
+  (with-alien ((s (struct float-2x2)))
+    (dotimes (i 2)
+      (dotimes (j 2)
+        (setf (deref (slot s 'm) i j) (+ (* 10.0 i) j))))
+    (assert (= (float-2x2-sum s) 22.0))
+    (let ((result (float-2x2-identity s)))
+      (dotimes (i 2)
+        (dotimes (j 2)
+          (assert (= (deref (slot result 'm) i j) (+ (* 10.0 i) j))))))))
+
 ;; (sb-alien:define-alien-type struct-int128
 ;;   (sb-alien:struct nil
 ;;     (val (sb-alien:unsigned 128))))
