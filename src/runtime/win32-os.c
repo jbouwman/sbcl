@@ -639,6 +639,35 @@ uword_t get_monotonic_time()
 }
 #endif
 
+/* Print each allocation that occupies [ADDR, ADDR+LEN), after a reservation
+ * at that fixed address failed. The address space layout differs from run to
+ * run, so the failure has to name the occupant when it happens. */
+static void describe_address_range(os_vm_address_t addr, os_vm_size_t len)
+{
+    char *p = (char*)addr, *end = (char*)addr + len;
+    HANDLE heap = GetProcessHeap();
+    while (p < end) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(p, &mbi, sizeof mbi) || !mbi.RegionSize) break;
+        if (mbi.State != MEM_FREE) {
+            char name[MAX_PATH];
+            name[0] = 0;
+            if (mbi.Type == MEM_IMAGE &&
+                !GetModuleFileNameA((HMODULE)mbi.AllocationBase, name, sizeof name))
+                name[0] = 0;
+            fprintf(stderr, "  %p-%p %s %s, protection %#lx, allocation base %p%s%s%s\n",
+                    mbi.BaseAddress, (char*)mbi.BaseAddress + mbi.RegionSize,
+                    mbi.State == MEM_COMMIT ? "committed" : "reserved",
+                    mbi.Type == MEM_IMAGE ? "image"
+                    : mbi.Type == MEM_MAPPED ? "mapped" : "private",
+                    (unsigned long)mbi.Protect, mbi.AllocationBase,
+                    mbi.AllocationBase == heap ? " (process heap)" : "",
+                    name[0] ? " " : "", name);
+        }
+        p = (char*)mbi.BaseAddress + mbi.RegionSize;
+    }
+}
+
 os_vm_address_t
 os_alloc_gc_space(int space_id, int attributes, os_vm_address_t addr, os_vm_size_t len)
 {
@@ -666,6 +695,7 @@ os_alloc_gc_space(int space_id, int attributes, os_vm_address_t addr, os_vm_size
             } else {
                 fprintf(stderr, "VirtualAlloc: failed to map %zu bytes at %p: error code %lu\n", len, addr, err);
             }
+            describe_address_range(addr, len);
             fflush(stderr);
             return 0;
         }
