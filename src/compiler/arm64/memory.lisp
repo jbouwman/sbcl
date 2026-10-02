@@ -15,7 +15,13 @@
 (defun emit-gengc-barrier (object cell-address temp &optional value-tn-ref allocator)
   (cond ((or (eq value-tn-ref t)
              (require-gengc-barrier-p object value-tn-ref allocator))
-         (inst ubfm temp (or cell-address object) gencgc-card-shift (make-fixup nil :card-table-index-mask))
+         ;; The card index mask is the word below the card table, so that no
+         ;; code depends on the size of the table. It is loaded into TEMP
+         ;; before the address is read, so the two must differ.
+         (let ((address (or cell-address object)))
+           (aver (not (location= temp address)))
+           (inst ldr temp (@ cardtable-tn (- n-word-bytes)))
+           (inst and temp temp (lsr address gencgc-card-shift)))
          (inst strb zr-tn (@ cardtable-tn temp)))
         #+debug-gc-barriers
         (t

@@ -1127,7 +1127,12 @@
        (cond ((and (>= (length line) 4) (string= line "VOP " :end1 4))
               (let ((string (subseq line 4 (position #\space line :start 5))))
                 (setq current-vop string)))
-             ((search ":FLAVOR CARD-TABLE-INDEX-MASK" line)
+             ;; The barrier ANDs the card index with the CARD-TABLE-MASK
+             ;; static space trailer word, a displacement from NULL-TN (R12)
+             ;; with no index register. No other AND addresses off R12.
+             ((and (search "AND" line)
+                   (let ((ea (search "PTR [R12+" line)))
+                     (and ea (digit-char-p (char line (+ ea 9))))))
               (push current-vop result)))))))
 
 (with-test (:name :closure-init-gc-barrier)

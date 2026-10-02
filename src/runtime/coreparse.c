@@ -991,10 +991,20 @@ static void sanity_check_loaded_core(lispobj);
  * fully cover dynamic space is good enough. Accidental failure to map dynamic space as
  * intended is not deemed a beneficial gift to the card table's memory consumption.
  * (I may be willing to be convinced otherwise)
+ *
+ * On x86-64 and arm64 the barrier reads the mask from memory instead: a static
+ * space trailer word on x86-64, the word below gc_card_mark on arm64. Code there
+ * does not depend on the table size, so the table is sized for this process's
+ * dynamic space alone, the saved width is ignored, and nothing is patched.
  */
+#if defined LISP_FEATURE_X86_64 || defined LISP_FEATURE_ARM64
+#define CARD_MASK_IN_CODE 0
+#else
+#define CARD_MASK_IN_CODE 1
+#endif
 static bool compute_card_table_size(int saved_card_mask_nbits)
 {
-    gc_card_table_nbits = saved_card_mask_nbits;
+    gc_card_table_nbits = CARD_MASK_IN_CODE ? saved_card_mask_nbits : 0;
 
     /* Compute the number of pages needed for the dynamic space.
      * Dynamic space size should be aligned on page size. */
@@ -1033,7 +1043,7 @@ static bool compute_card_table_size(int saved_card_mask_nbits)
     num_gc_cards = (sword_t)1 << gc_card_table_nbits;
 
     gc_card_table_mask =  num_gc_cards - 1;
-    return patch_card_index_mask_fixups;
+    return CARD_MASK_IN_CODE && patch_card_index_mask_fixups;
 }
 
 void gc_allocate_ptes()
@@ -1100,6 +1110,12 @@ void gc_allocate_ptes()
     memcpy(mem, linkage_space, LISP_LINKAGE_SPACE_SIZE);
     os_deallocate((void*)linkage_space, LISP_LINKAGE_SPACE_SIZE);
     linkage_space = (lispobj*)mem;
+#elif defined LISP_FEATURE_ARM64
+    // The store barrier loads the card index mask from the word below the
+    // table, addressed off CARDTABLE-TN. Two words keep the table 16-aligned.
+    unsigned char* mem = checked_malloc(2*N_WORD_BYTES + num_gc_cards);
+    gc_card_mark = mem + 2*N_WORD_BYTES;
+    ((sword_t*)gc_card_mark)[-1] = gc_card_table_mask;
 #else
     gc_card_mark = checked_malloc(num_gc_cards);
 #endif
@@ -1138,7 +1154,7 @@ void gc_allocate_ptes()
 
 extern void gcbarrier_patch_code(void*, int);
 // Architectures that lack a method for gcbarrier_patch_code get this dummy stub.
-#if !(defined LISP_FEATURE_ARM64 || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64  \
+#if !(defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64  \
       || defined LISP_FEATURE_X86 || defined LISP_FEATURE_X86_64)
 void gcbarrier_patch_code(void* __attribute__((unused)) where, int __attribute__((unused)) nbits)
 {
