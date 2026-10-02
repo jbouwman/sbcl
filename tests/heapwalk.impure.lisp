@@ -51,3 +51,33 @@
 ;;; The should print approximately one cons (for GC epoch)
 (with-test (:name :heapwalk-safety)
   (progn (gc :gen 1) (manymul 100) (walk)))
+
+;;; Under mark-region, a small-object page's WORDS-USED counts its used
+;;; lines rather than marking a high-water point, and lines allocated into
+;;; since the last collection carry no allocation bits. The walk stopped
+;;; short of objects behind a gap on a page and skipped objects on fresh
+;;; lines, so code compiled after startup was missing from MAP-CODE-OBJECTS
+;;; and from the reports SB-SPROF builds with it.
+(with-test (:name (sb-vm:map-code-objects :code-compiled-after-startup))
+  (flet ((compile-some (n)
+           (let ((sb-c::*compile-to-memory-space* :dynamic))
+             (loop for i below n
+                   collect (compile nil `(lambda (x) (+ x ,i))))))
+         (all-found-p (functions)
+           (let ((codes (make-hash-table :test 'eq)))
+             (sb-vm:map-code-objects (lambda (code) (setf (gethash code codes) t)))
+             (every (lambda (f) (gethash (sb-kernel:fun-code-header f) codes))
+                    functions))))
+    (let ((functions '())
+          (garbage (make-array 200)))
+      ;; Interleave garbage with the code so that, once the garbage dies,
+      ;; live code sits behind free lines on its pages.
+      (dotimes (i 200)
+        (setf (aref garbage i) (make-array 100))
+        (setq functions (nconc (compile-some 1) functions)))
+      (assert (all-found-p functions)) ; on fresh lines, before any collection
+      (fill garbage nil)
+      (gc :full t)
+      (assert (all-found-p functions)) ; behind the gaps the collection left
+      (setq functions (nconc (compile-some 50) functions))
+      (assert (all-found-p functions)))))
