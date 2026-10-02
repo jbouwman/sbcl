@@ -69,6 +69,67 @@ $test_sbcl --lose-on-corruption --disable-ldb --noinform --core $tmpcore \
 (format t "~&I'm back!~%")
 EOF
 
+# A link core loaded at other addresses: the pages it takes from its parents
+# are relocated with the rest. A link save from a relocated process compares
+# its pages as relocated, so the ones relocation changed are written and the
+# result loads at its own addresses and at others.
+link=`run_sbcl --eval '(when (sb-impl::link-save-supported-p) (princ "link"))' --quit`
+if [ "$link" = link ]; then
+  first=$TEST_DIRECTORY/$TEST_FILESTEM-first.core
+  second=$TEST_DIRECTORY/$TEST_FILESTEM-second.core
+  third=$TEST_DIRECTORY/$TEST_FILESTEM-third.core
+  run_sbcl <<EOF
+    (defvar *first* (loop for i below 100000 collect (format nil "first ~D" i)))
+    (save-lisp-and-die "$first" :link t)
+EOF
+  run_sbcl_with_core "$first" --noinform --no-sysinit --no-userinit --noprint \
+                     --disable-debugger <<EOF
+    (defvar *second* (make-hash-table :test 'equal))
+    (dotimes (i 50000) (setf (gethash (format nil "k~D" i) *second*) (list i *first*)))
+    (setf (car *first*) "changed")
+    (save-lisp-and-die "$second" :link t)
+EOF
+  i=1
+  while [ $i -le 6 ]
+  do
+    export SBCL_FAKE_MMAP_INSTRUCTION_LINE=$i
+    $test_sbcl --lose-on-corruption --disable-ldb --noinform --core "$second" \
+               --no-sysinit --no-userinit --noprint --disable-debugger <<EOF
+      (assert (string= (car *first*) "changed"))
+      (assert (eq (second (gethash "k49999" *second*)) *first*))
+      (setf (extern-alien "verify_gens" char) 0)
+      (gc :full t)
+      (assert (equal (first (gethash "k123" *second*)) 123))
+EOF
+    i=`expr $i + 1`
+  done
+
+  export SBCL_FAKE_MMAP_INSTRUCTION_LINE=2
+  $test_sbcl --lose-on-corruption --disable-ldb --noinform --core "$second" \
+             --no-sysinit --no-userinit --noprint --disable-debugger <<EOF
+    (defvar *third*
+      (loop for i below 20000 collect (cons i (gethash (format nil "k~D" i) *second*))))
+    (save-lisp-and-die "$third" :link t)
+EOF
+  check_third='(progn
+    (assert (string= (car *first*) "changed"))
+    (assert (eq (third (nth 19999 *third*)) *first*))
+    (assert (= (hash-table-count *second*) 50000))
+    (setf (extern-alien "verify_gens" char) 0)
+    (gc :full t)
+    (assert (equal (second (nth 123 *third*)) 123)))'
+  run_sbcl_with_core "$third" --noinform --no-sysinit --no-userinit --noprint \
+                     --disable-debugger --eval "$check_third" --quit
+  for i in 1 6
+  do
+    export SBCL_FAKE_MMAP_INSTRUCTION_LINE=$i
+    $test_sbcl --lose-on-corruption --disable-ldb --noinform --core "$third" \
+               --no-sysinit --no-userinit --noprint --disable-debugger \
+               --eval "$check_third" --quit
+  done
+  rm -f "$first" "$second" "$third"
+fi
+
 rm -f $tmpcore $test_sbcl
 
 exit $EXIT_TEST_WIN

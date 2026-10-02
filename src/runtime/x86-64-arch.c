@@ -74,8 +74,8 @@ static void xgetbv(unsigned *eax, unsigned *edx)
 }
 
 #define VECTOR_FILL_T "VECTOR-FILL/T"
-static const int vector_fill_offset_to_check = 0x58;
-static const int vector_fill_offset_to_poke  = 0x5F;
+static const int vector_fill_offset_to_check = 0x56;
+static const int vector_fill_offset_to_poke  = 0x5D;
 static const unsigned char vector_fill_expect_bytes[] = {
   0x48, 0x81, 0xF9, 0xBC, 0x02, 0x00, 0x00,
   0xEB, 0x10
@@ -106,6 +106,7 @@ void tune_asm_routines_for_microarch(void)
     consts->lisp_linkage_table = (uword_t)linkage_space;
     consts->alien_linkage_table = ALIEN_LINKAGE_SPACE_START;
     consts->msan_xor_constant = (uword_t)0x500000000000;
+    consts->card_table_mask = gc_card_table_mask;
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     consts->text_space_addr = TEXT_SPACE_START;
     consts->text_card_count = text_space_size / IMMOBILE_CARD_BYTES;

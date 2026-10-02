@@ -408,14 +408,6 @@ void arch_write_linkage_table_entry(int index, void *target_addr, int datap)
   THREAD_JIT_WP(1);
 }
 
-void gcbarrier_patch_code(void* where, int nbits)
-{
-    // Patch in the 'imms' value for UBFM
-    unsigned* pc = where;
-    unsigned int mask = ~0x0000FC00; // 6 bits at position 10
-    *pc = (*pc & mask) | ((GENCGC_CARD_SHIFT + nbits - 1) << 10);
-}
-
 os_vm_address_t coreparse_alloc_space(int space_id, int attr,
                                       os_vm_address_t addr, os_vm_size_t size)
 {

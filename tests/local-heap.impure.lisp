@@ -591,11 +591,12 @@ drained."
          (with-heap (h) (store-into-sink (list :escapee)))
       (clear-violation-sink)
       (release-heap h))
-    (destructuring-bind (source slot target origin pc) (only-violation)
+    (destructuring-bind (source slot target origin pc kind) (only-violation)
       (declare (ignore target))
       (assert (eq source *violation-sink*))
       (assert (zerop slot))
       (assert (eq origin :recorded-store))
+      (assert (eq kind :escape))
       (assert (typep pc 'sb-ext:word))
       (assert (eq (store-site pc) 'store-into-sink)))))
 
@@ -609,11 +610,49 @@ drained."
                          (heap-store-error () :refused)))))
       (release-heap h))
     (assert (eq (car *violation-sink*) :sink))
-    (destructuring-bind (source slot target origin pc) (only-violation)
+    (destructuring-bind (source slot target origin pc kind) (only-violation)
       (declare (ignore slot target))
       (assert (eq source *violation-sink*))
       (assert (eq origin :signaled-store))
+      (assert (eq kind :escape))
       (assert (eq (store-site pc) 'store-into-sink)))))
+
+;;; A store carries the barrier's classification.  The source and target
+;;; alone do not give it once the target's heap is released: a strict
+;;; heap's store of a global value and an escape into a freed heap both
+;;; leave a global source and a target no live heap owns.
+
+(declaim (notinline store-into-car))
+(defun store-into-car (cell value)
+  (setf (car cell) value)
+  nil)
+
+(with-test (:name (:local-heap :violations :store-kind-is-recorded))
+  (reset-heap-violations)
+  (let ((h (make-heap :check-stores :record :strict t)))
+    (unwind-protect
+         (with-heap (h)
+           (store-into-sink nil)
+           (store-into-sink (list :escapee)))
+      (clear-violation-sink)
+      (release-heap h))
+    (multiple-value-bind (details total) (take-heap-violations)
+      (assert (= total 2) () "~D violations noted: ~S" total details)
+      (assert (equal (mapcar #'sixth details) '(:global :escape)))
+      (assert (= (third (first details)) (sb-kernel:get-lisp-obj-address nil)))))
+  (let ((a (make-heap))
+        (b (make-heap :check-stores :record)))
+    (unwind-protect
+         (let ((from-a (with-heap (a) (list :a)))
+               (in-b (with-heap (b) (list nil))))
+           (with-heap (b) (store-into-car in-b from-a))
+           (destructuring-bind (source slot target origin pc kind) (only-violation)
+             (declare (ignore slot target pc))
+             (assert (eq source in-b))
+             (assert (eq origin :recorded-store))
+             (assert (eq kind :cross-heap))))
+      (release-heap b)
+      (release-heap a))))
 
 (with-test (:name (:local-heap :violations :collection-has-no-store-site))
   (reset-heap-violations)
@@ -625,10 +664,11 @@ drained."
            (let ((found (find *violation-sink* (verify-all-heaps) :key #'first)))
              (clear-violation-sink)
              (assert found)
-             (destructuring-bind (source slot target origin pc) found
+             (destructuring-bind (source slot target origin pc kind) found
                (declare (ignore source target))
                (assert (/= 0 slot))
                (assert (eq origin :collection))
+               (assert (null kind))
                (assert (null pc)))))
       (clear-violation-sink)
       (release-heap h))
@@ -659,10 +699,11 @@ drained."
            (put-into-plist symbol :global)
            (assert (eq (get symbol :local-heap-test) :global)))
       (release-heap h))
-    (destructuring-bind (source slot target origin pc) (only-violation)
+    (destructuring-bind (source slot target origin pc kind) (only-violation)
       (declare (ignore slot target))
       (assert (eq source symbol))
       (assert (eq origin :signaled-store))
+      (assert (eq kind :escape))
       (assert (eq (store-site pc) 'put-into-plist)))))
 
 (with-test (:name (:local-heap :checked :plist-put-of-a-local-value-is-recorded))
@@ -674,10 +715,11 @@ drained."
       ;; The store went ahead; take it back before the heap is released.
       (setf (symbol-plist symbol) nil)
       (release-heap h))
-    (destructuring-bind (source slot target origin pc) (only-violation)
+    (destructuring-bind (source slot target origin pc kind) (only-violation)
       (declare (ignore slot target))
       (assert (eq source symbol))
       (assert (eq origin :recorded-store))
+      (assert (eq kind :escape))
       (assert (eq (store-site pc) 'put-into-plist)))))
 
 ;;; Generic dispatch may update global caches, but effective methods must
@@ -887,6 +929,21 @@ drained."
                           :finished)
                       (sb-ext:timeout () :timed-out)))))
       (sb-ext:unschedule-timer timer))))
+
+;;; SIGCHLD can arrive on a thread with a strict heap installed, and a status
+;;; read can be made from inside one; the process list both update is global.
+(with-test (:name (:local-heap :strict :child-status-changes) :skipped-on :win32)
+  (let ((process (sb-ext:run-program "/bin/sh" '("-c" "exit 7") :wait nil)))
+    (with-test-heap (heap :check-stores :error :strict t)
+      (with-heap (heap)
+        (sb-unix:pthread-kill (sb-thread::thread-os-thread sb-thread:*current-thread*)
+                              sb-unix:sigchld)
+        (loop repeat 500
+              until (eq :exited (sb-ext:process-status process))
+              do (sleep 0.01))))
+    (assert (eq :exited (sb-ext:process-status process)))
+    (assert (eql 7 (sb-ext:process-exit-code process)))
+    (sb-ext:process-close process)))
 
 ;;; A frame can still hold an object of a heap it has released. A global
 ;;; collection that finds that stale root must not trace the memory the
