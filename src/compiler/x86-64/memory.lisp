@@ -55,10 +55,10 @@
   (sc-is tn descriptor-reg control-stack))
 
 #+sb-local-heaps
-(defun emit-local-heap-store-check (object value-tn-ref scratch-reg &optional remark-card)
+(defun emit-local-heap-store-check (object value-tn-ref scratch-reg &optional remark-card single-value-p)
   (when (and value-tn-ref
              (not (eq value-tn-ref t))
-             (do ((ref value-tn-ref (tn-ref-across ref))) ((null ref) nil)
+             (do ((ref value-tn-ref (unless single-value-p (tn-ref-across ref)))) ((null ref) nil)
                (when (store-check-worthy-tn-p (tn-ref-tn ref)) (return t))))
     (let ((skip (gen-label)))
       (inst cmp :qword (thread-slot-ea thread-local-heap-check-slot) 0)
@@ -68,7 +68,7 @@
                  (constant (load-constant nil x scratch-reg) scratch-reg)
                  (t (let ((value (encode-value-if-immediate x)))
                       (if (integerp value) (constantize value) value))))))
-        (do ((ref value-tn-ref (tn-ref-across ref))) ((null ref))
+        (do ((ref value-tn-ref (unless single-value-p (tn-ref-across ref)))) ((null ref))
           (let ((tn (tn-ref-tn ref)))
             (when (store-check-worthy-tn-p tn)
               (inst push (encode object))
