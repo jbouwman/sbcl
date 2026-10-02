@@ -144,30 +144,33 @@
     (:generator
      (inst vxorpd dst dst dst)
      (inst vcvtsi2sd dst dst src)))
+  ;; The lane moves are VEX-encoded like everything else in this instruction set:
+  ;; a legacy-SSE MOVSS or MOVSD after 256-bit operations costs a state
+  ;; transition on Haswell and Broadwell.
   (define-custom-vop sb-simd-avx::f32!-from-p128
       (:args (src :to :save))
     (:results (dst))
     (:generator
      (inst vxorps dst dst dst)
-     (inst movss dst src)))
+     (inst vmovss dst dst src)))
   (define-custom-vop sb-simd-avx::f32!-from-p256
       (:args (src :to :save))
     (:results (dst))
     (:generator
      (inst vxorps dst dst dst)
-     (inst movss dst src)))
+     (inst vmovss dst dst src)))
   (define-custom-vop sb-simd-avx::f64!-from-p128
       (:args (src :to :save))
     (:results (dst))
     (:generator
      (inst vxorpd dst dst dst)
-     (inst movsd dst src)))
+     (inst vmovsd dst dst src)))
   (define-custom-vop sb-simd-avx::f64!-from-p256
       (:args (src :to :save))
     (:results (dst))
     (:generator
      (inst vxorpd dst dst dst)
-     (inst movsd dst src)))
+     (inst vmovsd dst dst src)))
   (define-custom-vop sb-simd-avx512f::f32!-from-p512
       (:args (src :to :save))
     (:results (dst))
