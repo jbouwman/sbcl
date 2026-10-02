@@ -18,6 +18,51 @@
 #define MAP_STACK 0
 #endif
 
+extern void gc_preserve_fiber_word(lispobj word);
+extern void gc_scav_fiber_binding_stack(lispobj *base, lispobj *end);
+
+void gc_scan_fiber_stacks(struct thread *th)
+{
+    for (struct sb_fiber_ctx *f = thread_extra_data(th)->fiber_list;
+         f; f = f->next) {
+        if (f->state != FIBER_RUNNABLE && f->state != FIBER_NEW) continue;
+
+        lispobj *hi = (lispobj *)f->stack_end;
+#ifdef LISP_FEATURE_X86_64
+        /* Main fiber: stack_end==NULL but Lisp frames live on the
+         * thread's C stack captured at make-main-fiber time. */
+        if (!hi) hi = f->control_stack_end;
+#endif
+        if (hi)
+            for (lispobj *p = (lispobj *)sb_fiber_sp(f); p < hi; p++)
+                gc_preserve_fiber_word(*p);
+
+        lispobj regs[16];
+        int n = sb_fiber_gc_regs(f, regs, 16);
+        for (int i = 0; i < n; i++)
+            gc_preserve_fiber_word(regs[i]);
+
+#ifdef LISP_FEATURE_ARM64
+        if (f->control_stack_base && f->control_stack_pointer
+            && f->control_stack_pointer > f->control_stack_base)
+            for (lispobj *p = f->control_stack_base;
+                 p < f->control_stack_pointer; p++)
+                gc_preserve_fiber_word(*p);
+#endif
+    }
+}
+
+void gc_scav_fiber_binding_stacks(struct thread *th)
+{
+    for (struct sb_fiber_ctx *f = thread_extra_data(th)->fiber_list;
+         f; f = f->next) {
+        if ((f->state == FIBER_RUNNABLE || f->state == FIBER_NEW)
+            && f->binding_stack_base)
+            gc_scav_fiber_binding_stack(f->binding_stack_base,
+                                        f->binding_stack_pointer);
+    }
+}
+
 uword_t sb_fiber_gc_epoch;
 
 /* With the world stopped: no fiber switch is in progress, since a switch
