@@ -98,6 +98,7 @@ struct extra_thread_data
 #endif
 #ifdef LISP_FEATURE_SB_FIBER
     struct sb_fiber_ctx *fiber_list; // head of registered fiber list
+    int fiber_list_lock;             // see sb_fiber_list_lock
     struct sb_fiber_ctx *current_fiber; // the RUNNING fiber, if any registered
 #endif
     int arena_count; // number of structures in arena_saveareas
