@@ -953,6 +953,49 @@
       1
       (* n (! (1- n)))))
 
+;;; With SOURCE_DATE_EPOCH set, the compiler records a source's write date
+;;; as the epoch when that is earlier. The debugger must compare the
+;;; recorded date the same way, or every unchanged source newer than the
+;;; epoch reads as modified since compilation.
+(with-test (:name (:debugger :source-date-epoch :unmodified-source)
+            :skipped-on :win32)
+  (with-scratch-file (source "lisp")
+    (with-scratch-file (fasl "fasl")
+      (with-open-file (s source :direction :output :if-exists :supersede)
+        (write-string "(defun source-date-epoch-test-fn (x)
+  (declare (optimize debug))
+  (1+ x))" s))
+      ;; This file was compiled under whatever the variable was, and the
+      ;; debugger compares its sources against that, so put the variable
+      ;; back as it was rather than unsetting it.
+      (let ((old (posix-getenv "SOURCE_DATE_EPOCH")))
+        (alien-funcall (extern-alien "setenv" (function int c-string c-string int))
+                       "SOURCE_DATE_EPOCH" "315532800" 1)
+        (unwind-protect
+             (progn
+               (load (compile-file source :output-file fasl))
+               (let* ((debug-fun (sb-di:fun-debug-fun
+                                  (fdefinition 'source-date-epoch-test-fn)))
+                      (location (block found
+                                  (sb-di:do-debug-fun-blocks (block debug-fun)
+                                    (sb-di:do-debug-block-locations (loc block)
+                                      (return-from found loc)))))
+                      (form nil))
+                 ;; The epoch is earlier than the file, so it was recorded.
+                 (assert (= (sb-di::debug-source-created
+                             (sb-di:code-location-debug-source location))
+                            (+ 315532800 sb-impl::unix-to-universal-time)))
+                 (let ((output (with-output-to-string (*debug-io*)
+                                 (setq form (sb-di::get-file-toplevel-form location)))))
+                   (assert (not (search "modified" output)))
+                   (assert (equal (subseq form 0 2)
+                                  '(defun source-date-epoch-test-fn))))))
+          (if old
+              (alien-funcall (extern-alien "setenv" (function int c-string c-string int))
+                             "SOURCE_DATE_EPOCH" old 1)
+              (alien-funcall (extern-alien "unsetenv" (function int c-string))
+                             "SOURCE_DATE_EPOCH")))))))
+
 (with-test (:name (:debugger :list-locations)
             ;; there's an extra location on arm for some reason.
             :fails-on (or :arm :loongarch64 :riscv :ppc :ppc64 :sparc :mips))
