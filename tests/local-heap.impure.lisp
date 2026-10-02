@@ -113,7 +113,7 @@
                                               :format-control "stop ~A"
                                               :format-arguments (list (list 1))))))
         (interrupt-fiber f c)
-        (assert (null (object-heap (fiber-condition f))))
+        (assert (null (object-heap (sb-fiber::fiber-condition f))))
         (let ((result (resume-fiber f)))
           (assert (search "stop (1)" result))))
       (release-fiber f))))

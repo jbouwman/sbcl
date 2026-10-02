@@ -414,7 +414,7 @@ BODY; SWITCH-FIBER refuses to suspend a pinned fiber.  Pins nest."
 that owns one.  The copy is made with COPY-FOR-TRANSFER; TARGET adopts
 it without further copying when it calls RECEIVE-MESSAGE.  May be
 called from any thread."
-  (%send-to-heap (if (fiber-p target)
+  (%send-to-heap (if (fiberp target)
                      (or (fiber-heap target)
                          (error "~S has no local heap" target))
                      target)
