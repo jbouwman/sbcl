@@ -204,26 +204,15 @@
     ;; Double-float scalar
     ((sb-alien::alien-double-float-type-p alien-type)
      (values 'double-float 1))
-    ;; Array type - check if element type is float
+    ;; An array counts its element's members once per element, whatever
+    ;; its rank and whether the element is a float, a record or an array.
     ((sb-alien::alien-array-type-p alien-type)
-     (let ((element-type (sb-alien::alien-array-type-element-type alien-type))
-           (dims (sb-alien::alien-array-type-dimensions alien-type)))
-       ;; Only 1-D arrays for HFA
-       (when (and (= (length dims) 1)
-                  (integerp (first dims)))
-         (let ((len (first dims)))
-           (cond
-             ((sb-alien::alien-single-float-type-p element-type)
-              (values 'single-float len))
-             ((sb-alien::alien-double-float-type-p element-type)
-              (values 'double-float len))
-             ;; Could also be an array of HFA structs
-             ((sb-alien::alien-record-type-p element-type)
-              (multiple-value-bind (nested-base nested-count)
-                  (hfa-base-type element-type)
-                (when nested-base
-                  (values nested-base (* len nested-count)))))
-             (t nil))))))
+     (let ((dims (sb-alien::alien-array-type-dimensions alien-type)))
+       (when (and dims (every #'integerp dims))
+         (multiple-value-bind (base count)
+             (hfa-member-info (sb-alien::alien-array-type-element-type alien-type))
+           (when base
+             (values base (* count (reduce #'* dims))))))))
     ;; Nested record - recursively check HFA
     ((sb-alien::alien-record-type-p alien-type)
      (hfa-base-type alien-type))
@@ -234,6 +223,9 @@
   "Check if record is an HFA. Returns (values base-type member-count) where
    base-type is 'single-float or 'double-float, or NIL if not an HFA."
   (let ((fields (sb-alien::alien-record-type-fields record-type))
+        ;; AAPCS64 counts a union's members by its largest member, a
+        ;; struct's by the sum of its fields'.
+        (unionp (eq (sb-alien::alien-record-type-kind record-type) :union))
         (base-type nil)
         (count 0))
     (dolist (field fields)
@@ -247,7 +239,9 @@
             ;; Compatible with existing base type (or first member)
             ((or (null base-type) (eq base-type member-base))
              (setf base-type member-base)
-             (incf count member-count))
+             (if unionp
+                 (setf count (max count member-count))
+                 (incf count member-count)))
             ;; Mixed float types - not an HFA
             (t (return-from hfa-base-type nil))))))
     ;; HFA must have 1-4 members
