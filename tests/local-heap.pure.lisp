@@ -660,6 +660,22 @@
           (assert (eq (kind-of (lambda () (store-two-values tok :x :y)))
                       :global)))))))
 
+(with-test (:name (:local-heap :store-barrier :multiple-store-order))
+  (with-test-heap (a)
+    (with-test-heap (b)
+      (let ((foreign (with-heap (b) (list :foreign))))
+        (with-heap (a)
+          (let ((tok (make-two-slot-token))
+                (local (list :local)))
+            (handler-case
+                (progn (store-two-values tok local foreign)
+                       (error "Cross-heap second store was accepted"))
+              (heap-store-error (c)
+                (assert (eq (heap-store-error-kind c) :cross-heap))))
+            ;; The first, valid store precedes the second store's error.
+            (assert (eq (two-slot-token-state tok) local))
+            (assert (null (two-slot-token-reason tok)))))))))
+
 (with-test (:name (:local-heap :store-barrier :messages-are-checked-safely))
   (with-test-heap (a)
     (with-test-heap (b)
