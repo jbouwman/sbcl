@@ -55,7 +55,10 @@
                       (setf (cdr x) j)))
   #+(or arm64 x86-64)
   (progn
-    (assert-barriers 1 1
+    ;; These counters are updated by REQUIRE-GENGC-BARRIER-P before card
+    ;; mark coalescing. Both pointer values still need classification so
+    ;; that reusing a card mark cannot omit a local-heap store check.
+    (assert-barriers 2 2
                      `(lambda (x m j)
                         (setf (car x) m)
                         (setf (cdr x) j)))
@@ -69,6 +72,38 @@
                      `(lambda (x m j)
                         (setf (car x) m)
                         (setf (cdr x) (list j))))))
+
+#+(or arm64 x86-64)
+(with-test (:name :consecutive-store-card-marks)
+  ;; Count calls to the code generator independently of the classification
+  ;; counters above. A local-heap check can collect, so its slow path must
+  ;; mark the card again after returning; the ordinary path marks it once.
+  (let ((marks nil)
+        (remarking nil))
+    (sb-int:encapsulate
+     'sb-vm::emit-gengc-barrier 'count-card-marks
+     (lambda (function &rest args)
+       (push remarking marks)
+       (apply function args)))
+    #+sb-local-heaps
+    (sb-int:encapsulate
+     'sb-vm::emit-local-heap-store-check 'count-card-marks
+     (lambda (function object value temp &optional remark-card)
+       (let ((previous remarking))
+         (unwind-protect
+              (progn
+                (setf remarking (or remarking remark-card))
+                (funcall function object value temp remark-card))
+           (setf remarking previous)))))
+    (unwind-protect
+         (checked-compile '(lambda (x m j)
+                             (setf (car x) m)
+                             (setf (cdr x) j)))
+      (sb-int:unencapsulate 'sb-vm::emit-gengc-barrier 'count-card-marks)
+      #+sb-local-heaps
+      (sb-int:unencapsulate 'sb-vm::emit-local-heap-store-check 'count-card-marks))
+    (assert (equal (reverse marks) #+sb-local-heaps '(nil t)
+                                   #-sb-local-heaps '(nil)))))
 
 (with-test (:name :dx)
   (assert-barriers 1 0

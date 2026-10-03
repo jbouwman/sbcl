@@ -60,7 +60,12 @@
              (emit-code-page-gengc-barrier object val-temp)
              (emit-store (object-slot-ea object offset lowtag) value val-temp)))
           (t
-           (when barrier (emit-gengc-barrier object nil val-temp t))
+           (when barrier
+             #+sb-local-heaps
+             (emit-local-heap-store-check object (vop-nth-arg 1 vop) val-temp
+                                          (eq barrier :card-marked))
+             (unless (eq barrier :card-marked)
+               (emit-gengc-barrier object nil val-temp t)))
            (emit-store (object-slot-ea object offset lowtag) value val-temp)))))
 
 (define-vop (compare-and-swap-slot)
@@ -318,6 +323,8 @@
   (:generator 1
    (pseudo-atomic (:elide-if (or #-immobile-space t))
     (gcbar)
+    #+sb-local-heaps
+    (emit-local-heap-store-check object (vop-nth-arg 1 vop) temp)
     (storew function object fdefn-fun-slot other-pointer-lowtag)
     (unless (and (sc-is linkage-val immediate) (zerop (tn-value linkage-val)))
       (inst mov (ea linkage-cell) linkage-val))))))
@@ -557,6 +564,12 @@
                              thereis (= (ldb (byte 2 slot) zerop-mask) #b11))))
       (when (eq (tn-ref-type obj-ref) (specifier-type 'layout))
         (bug "unexpected set-multiple"))
+      ;; The card mark is shared, but a strict ownership check can signal.
+      ;; Preserve the effects of earlier stores before checking the next one.
+      #+sb-local-heaps
+      (when (require-gengc-barrier-p instance values nil)
+        (emit-gengc-barrier instance nil val-temp t))
+      #-sb-local-heaps
       (emit-gengc-barrier instance nil val-temp values)
       (when use-xmm-p
         (inst xorps xmm-temp xmm-temp))
@@ -565,6 +578,8 @@
               (val (tn-ref-tn values))
               (ea (object-slot-ea instance (+ instance-slots-offset index)
                                   instance-pointer-lowtag)))
+         #+sb-local-heaps
+         (emit-local-heap-store-check instance values val-temp t t)
          (setq values (tn-ref-across values))
          ;; If the xmm temp was loaded with 0 and this value is 0,
          ;; and possibly the next, then store through the temp
@@ -785,7 +800,12 @@
                        :from (:argument 5) :to (:result 0)) ecx))))
 
   (define-dblcas %cons-cas-pair nil
+    (:vop-var vop)
     (:generator 2
+      #+sb-local-heaps
+      (progn
+        (emit-local-heap-store-check object (vop-nth-arg 3 vop) temp)
+        (emit-local-heap-store-check object (vop-nth-arg 4 vop) temp))
       (emit-gengc-barrier object nil temp)
       (generate-dblcas (ea (- list-pointer-lowtag) object)
                        expected-old-lo expected-old-hi new-lo new-hi
@@ -794,9 +814,14 @@
   ;; The CPU requires 16-byte alignment for the memory operand.
   ;; A vector's data portion starts on a 16-byte boundary, so any even numbered index is OK.
   (define-dblcas %vector-cas-pair t
+    (:vop-var vop)
     (:generator 2
       (let ((ea (ea (- (* n-word-bytes vector-data-offset) other-pointer-lowtag)
                     object index (ash n-word-bytes (- n-fixnum-tag-bits)))))
+        #+sb-local-heaps
+        (progn
+          (emit-local-heap-store-check object (vop-nth-arg 4 vop) temp)
+          (emit-local-heap-store-check object (vop-nth-arg 5 vop) temp))
         (emit-gengc-barrier object ea temp)
         (generate-dblcas ea expected-old-lo expected-old-hi new-lo new-hi
                          eax ebx ecx edx result-lo result-hi))))
@@ -805,7 +830,12 @@
   ;; An instance's first user-visible slot at index 1 is 16-byte-aligned.
   ;; (Hmm, does the constraint differ by +/- compact-instance-header?)
   (define-dblcas %instance-cas-pair t
+    (:vop-var vop)
     (:generator 2
+      #+sb-local-heaps
+      (progn
+        (emit-local-heap-store-check object (vop-nth-arg 4 vop) temp)
+        (emit-local-heap-store-check object (vop-nth-arg 5 vop) temp))
       (emit-gengc-barrier object nil temp)
       (let ((ea (ea (- (* n-word-bytes instance-slots-offset) instance-pointer-lowtag)
                     object index (ash n-word-bytes (- n-fixnum-tag-bits)))))
