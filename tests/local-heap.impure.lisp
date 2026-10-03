@@ -1501,3 +1501,32 @@ string, when the second starts in the last line of the first; else NIL."
                                      :output nil :error nil)))
            (assert (zerop (process-exit-code process))))
       (delete-file script))))
+
+;;; --- Hash tables grow where they live ---
+
+;;; A global table grows in the global heap whatever heap is installed,
+;;; so inserting into one from a local heap neither escapes nor fails
+;;; when the table has to grow; a table owned by a local heap grows in
+;;; that heap.
+(with-test (:name (:local-heap :hash-table :global-table-grows-globally))
+  (let ((fresh (make-hash-table))
+        (full (make-hash-table)))
+    (dotimes (i 8) (setf (gethash i full) (list i)))
+    (with-test-heap (heap :check-stores :error)
+      (with-heap (heap)
+        (setf (gethash :first fresh) :value)
+        (dotimes (i 64) (setf (gethash (+ 100 i) full) :value))))
+    (assert (eq :value (gethash :first fresh)))
+    (assert (= 72 (hash-table-count full)))
+    (assert (zerop (sb-vm::object-owner (sb-impl::hash-table-pairs fresh))))
+    (assert (zerop (sb-vm::object-owner (sb-impl::hash-table-pairs full))))))
+
+(with-test (:name (:local-heap :hash-table :local-table-grows-locally))
+  (with-test-heap (heap :check-stores :error)
+    (let ((table (with-heap (heap) (make-hash-table))))
+      (with-heap (heap)
+        (dotimes (i 64) (setf (gethash i table) (list i))))
+      (assert (= 64 (hash-table-count table)))
+      (assert (= (sb-fiber::heap-id heap) (sb-vm::object-owner table)))
+      (assert (= (sb-fiber::heap-id heap)
+                 (sb-vm::object-owner (sb-impl::hash-table-pairs table)))))))
