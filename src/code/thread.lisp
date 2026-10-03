@@ -157,8 +157,7 @@ HOLDING-MUTEX-P."
                (,without
                 (unwind-protect
                      (progn
-                       (sb-kernel::without-store-checking
-                         (setf (thread-waiting-for ,thread) nil))
+                       (setf (thread-waiting-for ,thread) nil)
                        (barrier (:write))
                        (,with (exec)))
                   ;; If we were waiting on a waitqueue, this becomes a bogus

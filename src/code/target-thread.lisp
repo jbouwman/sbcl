@@ -557,8 +557,7 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
               ,@forms)
          ;; Interrupt handlers and GC save and restore any
          ;; previous wait marks using WITHOUT-THREAD-WAITING-FOR
-         (sb-kernel::without-store-checking
-           (setf (thread-waiting-for ,n-thread) nil))
+         (setf (thread-waiting-for ,n-thread) nil)
          (barrier (:memory))))))
 
 ;;;; Mutexes
@@ -626,8 +625,7 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
       (when (mutex-p origin)
         (let ((chain (detect-deadlock origin 10)))
           (when (consp chain)
-            (sb-kernel::without-store-checking
-              (setf (thread-waiting-for self) nil))
+            (setf (thread-waiting-for self) nil)
             (sb-thread:barrier (:memory))
             (release-cas-lock **deadlock-lock**)
             (with-interrupts
@@ -1985,9 +1983,8 @@ session."
                ;; as doing so requires grabbing the per-thread mutex which we currently own.
                ;; Deferrable signals are masked at this point, but it is best to tidy up
                ;; any stray data such as captured closure values.
-               (sb-kernel::without-store-checking
-                 (setf (thread-interruptions thread) nil
-                       (thread-primitive-thread thread) 0))
+               (setf (thread-interruptions thread) nil
+                     (thread-primitive-thread thread) 0)
                (setf *sprof-enable* 0)
                ;; Take ownership of sb-sprof profile, and nullify the data slot.
                ;; This doesn't need to synchronize with the signal handler, which is
