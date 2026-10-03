@@ -1495,7 +1495,9 @@ lisp_fun_linkage_space: .zero ~:*~D
             "make_list"
             "alloc_funinstance"
             "allocation_tracker_counted"
-            "allocation_tracker_sized")))
+            "allocation_tracker_sized"
+            #+sb-local-heaps "local_heap_check_store"
+            #+sb-fiber "fiber_tramp_c")))
 
 (defun patch-asm-codeblob (core &aux (spacemap (core-spacemap core)))
   (binding* ((static-space (get-space static-core-space-id spacemap))

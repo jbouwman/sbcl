@@ -1624,16 +1624,24 @@
                   (destructuring-bind (object value &optional allocator) barrier
                     (let* ((tn (tn-ref-tn (sb-vm::vop-nth-arg object vop)))
                            (register (register-p tn)))
-                      (if (and
-                           (not (and register
-                                     (logbitp (tn-offset tn) 2block-gc-barriers)))
-                           (sb-vm::require-gengc-barrier-p tn
-                                                           (sb-vm::vop-nth-arg value vop)
-                                                           (and allocator
-                                                                (nth allocator (vop-codegen-info vop)))))
-                          (when register
-                            (setf (ldb (byte 1 (tn-offset tn)) 2block-gc-barriers) 1))
-                          (nsubst nil barrier (vop-codegen-info vop)))))
+                      (cond ((not (sb-vm::require-gengc-barrier-p
+                                   tn
+                                   (sb-vm::vop-nth-arg value vop)
+                                   (and allocator
+                                        (nth allocator (vop-codegen-info vop)))))
+                             (nsubst nil barrier (vop-codegen-info vop)))
+                            ((and register
+                                  (logbitp (tn-offset tn) 2block-gc-barriers))
+                             ;; An earlier store in this block marked the
+                             ;; object's card.  The local-heap store check
+                             ;; classifies the value, so it is still needed:
+                             ;; :CARD-MARKED makes the generator omit only
+                             ;; the card mark.
+                             (nsubst #+sb-local-heaps :card-marked
+                                     #-sb-local-heaps nil
+                                     barrier (vop-codegen-info vop)))
+                            (register
+                             (setf (ldb (byte 1 (tn-offset tn)) 2block-gc-barriers) 1)))))
                   ;; FIXME: can't straddle an allocation sequences
                   (setf 2block-gc-barriers 0)))
             (case (vop-name vop)
