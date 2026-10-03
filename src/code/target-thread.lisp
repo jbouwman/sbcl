@@ -548,11 +548,7 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
        ;; in places where interrupts should already be disabled.
        (unwind-protect
             (progn
-              ;; The mark is the runtime's bookkeeping on the thread, a
-              ;; global object; a caller under a strict local heap is not
-              ;; charged for it.
-              (sb-kernel::without-store-checking
-                (setf (thread-waiting-for ,n-thread) ,new))
+              (set-thread-waiting-for ,n-thread ,new)
               (barrier (:memory))
               ,@forms)
          ;; Interrupt handlers and GC save and restore any
@@ -1089,56 +1085,58 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
 
 #+(and sb-thread (not sb-futex))
 (progn
-  ;; The queue is the runtime's bookkeeping on a global object: a waiter
-  ;; or a notifier inside a strict local heap is not charged for the
-  ;; stores, and the cell is allocated globally since the queue holds it.
+  ;; Taking the queue's lock stores the thread into it, and the list
+  ;; operations under the lock store into the queue and the waiting
+  ;; threads: the runtime's bookkeeping on global objects, not charged to
+  ;; a strict local heap. The cell is allocated globally since the queue
+  ;; holds it.
+  (defmacro with-waitqueue-lock ((queue) &body body)
+    `(sb-kernel::without-store-checking
+       (%with-cas-lock ((waitqueue-%owner ,queue)) ,@body)))
   (defun %waitqueue-enqueue (thread queue)
-    (sb-kernel::without-store-checking
-      (setf (thread-waiting-for thread) queue)
-      (let ((head (waitqueue-%head queue))
-            (tail (waitqueue-%tail queue))
-            (new (sb-kernel::with-global-heap (list thread))))
-        (unless head
-          (setf (waitqueue-%head queue) new))
-        (when tail
-          (setf (cdr tail) new))
-        (setf (waitqueue-%tail queue) new)
-        nil)))
+    (setf (thread-waiting-for thread) queue)
+    (let ((head (waitqueue-%head queue))
+          (tail (waitqueue-%tail queue))
+          (new (sb-kernel::with-global-heap (list thread))))
+      (unless head
+        (setf (waitqueue-%head queue) new))
+      (when tail
+        (setf (cdr tail) new))
+      (setf (waitqueue-%tail queue) new)
+      nil))
   (defun %waitqueue-drop (thread queue)
-    (sb-kernel::without-store-checking
-      (setf (thread-waiting-for thread) nil)
-      (let ((head (waitqueue-%head queue)))
-        (do ((list head (cdr list))
-             (prev nil list))
-            ((or (null list)
-                 (eq (car list) thread))
-             (when list
-               (let ((rest (cdr list)))
-                 (cond (prev
-                        (setf (cdr prev) rest))
-                       (t
-                        (setf (waitqueue-%head queue) rest
-                              prev rest)))
-                 (unless rest
-                   (setf (waitqueue-%tail queue) prev))))))))
+    (setf (thread-waiting-for thread) nil)
+    (let ((head (waitqueue-%head queue)))
+      (do ((list head (cdr list))
+           (prev nil list))
+          ((or (null list)
+               (eq (car list) thread))
+           (when list
+             (let ((rest (cdr list)))
+               (cond (prev
+                      (setf (cdr prev) rest))
+                     (t
+                      (setf (waitqueue-%head queue) rest
+                            prev rest)))
+               (unless rest
+                 (setf (waitqueue-%tail queue) prev)))))))
     nil)
   (defun %waitqueue-wakeup (queue n)
     (declare (fixnum n))
-    (sb-kernel::without-store-checking
-      (loop with next = nil
-            while (plusp n)
-            do (setq next (let ((head (waitqueue-%head queue))
-                                (tail (waitqueue-%tail queue)))
-                            (when head
-                              (if (eq head tail)
-                                  (setf (waitqueue-%head queue) nil
-                                        (waitqueue-%tail queue) nil)
-                                  (setf (waitqueue-%head queue) (cdr head)))
-                              (car head))))
-            while next
-            do (when (eq queue (sb-ext:compare-and-swap
-                                (thread-waiting-for next) queue nil))
-                 (decf n))))
+    (loop with next = nil
+          while (plusp n)
+          do (setq next (let ((head (waitqueue-%head queue))
+                              (tail (waitqueue-%tail queue)))
+                          (when head
+                            (if (eq head tail)
+                                (setf (waitqueue-%head queue) nil
+                                      (waitqueue-%tail queue) nil)
+                                (setf (waitqueue-%head queue) (cdr head)))
+                            (car head))))
+          while next
+          do (when (eq queue (sb-ext:compare-and-swap
+                              (thread-waiting-for next) queue nil))
+               (decf n)))
     nil))
 
 (defmethod print-object ((waitqueue waitqueue) stream)
@@ -1202,9 +1200,8 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
                             :ok))))
                 #-sb-futex
                 (progn
-                 (sb-kernel::without-store-checking
-                 (%with-cas-lock ((waitqueue-%owner queue))
-                   (%waitqueue-enqueue me queue)))
+                 (with-waitqueue-lock (queue)
+                   (%waitqueue-enqueue me queue))
                  (release-mutex mutex)
                  (setf status
                        (or (flet ((wakeup ()
@@ -1216,14 +1213,13 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
                                (%%wait-for #'wakeup stop-sec stop-usec)))
                            :timeout)))
            #-sb-futex
-           (sb-kernel::without-store-checking
-           (%with-cas-lock ((waitqueue-%owner queue))
+           (with-waitqueue-lock (queue)
              (if (eq queue (thread-waiting-for me))
                  (%waitqueue-drop me queue)
                  (unless (eq :ok status)
                    ;; CONDITION-NOTIFY thinks we've been woken up, but really
                    ;; we're unwinding. Wake someone else up.
-                   (%waitqueue-wakeup queue 1)))))
+                   (%waitqueue-wakeup queue 1))))
            ;; Update timeout for mutex re-aquisition unless we are
            ;; already past the requested timeout.
            (when (and (eq :ok status) to-sec)
@@ -1352,10 +1348,8 @@ must be held by this thread during this call."
         (futex-wake (waitqueue-token-address queue) n))
       nil)
   #+(and sb-thread (not sb-futex))
-  ;; The queue and its owner slot are the runtime's bookkeeping on a
-  ;; global object; a notifier inside a strict local heap is not charged.
-  (sb-kernel::without-store-checking
-    (with-cas-lock ((waitqueue-%owner queue)) (%waitqueue-wakeup queue n))))
+  (without-interrupts
+    (with-waitqueue-lock (queue) (%waitqueue-wakeup queue n))))
 
 (declaim (ftype (sfunction (waitqueue) null) condition-broadcast))
 (defun condition-broadcast (queue)
@@ -2360,6 +2354,17 @@ The default behavior is to use FUNCALL.")
 (declaim (type (or sb-kernel:function-designator null) *interrupt-handler*)
          (sb-ext:always-bound *interrupt-handler*))
 
+;;; The interruption queue is the runtime's bookkeeping on the thread
+;;; struct, a global object: its cells are allocated globally since the
+;;; thread holds them, and its stores are not charged to a strict local
+;;; heap, whether the interrupter or the interrupted thread is in one.
+(defmacro pop-thread-interruption (thread)
+  `(sb-kernel::without-store-checking (pop (thread-interruptions ,thread))))
+(defmacro append-thread-interruption (thread cell)
+  `(sb-kernel::without-store-checking
+     (setf (thread-interruptions ,thread)
+           (nconc (thread-interruptions ,thread) ,cell))))
+
 ;;; Called from the signal handler.
 #-(or sb-safepoint win32)
 (defun run-interruption ()
@@ -2373,11 +2378,8 @@ The default behavior is to use FUNCALL.")
           (allow-with-interrupts
             (sb-vm::signal-local-heap-allocation-trap trap)))
         (return-from run-interruption))))
-  ;; The queue is the runtime's bookkeeping on the thread, a global object;
-  ;; an interruption delivered inside a strict local heap is not charged for it.
   (let ((interruption (with-tls-lock (*current-thread*)
-                        (sb-kernel::without-store-checking
-                          (pop (thread-interruptions *current-thread*))))))
+                        (pop-thread-interruption *current-thread*))))
     ;; If there is more to do, then resignal and let the normal
     ;; interrupt deferral mechanism take care of the rest. From the
     ;; OS's point of view the signal we are in the handler for is no
@@ -2396,8 +2398,7 @@ The default behavior is to use FUNCALL.")
 (defun run-interruption (*current-internal-error-context*)
   (in-interruption () ;the non-thruption code does this in the signal handler
     (let ((interruption (with-tls-lock (*current-thread*)
-                          (sb-kernel::without-store-checking
-                            (pop (thread-interruptions *current-thread*))))))
+                          (pop-thread-interruption *current-thread*))))
       (when interruption
         (without-interrupts (allow-with-interrupts (funcall interruption)))
         ;; I tried implementing this function as an explicit LOOP, because
@@ -2499,11 +2500,8 @@ Short version: be careful out there."
     (when (/= c-thread 0)
       ;; Append to the end of the interruptions queue. It's
       ;; O(N), but it does not hurt to slow interruptors down a
-      ;; bit when the queue gets long. The append runs with the global
-      ;; heap installed: a strict interrupter is not refused the
-      ;; runtime's store.
-      (sb-kernel::with-global-heap
-        (setf (thread-interruptions thread) (nconc (thread-interruptions thread) tail)))
+      ;; bit when the queue gets long.
+      (append-thread-interruption thread tail)
       ;; We use SIGURG because it satisfies a lot of requirements that
       ;; other people have thought about more than we have.
       ;; See https://golang.org/src/runtime/signal_unix.go where they describe

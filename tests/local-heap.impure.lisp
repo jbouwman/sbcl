@@ -1615,3 +1615,27 @@ string, when the second starts in the last line of the first; else NIL."
                          (heap-store-error (c) (heap-store-error-kind c))))))
       (sb-thread:signal-semaphore stop)
       (sb-thread:join-thread target))))
+
+;;; Waiting on and notifying a condition variable from inside a strict
+;;; heap: the queue's lock and list are the runtime's bookkeeping.
+(with-test (:name (:local-heap :strict :condition-wait-and-notify))
+  (let* ((mutex (sb-thread:make-mutex))
+         (queue (sb-thread:make-waitqueue))
+         (waiting (sb-thread:make-semaphore))
+         (flag (list nil))
+         (waiter (sb-thread:make-thread
+                  (lambda ()
+                    (with-test-heap (heap :check-stores :error :strict t)
+                      (with-heap (heap)
+                        (sb-thread:with-mutex (mutex)
+                          (sb-thread:signal-semaphore waiting)
+                          (loop until (car flag)
+                                do (sb-thread:condition-wait queue mutex))
+                          :woken)))))))
+    (sb-thread:wait-on-semaphore waiting)
+    (with-test-heap (heap :check-stores :error :strict t)
+      (with-heap (heap)
+        (sb-thread:with-mutex (mutex)
+          (setf (car flag) t)
+          (sb-thread:condition-notify queue))))
+    (assert (eq :woken (sb-thread:join-thread waiter)))))

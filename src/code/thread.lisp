@@ -136,6 +136,14 @@ HOLDING-MUTEX-P."
 (defun deadlock-detection-policy-p (env)
   (sb-c::policy env (or (< speed 3) (> safety 0)))))
 
+;;; The wait mark is the runtime's bookkeeping on the thread struct, a
+;;; global object: setting it is not charged to a strict local heap. The
+;;; constant NIL that clears it is a store the compiler does not check, so
+;;; the clearing sites store it directly.
+(defmacro set-thread-waiting-for (thread value)
+  `(sb-kernel::without-store-checking
+     (setf (thread-waiting-for ,thread) ,value)))
+
 ;;; Needed to pacify deadlock detection if inerrupting wait-for-mutex,
 ;;; otherwise it would appear that if there is a lock grabbed inside
 ;;; of BODY it would appear backwards--waiting on a lock while holding
@@ -163,8 +171,7 @@ HOLDING-MUTEX-P."
                   ;; If we were waiting on a waitqueue, this becomes a bogus
                   ;; wakeup.
                   (when (mutex-p ,prev)
-                    (sb-kernel::without-store-checking
-                      (setf (thread-waiting-for ,thread) ,prev))
+                    (set-thread-waiting-for ,thread ,prev)
                     (barrier (:write)))))
                (exec)))))))
 
