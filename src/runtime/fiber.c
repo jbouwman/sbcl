@@ -286,7 +286,10 @@ void sb_fiber_set_current(struct thread *th, struct sb_fiber_ctx *fiber)
     sb_fiber_enter_pa(th);
     thread_extra_data(th)->current_fiber = fiber;
 #ifdef LISP_FEATURE_SB_LOCAL_HEAPS
-    if (fiber) fiber->active_heap = thread_extra_data(th)->current_heap;
+    if (fiber) {
+        fiber->active_heap = thread_extra_data(th)->current_heap;
+        fiber->active_check = th->local_heap_check;
+    }
 #endif
     sb_fiber_exit_pa(th);
 }
@@ -544,8 +547,12 @@ void sb_fiber_switch_prep(struct sb_fiber_ctx *from, struct sb_fiber_ctx *to)
 
     thread_extra_data(th)->current_fiber = to;
 #ifdef LISP_FEATURE_SB_LOCAL_HEAPS
-    /* Park FROM's allocation regions and install TO's. */
+    /* Park FROM's allocation regions and install TO's, and carry the
+     * store-checking state with each: a fiber inside WITH-GLOBAL-HEAP or
+     * WITHOUT-STORE-CHECKING keeps that state across a switch. */
+    from->active_check = th->local_heap_check;
     local_heap_switch_in_pa(th, to->active_heap);
+    th->local_heap_check = to->active_check;
 #endif
 
     from->binding_stack_pointer = get_binding_stack_pointer(th);
@@ -585,6 +592,7 @@ int sb_fiber_set_heap(struct sb_fiber_ctx *f, struct local_heap *h)
     if (h && h->installed_on) return -2;
     f->heap = h;
     f->active_heap = h;
+    f->active_check = (h && h->store_check) ? h : NULL;
     return 0;
 }
 

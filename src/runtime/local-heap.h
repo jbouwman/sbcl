@@ -209,6 +209,7 @@ uword_t local_heap_take_exhausted(void);
 void local_heap_check_store(lispobj value, lispobj object, uword_t pc);
 int  local_heap_classify_store(lispobj value, lispobj object, uword_t pc);
 int  local_heap_switch_address(uword_t heap);
+int  local_heap_install_global(void);
 uword_t local_heap_current_address(void);
 
 /* Allocation trap: one-shot, armed on the heap by its owner thread. */

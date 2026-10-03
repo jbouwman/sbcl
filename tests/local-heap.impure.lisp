@@ -1436,8 +1436,10 @@ string, when the second starts in the last line of the first; else NIL."
                                          (declare (ignore c))
                                          (return-from request :refused))))
                         (sb-sys:without-interrupts
+                          ;; The function reaches the thread's queue, a global
+                          ;; object, so it is made outside the heap.
                           (sb-thread:interrupt-thread sb-thread:*current-thread*
-                                                      (lambda () (incf ran)))
+                                                      (without-heap (lambda () (incf ran))))
                           (churn (* 1024 1024)))
                         (churn (* 1024 1024))
                         :finished))))
@@ -1530,3 +1532,86 @@ string, when the second starts in the last line of the first; else NIL."
       (assert (= (sb-fiber::heap-id heap) (sb-vm::object-owner table)))
       (assert (= (sb-fiber::heap-id heap)
                  (sb-vm::object-owner (sb-impl::hash-table-pairs table)))))))
+
+;;; --- WITHOUT-HEAP keeps the escape check ---
+
+;;; WITHOUT-HEAP allocates globally and turns the strict rule off, and
+;;; nothing else: a store that would make a global object refer into the
+;;; heap is refused inside it as outside.
+(with-test (:name (:local-heap :without-heap :escape-still-refused))
+  (let ((vector (make-array 1 :initial-element nil)))
+    (dolist (strict '(nil t))
+      (with-test-heap (heap :check-stores :error :strict strict)
+        ;; The handler runs outside the heap: under :strict, reading the
+        ;; condition's slot assigns it, a store into a global object.
+        (assert (eq :escape
+                    (handler-case
+                        (with-heap (heap)
+                          (let ((local (list 1)))
+                            (without-heap (setf (svref vector 0) local))
+                            nil))
+                      (heap-store-error (c) (heap-store-error-kind c))))))
+      (assert (null (svref vector 0))))))
+
+(with-test (:name (:local-heap :strict :without-heap-global-store-accepted))
+  (let ((vector (make-array 1 :initial-element nil))
+        (global (list :global)))
+    (with-test-heap (heap :check-stores :error :strict t)
+      (with-heap (heap)
+        (without-heap (setf (svref vector 0) global))))
+    (assert (eq global (svref vector 0)))))
+
+;;; WITHOUT-HEAP inside a suspension leaves the suspension in force when
+;;; it reinstalls the heap: the runtime's bookkeeping allocates its cells
+;;; globally from inside its own suspensions.
+(with-test (:name (:local-heap :strict :without-heap-keeps-suspension))
+  (let ((vector (make-array 1 :initial-element nil))
+        (global (list :global)))
+    (with-test-heap (heap :check-stores :error :strict t)
+      (with-heap (heap)
+        (sb-fiber:without-store-checking
+          (let ((cell (without-heap (list :cell))))
+            (setf (svref vector 0) (list global cell))))))
+    (assert (equal '(:global) (first (svref vector 0))))))
+
+;;; GLOBALIZE runs COPY-FOR-TRANSFER with the global heap installed; the
+;;; UNTRANSFERABLE-OBJECT it signals for a closure refers to the closure,
+;;; so it is built in the heap that owns it rather than globally, where it
+;;; would be the escape the barrier refuses.
+;; Returned rather than called, over a value the compiler cannot fold, so
+;; the closure is allocated in the installed heap rather than on the stack.
+(declaim (notinline make-heap-owned-closure))
+(defun make-heap-owned-closure ()
+  (let ((cell (list (random 8))))
+    (lambda () (car cell))))
+
+(with-test (:name (:local-heap :globalize :untransferable-condition-owned-by-the-heap))
+  (with-test-heap (heap :check-stores :error)
+    (with-heap (heap)
+      (let* ((closure (make-heap-owned-closure))
+             (condition (handler-case (progn (globalize closure) nil)
+                          (untransferable-object (c) c))))
+        (assert (sb-vm::locally-owned-p closure))
+        (assert condition)
+        (assert (eq closure (untransferable-object-object condition)))
+        (assert (= (sb-fiber::heap-id heap) (sb-vm::object-owner condition)))))))
+
+;;; A function owned by a local heap would escape into the target thread's
+;;; interruption queue through a fresh cell no barrier sees; INTERRUPT-THREAD
+;;; checks it as a store into the thread.
+(with-test (:name (:local-heap :interrupt-thread :local-function-refused))
+  (let* ((stop (sb-thread:make-semaphore))
+         (target (sb-thread:make-thread
+                  (lambda () (sb-thread:wait-on-semaphore stop)))))
+    (unwind-protect
+         (with-test-heap (heap :check-stores :error)
+           (assert (eq :escape
+                       (handler-case
+                           (with-heap (heap)
+                             (let* ((captured (list :captured))
+                                    (action (lambda () captured)))
+                               (sb-thread:interrupt-thread target action)
+                               nil))
+                         (heap-store-error (c) (heap-store-error-kind c))))))
+      (sb-thread:signal-semaphore stop)
+      (sb-thread:join-thread target))))

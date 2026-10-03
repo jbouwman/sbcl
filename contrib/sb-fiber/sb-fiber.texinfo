@@ -347,7 +347,8 @@ or other immediate cannot create a reference.  @var{strict}
 additionally makes any pointer store into a global object a
 violation, so that the process can mutate nothing but its own data;
 operations that must touch global state are wrapped in
-@code{without-heap}, which suspends the barrier.  Strict mode applies
+@code{without-heap}, which turns the strict rule off for its extent while
+the barrier still refuses an escape there.  Strict mode applies
 to whatever runs while the heap is installed, including error handlers
 established outside the process: a handler that records the error in
 global state must do so inside @code{without-heap}.
@@ -395,9 +396,12 @@ installed automatically.
 @end deffn
 
 @deffn Macro without-heap &body body
-Execute @var{body} with the global heap installed, so that what it
-allocates is shared rather than owned by the current local heap.
-Use it around operations that build global state.
+Execute @var{body} with the global heap installed on the current heap's
+behalf, so that what it allocates is shared rather than owned by the
+current local heap.  Use it around operations that build global state.
+Under @var{strict}, the stores @var{body} makes into global objects are
+accepted; a store that would make a global object refer into a local
+heap is refused as elsewhere.
 @end deffn
 
 @deffn Function current-heap
@@ -501,7 +505,10 @@ strings, numbers, structures, standard objects, conditions and hash
 tables are copied; uninterned symbols are global and hence shared.
 Signals @code{untransferable-object} for closures, weak pointers,
 weak hash tables, foreign pointers, streams, threads, fibers, heaps
-and synchronization objects.
+and synchronization objects.  The condition is built in the heap that
+owns the offending object, since it refers to it; when that heap is
+installed on another thread, @code{untransferable-object-object} is
+the object's type instead.
 @end deffn
 
 @deffn Function globalize object

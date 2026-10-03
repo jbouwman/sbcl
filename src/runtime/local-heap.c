@@ -331,6 +331,22 @@ int local_heap_switch_address(uword_t heap)
     return local_heap_switch(get_sb_vm_thread(), (struct local_heap*)heap);
 }
 
+/* WITH-GLOBAL-HEAP: install the global heap on behalf of the installed
+ * heap, keeping that heap's store-checking mode in force, so that an
+ * escape into a global object is still refused while the strict rule,
+ * which applies only to the installed heap (local_heap_classify_store),
+ * is off.  Leaving a heap for good is local_heap_switch_address(0),
+ * which ends checking.  The caller reinstalls the heap with
+ * local_heap_switch_address, which restores its mode. */
+int local_heap_install_global(void)
+{
+    struct thread *th = get_sb_vm_thread();
+    struct local_heap *check = th->local_heap_check;
+    int rc = local_heap_switch(th, NULL);
+    if (rc == 0) th->local_heap_check = check;
+    return rc;
+}
+
 uword_t local_heap_current_address(void)
 {
     return (uword_t)thread_extra_data(get_sb_vm_thread())->current_heap;
@@ -461,7 +477,10 @@ void local_heap_exhausted(struct local_heap *h, sword_t nbytes)
 /* Classify a pointer store of VALUE into OBJECT against the ownership
  * matrix, and note it when it is a violation.  Non-pointer values and
  * stores into stack or static objects are never violations; a store into
- * a global object is one only in strict mode.  PC is the return address
+ * a global object is one only in strict mode, and only while the strict
+ * heap is the installed one: with the global heap installed on its
+ * behalf (local_heap_install_global) its stores are the runtime's.
+ * PC is the return address
  * into the code that made the store, kept with the violation so that a
  * reader of the record can name the storing function.  Returns the kind
  * of violation when the store has to be signaled, else 0.
@@ -480,7 +499,7 @@ int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
     int kind = 0;
     if (value_owner && value_owner != object_owner)
         kind = object_owner ? LOCAL_HEAP_STORE_CROSS_HEAP : LOCAL_HEAP_STORE_ESCAPE;
-    else if (h->strict && !object_owner)
+    else if (h->strict && th->local_heap == h && !object_owner)
         kind = LOCAL_HEAP_STORE_GLOBAL;
     if (!kind) return 0;
     int signaled = h->store_check == LOCAL_HEAP_STORES_SIGNALED;

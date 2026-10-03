@@ -80,6 +80,7 @@ struct sb_fiber_ctx {
      * WITH-GLOBAL-HEAP can suspend a fiber with the global heap active. */
     struct local_heap *heap;
     struct local_heap *active_heap;
+    struct local_heap *active_check;   /* th->local_heap_check while switched out */
 #endif
 
     unsigned char cs_guard_protected;

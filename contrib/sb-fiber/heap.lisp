@@ -214,25 +214,37 @@ automatically. Applies to heaps created without an explicit threshold.")
   (heap-sap heap))
 
 (defmacro without-heap (&body body)
-  "Execute BODY with the global heap installed, so that everything it
-allocates is shared rather than owned by the current local heap.
-Restores the previous heap on exit."
-  (let ((prev (gensym "PREV")))
+  "Execute BODY with the global heap installed on the current heap's
+behalf, so that everything it allocates is shared rather than owned by
+the current local heap, and so that under a strict heap its stores into
+global objects are accepted. A store that would make a global object
+refer into a local heap is refused as elsewhere. Restores the previous
+heap on exit."
+  (let ((prev (gensym "PREV")) (check (gensym "CHECK")))
     `(let ((,prev (current-heap-address)))
        (if (zerop ,prev)
            (progn ,@body)
-           (progn
-             (%switch-heap 0)
+           ;; The checking state on entry is restored on exit, as
+           ;; SB-KERNEL::CALL-WITH-GLOBAL-HEAP restores it.
+           (let ((,check (sb-sys:sap-int (sb-vm::current-thread-offset-sap
+                                          sb-vm::thread-local-heap-check-slot))))
+             (sb-vm::%install-global-heap)
              (unwind-protect (progn ,@body)
-               (%switch-heap ,prev)))))))
+               (%switch-heap ,prev)
+               (sb-vm::%store-check-resume ,check)))))))
 
 (defun call-with-heap (heap thunk)
   (declare (function thunk) (dynamic-extent thunk))
   (let ((prev (current-heap-address))
-        (address (sb-sys:sap-int (heap-sap-or-lose heap))))
+        (address (sb-sys:sap-int (heap-sap-or-lose heap)))
+        ;; Restored with PREV: reinstalling PREV would set the checking
+        ;; state from its mode and end a suspension around this form.
+        (check (sb-sys:sap-int (sb-vm::current-thread-offset-sap
+                                sb-vm::thread-local-heap-check-slot))))
     (%switch-heap address heap)
     (unwind-protect (funcall thunk)
-      (%switch-heap prev))))
+      (%switch-heap prev)
+      (sb-vm::%store-check-resume check))))
 
 (defmacro with-heap ((heap) &body body)
   "Execute BODY with HEAP installed as the allocation target of the
@@ -510,7 +522,18 @@ different threads since startup."
   (%heap-stat (sb-sys:int-sap 0) +stat-concurrency-peak+))
 
 (defun %untransferable (object)
-  (error 'untransferable-object :object object))
+  ;; The condition refers to OBJECT, so it is built in the heap that owns
+  ;; OBJECT: built with the global heap installed, as GLOBALIZE installs
+  ;; it, it would be a global object referring into a heap, the escape
+  ;; the barrier refuses. When that heap is installed on another thread
+  ;; the condition names the object's type instead.
+  (flet ((refuse () (error 'untransferable-object :object object)))
+    (declare (dynamic-extent #'refuse))
+    (if (or (sb-int:fixnump object) (zerop (sb-vm::object-owner object)))
+        (refuse)
+        (progn
+          (sb-kernel::call-with-heap-of object #'refuse)
+          (error 'untransferable-object :object (type-of object))))))
 
 (defun copy-for-transfer (object)
   "Return a copy of OBJECT in which every sub-object owned by a process

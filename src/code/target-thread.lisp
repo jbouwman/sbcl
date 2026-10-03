@@ -2490,14 +2490,21 @@ Short version: be careful out there."
                           ;; object, so its cells are allocated globally even
                           ;; when the interrupter runs in a local heap.
                           &aux (tail (sb-kernel::with-global-heap (list function))))
+  ;; FUNCTION reaches the queue through that fresh cell, which no barrier
+  ;; sees: a function owned by a local heap would escape into the target
+  ;; thread unchecked, so it is checked here as a store into THREAD.
+  #+sb-local-heaps
+  (when (sb-vm::locally-owned-p function)
+    (sb-vm::check-store thread function
+                        #+c-stack-is-control-stack (sb-sys:sap-int (sb-kernel:%caller-pc))
+                        #-c-stack-is-control-stack (sb-kernel:get-lisp-obj-address (sb-kernel:%caller-pc))))
   (with-tls-lock (thread c-thread)
     (when (/= c-thread 0)
       ;; Append to the end of the interruptions queue. It's
       ;; O(N), but it does not hurt to slow interruptors down a
       ;; bit when the queue gets long. The append runs with the global
       ;; heap installed: a strict interrupter is not refused the
-      ;; runtime's store, and a FUNCTION owned by a local heap is still
-      ;; reported as an escape.
+      ;; runtime's store.
       (sb-kernel::with-global-heap
         (setf (thread-interruptions thread) (nconc (thread-interruptions thread) tail)))
       ;; We use SIGURG because it satisfies a lot of requirements that

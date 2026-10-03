@@ -57,15 +57,24 @@ immediate or lives in the global heap."
     int
   (heap unsigned-long))
 
+(define-alien-routine ("local_heap_install_global" %install-global-heap) int)
+
+;;; Run THUNK with the global heap installed on the current heap's behalf:
+;;; what it allocates is global, the strict rule is off, and a store that
+;;; would make a global object refer into a local heap is still refused.
+;;; The checking state in effect on entry, suspended or not, is in effect
+;;; inside and restored on exit: reinstalling the heap would otherwise set
+;;; it from the heap's mode and end a suspension around this form.
 (defun sb-kernel::call-with-global-heap (thunk)
   (declare (function thunk) (dynamic-extent thunk))
   (let ((prev (current-local-heap-address)))
     (if (zerop prev)
         (funcall thunk)
-        (progn
-          (%switch-local-heap 0)
+        (let ((check (sap-int (current-thread-offset-sap thread-local-heap-check-slot))))
+          (%install-global-heap)
           (unwind-protect (funcall thunk)
-            (%switch-local-heap prev))))))
+            (%switch-local-heap prev)
+            (%store-check-resume check))))))
 
 (define-alien-routine ("local_heap_from_id" %local-heap-from-id) unsigned-long
   (id (unsigned 32)))
@@ -79,12 +88,15 @@ immediate or lives in the global heap."
     (if (zerop owner)
         (values nil nil)
         (let ((heap (%local-heap-from-id owner))
-              (prev (current-local-heap-address)))
+              (prev (current-local-heap-address))
+              ;; Restored with PREV, as CALL-WITH-GLOBAL-HEAP restores it.
+              (check (sap-int (current-thread-offset-sap thread-local-heap-check-slot))))
           (cond ((zerop heap) (values nil nil))
                 ((= heap prev) (values (funcall thunk) t))
                 ((zerop (%switch-local-heap heap))
                  (unwind-protect (values (funcall thunk) t)
-                   (%switch-local-heap prev)))
+                   (%switch-local-heap prev)
+                   (%store-check-resume check)))
                 (t (values nil nil)))))))
 
 (define-alien-routine ("local_heap_collect" %local-heap-collect) int

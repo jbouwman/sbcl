@@ -965,9 +965,11 @@ NOTE: This interface is experimental and subject to change."
       (car x)
       x))
 
-;;; Run BODY with the global heap installed as the allocation target, so
-;;; that global metadata built on behalf of a process (class
-;;; finalization, compilation, ...) is never owned by the local heap.
+;;; Run BODY with the global heap installed on the current heap's behalf,
+;;; so that global metadata built for a process (class finalization,
+;;; compilation, ...) is never owned by the local heap. The strict rule
+;;; is off for BODY, whose stores are the runtime's; a store that would
+;;; make a global object refer into a local heap is still refused.
 ;;; A no-op unless a local heap is installed.
 (defmacro sb-kernel::with-global-heap (&body body)
   #+(and sb-local-heaps (not sb-xc-host))
