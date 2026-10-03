@@ -23,6 +23,7 @@
 #include "genesis/symbol.h"
 #include "code.h"
 #include "fiber.h"
+#include "local-heap.h"
 
 lispobj* atomic_bump_static_space_free_ptr(int nbytes)
 {
@@ -313,13 +314,11 @@ lispobj alloc_code_object(unsigned total_words, unsigned boxed)
     struct alloc_region *region = sys ? &self->sys_cons_tlab : &self->cons_tlab; \
     int partial_request = (self->arena && !sys) ? \
                           nbytes : (char*)region->end_addr - (char*)region->free_pointer; \
-    gc_assert(nbytes >= (sword_t)partial_request); \
     if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES
 #else /* no system tlabs */
 #define PREPARE_LIST_ALLOCATION() \
     struct alloc_region *region = THREAD_ALLOC_REGION(self, cons); \
     int partial_request = (char*)region->end_addr - (char*)region->free_pointer; \
-    gc_assert(nbytes > (sword_t)partial_request); \
     if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES
 #endif
 
@@ -815,6 +814,9 @@ void free_thread_struct(struct thread *th)
     struct extra_thread_data *extra_data = thread_extra_data(th);
 #ifdef LISP_FEATURE_SB_FIBER
     sb_fiber_release_registered(th);
+#endif
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+    local_heap_thread_exit(th);
 #endif
     if (extra_data->arena_savearea) free(extra_data->arena_savearea);
     os_deallocate((os_vm_address_t) th->os_address, THREAD_STRUCT_SIZE);
