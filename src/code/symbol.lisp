@@ -381,7 +381,11 @@ distinct from the global value. Can also be SETF."
         ;; I don't feel like writing a different variant of POSSIBLY-FROB-TO-HEAP just
         ;; to satisfy pedants. However, only users of arenas would detect
         ;; a change of element-type, if they care at all, which they don't.
-        (if (or (dynamic-space-obj-p name) (read-only-space-obj-p name))
+        ;; Symbols always live in the global heap, so a name owned by a
+        ;; local heap must be copied out too.
+        (if (or (and (dynamic-space-obj-p name)
+                     #+sb-local-heaps (not (sb-vm::locally-owned-p name)))
+                (read-only-space-obj-p name))
             name ; use as-is
             (possibly-base-stringize-to-heap name)))
        (()
@@ -428,6 +432,17 @@ distinct from the global value. Can also be SETF."
   (declare (sb-c::tlab :system))
   (do ((pl (symbol-plist symbol) (cddr pl)))
       ((endp pl)
+       ;; The new cells are global under a local heap, and their
+       ;; initializing stores are not barriered, so an INDICATOR or VALUE
+       ;; the installed heap owns would escape into the plist unchecked.
+       ;; Check them as the barrier checks a store into an existing cell.
+       #+sb-local-heaps
+       (let ((pc #+c-stack-is-control-stack (sap-int (%caller-pc))
+                 #-c-stack-is-control-stack (get-lisp-obj-address (%caller-pc))))
+         (when (sb-vm::locally-owned-p indicator)
+           (sb-vm::check-store symbol indicator pc))
+         (when (sb-vm::locally-owned-p value)
+           (sb-vm::check-store symbol value pc)))
        (setf (symbol-plist symbol)
              (list* indicator value (symbol-plist symbol)))
        value)
