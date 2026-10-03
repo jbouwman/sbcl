@@ -49,7 +49,18 @@
 (defparameter *definition-to-docstring-package*
   '(((with-compilation-unit macro) "SB-C")
     ((sb-ext:restrict-compiler-policy function) "SB-C")
-    ((trace macro) "SB-DEBUG")))
+    ((trace macro) "SB-DEBUG")
+    ;; The local-heap conditions live in SB-KERNEL with the primitives;
+    ;; sb-fiber re-exports them and documents them.
+    #+sb-local-heaps ((sb-kernel::heap-store-error condition) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::heap-store-error-object function) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::heap-store-error-value function) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::heap-store-error-kind function) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::local-heap-exhausted-error condition) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::heap-allocation-trap condition) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::heap-allocation-trap-claimed function) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::heap-allocation-trap-trap function) "SB-FIBER")
+    #+sb-local-heaps ((sb-kernel::*heap-allocation-trap-function* variable) "SB-FIBER")))
 
 ;;; For when this file is recompiled in interactive development after
 ;;; a later, explicit call to USE-PAX

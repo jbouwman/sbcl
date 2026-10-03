@@ -10,6 +10,7 @@
 * Interrupting a fiber: sb fiber interrupts.
 * Inspecting a fiber: sb fiber introspection.
 * Conditions: sb fiber conditions.
+* Local heaps: sb fiber heaps.
 @end menu
 
 The @code{sb-fiber} module, loadable by
@@ -139,10 +140,16 @@ one sooner.
 
 @anchor{Function sb-fiber make-fiber}
 @ffindex @sortas{make-fiber sb-fiber} make-fiber [sb-fiber]
-@deffn{Function} sb-fiber:make-fiber function &key name stack-size binding-stack-size
+@deffn{Function} sb-fiber:make-fiber function &key name stack-size binding-stack-size heap
 Create a fiber that runs @code{function} (a zero-argument function or the
 name of one) when first switched to.  @code{name} is a string label used by
 @code{print-object}.
+
+@code{heap}, if supplied, gives the fiber a local heap of its own: @code{t} creates
+one with @code{make-heap}, or pass a heap from @code{make-heap} that no fiber owns
+yet.  Everything the fiber allocates then belongs to that heap, which
+is collected independently and released with the fiber.  @code{function} must
+not itself be owned by a local heap.
 
 When @code{function} returns, the fiber is marked DEAD and control switches
 back to its most recent resumer, delivering @code{function}'s return value
@@ -221,7 +228,7 @@ has no recorded return fiber (never resumed).
 @ffindex @sortas{join-fiber sb-fiber} join-fiber [sb-fiber]
 @deffn{Function} sb-fiber:join-fiber fiber
 Resume @code{fiber} from the current fiber until it runs to completion,
-and return its entry-function values.  @code{fiber} must be RUNNABLE or NEW
+and return its entry-function values.  @code{fiber} must be RUNNABLE or @code{new}
 and on the current thread.
 @end deffn
 @anchor{Function sb-fiber fiber-return-fiber}
@@ -258,7 +265,7 @@ starts.
 Stage @code{condition} to be signalled in @code{fiber} on its next resume.
 Cooperative -- nothing happens until @code{switch-fiber} delivers control
 into @code{fiber}, at which point @code{condition} is signalled in the fiber's own
-context.  A NEW fiber is effectively cancelled (the condition fires
+context.  A @code{new} fiber is effectively cancelled (the condition fires
 before its entry function runs).
 @end deffn
 @node sb fiber introspection
@@ -393,3 +400,655 @@ current fiber, was attempted while @code{fiber} was current.
 @ffindex @sortas{current-fiber-error-operation sb-fiber} current-fiber-error-operation [sb-fiber]
 @deffn{Function} sb-fiber:current-fiber-error-operation condition
 @end deffn
+@node sb fiber heaps
+@subsection Local heaps
+
+@menu
+* Making, installing and releasing heaps: sb fiber heap lifecycle.
+* The store barrier: sb fiber heap barrier.
+* Collecting a heap: sb fiber heap collection.
+* Messages and transfer: sb fiber heap messages.
+* Verification: sb fiber heap verification.
+* Building a process layer: sb fiber heap layers.
+@end menu
+
+On builds with the @code{:sb-local-heaps} feature, which requires the
+mark-region collector, a fiber can own a *local heap*: a set of 4 KiB
+blocks of dynamic space that belongs to that fiber alone, in the
+manner of an Erlang/OTP process's heap. A heap that holds only a few
+objects costs two blocks, and several heaps may share a page.
+Everything the fiber allocates while it runs goes to its heap. The
+heap is collected on its own, without stopping other threads or
+fibers, and is returned to the global free pool in one step when the
+fiber is released. The global collector does not compact while any
+local heap exists.
+
+The invariant that makes this possible is ownership: an object in a
+local heap may refer to objects in the same heap and to global
+objects, but no global object and no other heap may refer into it.
+Objects therefore move between heaps only by copying
+(@code{sb-fiber:send-message} and @code{sb-fiber:receive-message}, or
+@code{sb-fiber:copy-for-transfer}), and values crossing a fiber boundary
+(@code{sb-fiber:switch-fiber} arguments and results, entry-function
+results, escaping conditions) are copied out of a local heap
+automatically. The invariant is enforced by a store barrier: while a
+heap is installed, every compiled pointer store checks that it does
+not make a global object or another heap refer into the installed
+heap, and signals @code{sb-fiber:heap-store-error} (continuable) when it
+would. The barrier does not see stores made from C or into objects
+the compiler knows to be freshly allocated by system code, so
+@code{sb-fiber:verify-heap}, @code{sb-fiber:verify-all-heaps} and
+@code{sb-fiber:heap-reference-checking} remain available to check the
+invariant after the fact. An unchecked violation is a bug in the
+program, as it would be with @code{sb-vm:with-arena}: the heap's collector
+will not see the offending reference, and the referenced object may
+be freed.
+
+Heaps can also be used without fibers, through @code{sb-fiber:with-heap}.
+
+@node sb fiber heap lifecycle
+@subsubsection Making, installing and releasing heaps
+
+A heap is installed on one thread at a time, as the allocation
+target of that thread. @code{sb-fiber:with-heap} installs one for the
+extent of its body; a fiber made with the @code{:heap} argument of
+@code{sb-fiber:make-fiber} has its heap installed whenever it runs, and
+released with it. @code{sb-fiber:without-heap} installs the global heap on
+the installed heap's behalf, for work on global state.
+
+@anchor{Structure sb-fiber heap}
+@ttindex @sortas{heap sb-fiber} heap [sb-fiber]
+@deffn{Structure} sb-fiber:heap
+A local heap: the handle on a set of dynamic-space blocks that one
+process owns. See @code{make-heap}.
+@end deffn
+@anchor{Function sb-fiber heap-p}
+@ffindex @sortas{heap-p sb-fiber} heap-p [sb-fiber]
+@deffn{Function} sb-fiber:heap-p object
+@end deffn
+@anchor{Function sb-fiber make-heap}
+@ffindex @sortas{make-heap sb-fiber} make-heap [sb-fiber]
+@deffn{Function} sb-fiber:make-heap &key name gc-threshold hard-limit fullsweep-after check-stores strict
+Create a local heap.  Objects allocated while it is installed (see
+@code{with-heap} and @code{make-fiber}'s @code{:heap} argument) belong to it.  @code{gc-threshold}
+is the number of bytes the heap may allocate before its young
+generation is collected automatically; 0 disables automatic
+collection.  @code{fullsweep-after} is the number of minor collections after
+which the next collection is a full one; 0 leaves full collections to
+@code{heap-gc} @code{:full} and to the old generation doubling in size.  @code{hard-limit}
+bounds the heap's total size; 0 means unbounded.
+
+@code{check-stores} controls the store barrier while the heap is installed:
+@code{:error} (the default) signals @code{heap-store-error} when a pointer
+store would make a global object or another heap refer into this heap,
+@code{:record} only records such stores (see @code{heap-violations}), @code{nil} does not
+check.  @code{strict} additionally treats any store into a global object as a
+violation, so that a process can only mutate its own data.  Neither mode
+checks a store whose value the compiler knows to be global: a literal
+constant, or a value whose type admits only immediates, @code{nil}, @code{t} and
+symbols of the initial core.
+@end deffn
+@anchor{Variable sb-fiber *default-heap-gc-threshold*}
+@vvindex @sortas{default-heap-gc-threshold* sb-fiber} *default-heap-gc-threshold* [sb-fiber]
+@deffn{Variable} sb-fiber:*default-heap-gc-threshold*
+Bytes a heap may allocate past its live size before it is collected
+automatically. Applies to heaps created without an explicit threshold.
+@end deffn
+@anchor{Function sb-fiber release-heap}
+@ffindex @sortas{release-heap sb-fiber} release-heap [sb-fiber]
+@deffn{Function} sb-fiber:release-heap heap
+Return every page of @code{heap} to the global free pool, along with any
+queued messages.  Objects that were in @code{heap} must not be used afterwards.
+@code{heap} must not be installed on another thread.
+@end deffn
+@anchor{Macro sb-fiber with-heap}
+@ffindex @sortas{with-heap sb-fiber} with-heap [sb-fiber]
+@deffn{Macro} sb-fiber:with-heap (heap) &body body
+Execute @code{body} with @code{heap} installed as the allocation target of the
+current thread. Restores the previous heap on exit.
+@end deffn
+@anchor{Macro sb-fiber without-heap}
+@ffindex @sortas{without-heap sb-fiber} without-heap [sb-fiber]
+@deffn{Macro} sb-fiber:without-heap &body body
+Execute @code{body} with the global heap installed on the current heap's
+behalf, so that everything it allocates is shared rather than owned by
+the current local heap, and so that under a strict heap its stores into
+global objects are accepted. A store that would make a global object
+refer into a local heap is refused as elsewhere. Restores the previous
+heap on exit.
+@end deffn
+@anchor{Function sb-fiber current-heap}
+@ffindex @sortas{current-heap sb-fiber} current-heap [sb-fiber]
+@deffn{Function} sb-fiber:current-heap
+The heap installed on the current thread, or @code{nil}.
+@end deffn
+@anchor{Function sb-fiber object-heap}
+@ffindex @sortas{object-heap sb-fiber} object-heap [sb-fiber]
+@deffn{Function} sb-fiber:object-heap object
+The heap that owns @code{object}, or @code{nil} if @code{object} is immediate or global.
+@end deffn
+@anchor{Function sb-fiber fiber-heap}
+@ffindex @sortas{fiber-heap sb-fiber} fiber-heap [sb-fiber]
+@deffn{Function} sb-fiber:fiber-heap fiber
+The local heap owned by @code{fiber}, or @code{nil}.
+@end deffn
+@anchor{Function sb-fiber heap-fiber}
+@ffindex @sortas{heap-fiber sb-fiber} heap-fiber [sb-fiber]
+@deffn{Function} sb-fiber:heap-fiber instance
+@end deffn
+@anchor{Function sb-fiber heap-name}
+@ffindex @sortas{heap-name sb-fiber} heap-name [sb-fiber]
+@deffn{Function} sb-fiber:heap-name instance
+@end deffn
+@anchor{Function sb-fiber heap-id}
+@ffindex @sortas{heap-id sb-fiber} heap-id [sb-fiber]
+@deffn{Function} sb-fiber:heap-id instance
+@end deffn
+@anchor{Function sb-fiber heap-alive-p}
+@ffindex @sortas{heap-alive-p sb-fiber} heap-alive-p [sb-fiber]
+@deffn{Function} sb-fiber:heap-alive-p heap
+@end deffn
+@anchor{Function sb-fiber heap-released-p}
+@ffindex @sortas{heap-released-p sb-fiber} heap-released-p [sb-fiber]
+@deffn{Function} sb-fiber:heap-released-p instance
+@end deffn
+@anchor{Condition sb-fiber heap-error}
+@ttindex @sortas{heap-error sb-fiber} heap-error [sb-fiber]
+@deffn{Condition} sb-fiber:heap-error
+Base class for sb-fiber heap errors.
+@end deffn
+@anchor{Condition sb-fiber dead-heap-error}
+@ttindex @sortas{dead-heap-error sb-fiber} dead-heap-error [sb-fiber]
+@deffn{Condition} sb-fiber:dead-heap-error
+Signaled by an operation on a heap that has been released.
+@end deffn
+@anchor{Condition sb-fiber heap-in-use-error}
+@ttindex @sortas{heap-in-use-error sb-fiber} heap-in-use-error [sb-fiber]
+@deffn{Condition} sb-fiber:heap-in-use-error
+Signaled by @code{with-heap} when the heap is installed on another thread.
+@end deffn
+@anchor{Condition sb-fiber heap-not-current-error}
+@ttindex @sortas{heap-not-current-error sb-fiber} heap-not-current-error [sb-fiber]
+@deffn{Condition} sb-fiber:heap-not-current-error
+Signaled by an operation that needs its heap installed on the
+current thread, such as @code{heap-gc} and @code{receive-message}, when another heap or
+none is.
+@end deffn
+@anchor{Condition sb-fiber no-current-heap-error}
+@ttindex @sortas{no-current-heap-error sb-fiber} no-current-heap-error [sb-fiber]
+@deffn{Condition} sb-fiber:no-current-heap-error
+@end deffn
+@node sb fiber heap barrier
+@subsubsection The store barrier
+
+While a heap is installed, every compiled pointer store checks
+that it does not make a global object or another heap refer into the
+installed heap. What the barrier does with a violation is the heap's
+checking mode, set by @code{sb-fiber:make-heap}: @code{:error} signals
+@code{sb-fiber:heap-store-error}, @code{:record} only records the violation (see
+@code{sb-fiber:heap-violations}), @code{nil} does not check at all. Only stores of
+pointers are checked; storing a fixnum, character or other immediate
+cannot create a reference. A *strict* heap additionally refuses any
+pointer store into a global object, so that the process can mutate
+nothing but its own data; operations that must touch global state
+are wrapped in @code{sb-fiber:without-heap}, which turns the strict rule off
+for its extent while the barrier still refuses an escape there.
+Strict mode applies to whatever runs while the heap is installed,
+including error handlers established outside the process: a handler
+that records the error in global state, or reads a slot of the
+condition, must do so inside @code{sb-fiber:without-heap}.
+
+A store whose value the compiler knows at the store to be global is
+not checked in either mode, since it cannot make anything refer into
+a heap. That covers a literal constant of the compiled code (a
+keyword or a quoted list, for instance) and a value whose type admits
+only fixnums, characters, single-floats, @code{nil}, @code{t} and symbols of the
+initial core. Under strictness, such a store into a global object is
+therefore not a violation. The exemption depends on what the compiler
+can prove at the store: the same keyword arriving as a function
+argument is checked, and refused.
+
+Rules for code running in a local heap:
+
+@itemize
+@item Data structures reachable from global objects must not hold
+  locally-owned objects. Storing into a global hash table, a global
+  symbol's value or property list, a special variable's global value,
+  a closure created outside the process, or a variable captured by
+  such a closure, is a violation; the store barrier signals it.
+  Thread-local values (special bindings) are roots of the process and
+  are fine.
+@item Class and generic function definition, method addition,
+  compilation and loading run with the global heap installed
+  automatically, so the metadata they create is global. Other
+  operations that build global state (interning into packages,
+  creating threads, @code{finalize}, pathname interning of process
+  strings) must be wrapped in @code{sb-fiber:without-heap} or avoided.
+@item @code{make-instance}, structure constructors and ordinary allocation
+  follow the installed heap. Layouts and symbols are always global.
+@item A fiber's entry function must be global: a symbol, or a function
+  not owned by a local heap.
+@item Do not create threads or use @code{save-lisp-and-die} while local heaps
+  exist; the runtime refuses to save a core with live heaps.
+@end itemize
+
+@anchor{Function sb-fiber heap-check-stores}
+@ffindex @sortas{heap-check-stores sb-fiber} heap-check-stores [sb-fiber]
+@deffn{Function} sb-fiber:heap-check-stores heap
+How @code{heap}'s store barrier reacts to ownership violations: @code{nil}, @code{:record}
+or @code{:error}.  Setfable.
+@end deffn
+@anchor{Function sb-fiber heap-strict-p}
+@ffindex @sortas{heap-strict-p sb-fiber} heap-strict-p [sb-fiber]
+@deffn{Function} sb-fiber:heap-strict-p heap
+True if @code{heap} forbids its process from mutating global objects. Setfable.
+@end deffn
+@anchor{Condition sb-kernel heap-store-error}
+@ttindex @sortas{heap-store-error sb-kernel} heap-store-error [sb-kernel]
+@deffn{Condition} sb-kernel::heap-store-error
+Signaled by the store barrier, in the storing thread, before the
+store is performed. @code{heap-store-error-object} is the object stored into,
+@code{heap-store-error-value} the value, and @code{heap-store-error-kind} @code{:escape} for a
+locally-owned value stored into a global object, @code{:cross-heap} for a value owned
+by another heap, or @code{:global} for any checked store into a global object under a
+strict heap. A @code{continue} restart performs the store anyway.
+@end deffn
+@anchor{Function sb-kernel heap-store-error-object}
+@ffindex @sortas{heap-store-error-object sb-kernel} heap-store-error-object [sb-kernel]
+@deffn{Function} sb-kernel::heap-store-error-object condition
+@end deffn
+@anchor{Function sb-kernel heap-store-error-value}
+@ffindex @sortas{heap-store-error-value sb-kernel} heap-store-error-value [sb-kernel]
+@deffn{Function} sb-kernel::heap-store-error-value condition
+@end deffn
+@anchor{Function sb-kernel heap-store-error-kind}
+@ffindex @sortas{heap-store-error-kind sb-kernel} heap-store-error-kind [sb-kernel]
+@deffn{Function} sb-kernel::heap-store-error-kind condition
+@end deffn
+@node sb fiber heap collection
+@subsubsection Collecting a heap
+
+A heap has two generations. A minor collection traces only the
+young generation, everything allocated since the previous
+collection, using the old generation's marked cards as additional
+roots, and promotes the survivors; a full collection, asked for or
+called for by the heap's policy, promotes everything and collects the
+old generation as well. Only the heap's objects are traced and swept;
+other threads keep running, and their own local collections proceed
+at the same time. The roots are the owning thread's control stack,
+binding stack and thread-local values, plus the stacks of suspended
+fibers on the same thread. Weak pointers and weak hash tables in the
+heap are honored; finalizers are not supported for objects in a local
+heap.
+
+A global collection does not walk a heap's old generation. Each local
+collection records the global objects the heap refers to in an
+*outgoing root summary*; a global collection marks that summary and
+walks only the heap's young generation and the old objects modified
+since the last local collection, so its cost does not grow with the
+size of the local heaps. A full local collection rebuilds the summary;
+until then a stale entry can keep a global object alive.
+
+The heap's size is bounded by its hard limit, reached which
+allocation signals @code{sb-fiber:local-heap-exhausted-error}, a
+@code{storage-condition}, with the global heap installed; and an
+allocation trap signals @code{sb-fiber:heap-allocation-trap} once the bytes
+ever claimed pass a threshold, through
+@code{sb-fiber:*heap-allocation-trap-function*} when it is set.
+
+The statistics are bytes of dynamic space claimed (block granular),
+bytes retained by the last collection, bytes claimed since it, every
+byte ever claimed, pages on which the heap owns a block, blocks
+owned, global objects in the heap's outgoing root summary, objects of
+the heap walked as roots by the most recent global collection, the
+number of collections, microseconds spent collecting, bytes in the
+old generation, and the numbers of minor and full collections.
+
+@anchor{Function sb-fiber heap-gc}
+@ffindex @sortas{heap-gc sb-fiber} heap-gc [sb-fiber]
+@deffn{Function} sb-fiber:heap-gc &optional heap full
+Collect @code{heap}, which must be installed on the current thread.  Only
+@code{heap}'s objects are traced and swept; other threads keep running.
+@end deffn
+@anchor{Function sb-fiber heap-fullsweep-after}
+@ffindex @sortas{heap-fullsweep-after sb-fiber} heap-fullsweep-after [sb-fiber]
+@deffn{Function} sb-fiber:heap-fullsweep-after heap
+Number of minor collections of @code{heap} after which a full one is due;
+0 means only explicit or growth-driven full collections. Setfable.
+@end deffn
+@anchor{Function sb-fiber heap-hard-limit}
+@ffindex @sortas{heap-hard-limit sb-fiber} heap-hard-limit [sb-fiber]
+@deffn{Function} sb-fiber:heap-hard-limit heap
+The size past which @code{heap} refuses to grow, or 0 for none.  Setfable.
+@end deffn
+@anchor{Condition sb-kernel local-heap-exhausted-error}
+@ttindex @sortas{local-heap-exhausted-error sb-kernel} local-heap-exhausted-error [sb-kernel]
+@deffn{Condition} sb-kernel::local-heap-exhausted-error
+Signaled by an allocation that would take the installed heap past
+its hard limit, with the global heap installed for the extent of the error;
+the heap is reinstalled when the error is handled within its dynamic extent.
+The readers give the bytes available and requested.
+@end deffn
+@anchor{Function sb-fiber arm-heap-allocation-trap}
+@ffindex @sortas{arm-heap-allocation-trap sb-fiber} arm-heap-allocation-trap [sb-fiber]
+@deffn{Function} sb-fiber:arm-heap-allocation-trap heap bytes
+Arm @code{heap}'s allocation trap to fire once @code{heap-bytes-claimed} has grown by
+more than @code{bytes} from its present value.
+@end deffn
+@anchor{Function sb-fiber disarm-heap-allocation-trap}
+@ffindex @sortas{disarm-heap-allocation-trap sb-fiber} disarm-heap-allocation-trap [sb-fiber]
+@deffn{Function} sb-fiber:disarm-heap-allocation-trap heap
+Disarm @code{heap}'s allocation trap, including one that has fired and not yet
+been delivered.
+@end deffn
+@anchor{Function sb-fiber heap-allocation-trap-threshold}
+@ffindex @sortas{heap-allocation-trap-threshold sb-fiber} heap-allocation-trap-threshold [sb-fiber]
+@deffn{Function} sb-fiber:heap-allocation-trap-threshold heap
+The @code{heap-bytes-claimed} value past which @code{heap}'s armed allocation trap
+fires.
+@end deffn
+@anchor{Condition sb-kernel heap-allocation-trap}
+@ttindex @sortas{heap-allocation-trap sb-kernel} heap-allocation-trap [sb-kernel]
+@deffn{Condition} sb-kernel::heap-allocation-trap
+Signaled, through @code{*heap-allocation-trap-function*} when it is set,
+once the bytes a heap has ever claimed pass the threshold that
+@code{arm-heap-allocation-trap} set; the readers give the heap's id and epoch, the
+bytes claimed and the threshold.
+@end deffn
+@anchor{Function sb-fiber heap-allocation-trap-heap}
+@ffindex @sortas{heap-allocation-trap-heap sb-fiber} heap-allocation-trap-heap [sb-fiber]
+@deffn{Function} sb-fiber:heap-allocation-trap-heap condition
+The heap whose allocation trap fired, or @code{nil} if it has been released.
+@end deffn
+@anchor{Function sb-kernel heap-allocation-trap-claimed}
+@ffindex @sortas{heap-allocation-trap-claimed sb-kernel} heap-allocation-trap-claimed [sb-kernel]
+@deffn{Function} sb-kernel::heap-allocation-trap-claimed condition
+@end deffn
+@anchor{Function sb-kernel heap-allocation-trap-trap}
+@ffindex @sortas{heap-allocation-trap-trap sb-kernel} heap-allocation-trap-trap [sb-kernel]
+@deffn{Function} sb-kernel::heap-allocation-trap-trap condition
+@end deffn
+@anchor{Variable sb-kernel *heap-allocation-trap-function*}
+@vvindex @sortas{heap-allocation-trap-function* sb-kernel} *heap-allocation-trap-function* [sb-kernel]
+@deffn{Variable} sb-kernel::*heap-allocation-trap-function*
+@end deffn
+@anchor{Function sb-fiber heap-bytes-allocated}
+@ffindex @sortas{heap-bytes-allocated sb-fiber} heap-bytes-allocated [sb-fiber]
+@deffn{Function} sb-fiber:heap-bytes-allocated heap
+Bytes of dynamic space currently claimed by @code{heap}.
+@end deffn
+@anchor{Function sb-fiber heap-bytes-live}
+@ffindex @sortas{heap-bytes-live sb-fiber} heap-bytes-live [sb-fiber]
+@deffn{Function} sb-fiber:heap-bytes-live heap
+Bytes retained by @code{heap}'s most recent collection.
+@end deffn
+@anchor{Function sb-fiber heap-bytes-since-gc}
+@ffindex @sortas{heap-bytes-since-gc sb-fiber} heap-bytes-since-gc [sb-fiber]
+@deffn{Function} sb-fiber:heap-bytes-since-gc heap
+Bytes claimed by @code{heap} since its most recent collection.
+@end deffn
+@anchor{Function sb-fiber heap-bytes-claimed}
+@ffindex @sortas{heap-bytes-claimed sb-fiber} heap-bytes-claimed [sb-fiber]
+@deffn{Function} sb-fiber:heap-bytes-claimed heap
+Bytes @code{heap} has claimed from dynamic space since it was made, block
+granular.
+@end deffn
+@anchor{Function sb-fiber heap-page-count}
+@ffindex @sortas{heap-page-count sb-fiber} heap-page-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-page-count heap
+Number of @code{gc} pages on which @code{heap} owns at least one block.
+@end deffn
+@anchor{Function sb-fiber heap-block-count}
+@ffindex @sortas{heap-block-count sb-fiber} heap-block-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-block-count heap
+Number of 4 KiB blocks owned by @code{heap}, large objects included.
+@end deffn
+@anchor{Function sb-fiber heap-outgoing-count}
+@ffindex @sortas{heap-outgoing-count sb-fiber} heap-outgoing-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-outgoing-count heap
+Number of global objects in @code{heap}'s outgoing root summary: those its
+old generation referred to when it was last traced.
+@end deffn
+@anchor{Function sb-fiber heap-global-root-count}
+@ffindex @sortas{heap-global-root-count sb-fiber} heap-global-root-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-global-root-count heap
+Number of @code{heap}'s objects the most recent global collection walked as
+roots: its young generation and the old objects on marked cards.
+@end deffn
+@anchor{Function sb-fiber heap-gc-count}
+@ffindex @sortas{heap-gc-count sb-fiber} heap-gc-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-gc-count heap
+Number of local collections @code{heap} has undergone.
+@end deffn
+@anchor{Function sb-fiber heap-gc-run-time}
+@ffindex @sortas{heap-gc-run-time sb-fiber} heap-gc-run-time [sb-fiber]
+@deffn{Function} sb-fiber:heap-gc-run-time heap
+Microseconds spent collecting @code{heap}.
+@end deffn
+@anchor{Function sb-fiber heap-bytes-old}
+@ffindex @sortas{heap-bytes-old sb-fiber} heap-bytes-old [sb-fiber]
+@deffn{Function} sb-fiber:heap-bytes-old heap
+Bytes in @code{heap}'s old generation after its most recent collection.
+@end deffn
+@anchor{Function sb-fiber heap-minor-gc-count}
+@ffindex @sortas{heap-minor-gc-count sb-fiber} heap-minor-gc-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-minor-gc-count heap
+Number of minor (young generation) collections of @code{heap}.
+@end deffn
+@anchor{Function sb-fiber heap-major-gc-count}
+@ffindex @sortas{heap-major-gc-count sb-fiber} heap-major-gc-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-major-gc-count heap
+Number of full collections of @code{heap}.
+@end deffn
+@anchor{Function sb-fiber local-gc-concurrency-peak}
+@ffindex @sortas{local-gc-concurrency-peak sb-fiber} local-gc-concurrency-peak [sb-fiber]
+@deffn{Function} sb-fiber:local-gc-concurrency-peak
+Largest number of local collections that have run at the same time on
+different threads since startup.
+@end deffn
+@node sb fiber heap messages
+@subsubsection Messages and transfer
+
+Objects cross between heaps by copying. @code{sb-fiber:send-message}
+copies an object into a private fragment that the receiving heap
+adopts, without a second copy, when it calls
+@code{sb-fiber:receive-message}; @code{sb-fiber:copy-for-transfer} is the copy
+itself, into the installed heap; @code{sb-fiber:globalize} copies into the
+global heap. A *shared binary* is a specialized simple vector in the
+global heap, which every heap may refer to: it travels in messages
+without being copied, a global collection reclaims it once no heap
+refers to it, and it is to be treated as immutable once sent.
+
+@anchor{Function sb-fiber send-message}
+@ffindex @sortas{send-message sb-fiber} send-message [sb-fiber]
+@deffn{Function} sb-fiber:send-message target object
+Copy @code{object} into @code{target}'s mailbox, where @code{target} is a heap or a fiber
+that owns one.  The copy is made with @code{copy-for-transfer}; @code{target} adopts
+it without further copying when it calls @code{receive-message}.  May be
+called from any thread.
+@end deffn
+@anchor{Function sb-fiber receive-message}
+@ffindex @sortas{receive-message sb-fiber} receive-message [sb-fiber]
+@deffn{Function} sb-fiber:receive-message &key heap
+Take the oldest message from @code{heap}'s mailbox.  @code{heap} must be installed
+on the current thread.  Returns the message, @code{t}, and the sending heap (or
+@code{nil}); or @code{nil}, @code{nil}, @code{nil} if the mailbox is empty.  The message's storage
+is adopted into @code{heap} without copying.
+@end deffn
+@anchor{Function sb-fiber heap-mailbox-count}
+@ffindex @sortas{heap-mailbox-count sb-fiber} heap-mailbox-count [sb-fiber]
+@deffn{Function} sb-fiber:heap-mailbox-count heap
+Number of messages waiting in @code{heap}'s mailbox.
+@end deffn
+@anchor{Function sb-fiber heap-mailbox-bytes}
+@ffindex @sortas{heap-mailbox-bytes sb-fiber} heap-mailbox-bytes [sb-fiber]
+@deffn{Function} sb-fiber:heap-mailbox-bytes heap
+Bytes held by messages waiting in @code{heap}'s mailbox.
+@end deffn
+@anchor{Function sb-fiber copy-for-transfer}
+@ffindex @sortas{copy-for-transfer sb-fiber} copy-for-transfer [sb-fiber]
+@deffn{Function} sb-fiber:copy-for-transfer object
+Return a copy of @code{object} in which every sub-object owned by a process
+heap has been replaced by a copy allocated in the current heap (or the
+global heap if none is installed).
+@end deffn
+@anchor{Function sb-fiber globalize}
+@ffindex @sortas{globalize sb-fiber} globalize [sb-fiber]
+@deffn{Function} sb-fiber:globalize object
+Return @code{object} if it is global, else a copy of it in the global heap.
+@end deffn
+@anchor{Function sb-fiber make-shared-binary}
+@ffindex @sortas{make-shared-binary sb-fiber} make-shared-binary [sb-fiber]
+@deffn{Function} sb-fiber:make-shared-binary contents-or-length &key element-type
+Return a fresh simple vector of @code{element-type} in the global heap, of
+the given length or holding the given CONTENTS.
+@end deffn
+@anchor{Function sb-fiber shared-binary-p}
+@ffindex @sortas{shared-binary-p sb-fiber} shared-binary-p [sb-fiber]
+@deffn{Function} sb-fiber:shared-binary-p object
+True if @code{object} is a specialized simple vector in the global heap: one
+that every heap may share.
+@end deffn
+@anchor{Condition sb-fiber untransferable-object}
+@ttindex @sortas{untransferable-object sb-fiber} untransferable-object [sb-fiber]
+@deffn{Condition} sb-fiber:untransferable-object
+@code{copy-for-transfer} met an object that cannot be copied into another heap.
+@end deffn
+@anchor{Function sb-fiber untransferable-object-object}
+@ffindex @sortas{untransferable-object-object sb-fiber} untransferable-object-object [sb-fiber]
+@deffn{Function} sb-fiber:untransferable-object-object condition
+@end deffn
+@anchor{Condition sb-fiber cross-heap-reference}
+@ttindex @sortas{cross-heap-reference sb-fiber} cross-heap-reference [sb-fiber]
+@deffn{Condition} sb-fiber:cross-heap-reference
+An object owned by a local heap was about to be stored where only
+global objects may live.
+@end deffn
+@anchor{Function sb-fiber cross-heap-reference-object}
+@ffindex @sortas{cross-heap-reference-object sb-fiber} cross-heap-reference-object [sb-fiber]
+@deffn{Function} sb-fiber:cross-heap-reference-object condition
+@end deffn
+@anchor{Condition sb-fiber heap-fiber-escape}
+@ttindex @sortas{heap-fiber-escape sb-fiber} heap-fiber-escape [sb-fiber]
+@deffn{Condition} sb-fiber:heap-fiber-escape
+Signaled in the resumer when a fiber with a local heap exits via a
+condition that could not be copied out of its heap.
+@end deffn
+@anchor{Function sb-fiber heap-fiber-escape-fiber}
+@ffindex @sortas{heap-fiber-escape-fiber sb-fiber} heap-fiber-escape-fiber [sb-fiber]
+@deffn{Function} sb-fiber:heap-fiber-escape-fiber condition
+@end deffn
+@anchor{Function sb-fiber heap-fiber-escape-condition-type}
+@ffindex @sortas{heap-fiber-escape-condition-type sb-fiber} heap-fiber-escape-condition-type [sb-fiber]
+@deffn{Function} sb-fiber:heap-fiber-escape-condition-type condition
+@end deffn
+@anchor{Function sb-fiber heap-fiber-escape-message}
+@ffindex @sortas{heap-fiber-escape-message sb-fiber} heap-fiber-escape-message [sb-fiber]
+@deffn{Function} sb-fiber:heap-fiber-escape-message condition
+@end deffn
+@node sb fiber heap verification
+@subsubsection Verification
+
+The verifier and the collectors check the ownership invariant
+after the fact, for what the barrier does not see. Each violation is
+a list @code{(source-object slot-address target-address origin store-pc)}:
+ORIGIN is @code{:collection} for a pointer a collection or verification
+found, @code{:recorded-store} for a store the barrier recorded and let
+proceed, and @code{:signaled-store} for a store it signaled
+@code{sb-fiber:heap-store-error} for, which left the object unchanged unless
+a handler continued the store. For a store, SLOT-ADDRESS is 0 and
+STORE-PC is the return address into the code that made it, which
+@code{sb-fiber:store-site} names; for a collection STORE-PC is @code{nil}.
+
+@anchor{Function sb-fiber verify-heap}
+@ffindex @sortas{verify-heap sb-fiber} verify-heap [sb-fiber]
+@deffn{Function} sb-fiber:verify-heap &optional heap
+Check every pointer held by @code{heap}'s objects against the ownership
+rules.  Returns a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS
+ORIGIN STORE-PC @code{kind}), as @code{take-heap-violations} describes, for each pointer
+into another local heap or a freed page.  @code{heap} must be installed on the
+current thread.
+@end deffn
+@anchor{Function sb-fiber verify-all-heaps}
+@ffindex @sortas{verify-all-heaps sb-fiber} verify-all-heaps [sb-fiber]
+@deffn{Function} sb-fiber:verify-all-heaps
+Run a full global collection with reference checking enabled and
+return the ownership violations it found: pointers from the global heap
+into a local heap, and pointers between different local heaps.
+@end deffn
+@anchor{Function sb-fiber heap-reference-checking}
+@ffindex @sortas{heap-reference-checking sb-fiber} heap-reference-checking [sb-fiber]
+@deffn{Function} sb-fiber:heap-reference-checking
+True if garbage collections record ownership violations.
+@end deffn
+@anchor{Function sb-fiber heap-violations}
+@ffindex @sortas{heap-violations sb-fiber} heap-violations [sb-fiber]
+@deffn{Function} sb-fiber:heap-violations
+The ownership violations recorded by collections and the store
+barrier since the last reset, as a list of (SOURCE-OBJECT SLOT-ADDRESS
+TARGET-ADDRESS ORIGIN STORE-PC @code{kind}), as @code{take-heap-violations} describes.
+@end deffn
+@anchor{Function sb-fiber reset-heap-violations}
+@ffindex @sortas{reset-heap-violations sb-fiber} reset-heap-violations [sb-fiber]
+@deffn{Function} sb-fiber:reset-heap-violations
+@end deffn
+@anchor{Function sb-fiber take-heap-violations}
+@ffindex @sortas{take-heap-violations sb-fiber} take-heap-violations [sb-fiber]
+@deffn{Function} sb-fiber:take-heap-violations
+Remove and return the ownership violations recorded since the last
+call: a list of (SOURCE-OBJECT SLOT-ADDRESS TARGET-ADDRESS ORIGIN
+STORE-PC @code{kind}), and as a second value the number noted, which is exact and
+may exceed the length of the list -- a burst larger than the record keeps
+its first entries.
+
+ORIGIN tells a pointer that exists from a store that was stopped:
+@code{:collection} for a pointer a collection or verification found,
+@code{:recorded-store} for a store the barrier recorded and let proceed under
+@code{:check-stores} @code{:record}, and @code{:signaled-store} for a store the barrier
+signaled @code{heap-store-error} for under @code{:check-stores} @code{:error}, which left the
+object as it was unless a handler chose @code{continue}.  For a store,
+SLOT-ADDRESS is 0 and STORE-PC is the return address into the code that
+made it, which @code{store-site} names; for a collection STORE-PC is @code{nil}.
+
+@code{kind} is how the barrier classified a store, as @code{heap-store-error-kind}
+names it: @code{:escape} for a pointer into a local heap stored into a global
+object, @code{:cross-heap} for one stored into another heap's object, and
+@code{:global} for a strict heap's store into a global object of a value that
+is not an escape.  It is @code{nil} for a collection.  It is recorded at the
+store because it cannot be recovered after the fact: the heap that owned
+an escaped value may have been released by the time the record is read.
+
+Clearing the record and copying it out happen in one step.  Violations
+are noted from collections and from the store barrier on any thread,
+without a lock, so one noted between a @code{heap-violations} call and a
+@code{reset-heap-violations} call is lost: neither call sees it and the reset
+discards it.  Use this wherever violations are drained while other
+threads are running.
+@end deffn
+@anchor{Function sb-fiber store-site}
+@ffindex @sortas{store-site sb-fiber} store-site [sb-fiber]
+@deffn{Function} sb-fiber:store-site pc
+The name of the function whose code contains @code{pc}, the STORE-PC of a
+store violation, or @code{nil} when no code object holds @code{pc}.  The runtime keeps
+the address rather than the code object, so the code can have been
+collected by the time this is asked; the name is that of whatever code
+holds @code{pc} then.
+@end deffn
+@node sb fiber heap layers
+@subsubsection Building a process layer
+
+@code{sb-fiber} stops at the primitives. A process layer in the manner
+of Erlang/OTP, with carriers, mailboxes with selective receive,
+links, monitors, exit signals, a registry and timers, is a library
+outside SBCL, and everything it needs is exported here:
+@code{sb-fiber:make-fiber} with @code{:heap} for a process that owns its memory,
+@code{sb-fiber:send-message} and @code{sb-fiber:receive-message} for a copy in and
+an adoption out, @code{sb-fiber:heap-mailbox-count} as a wake condition a
+carrier can read from outside the heap, @code{sb-fiber:interrupt-fiber} for
+an exit signal delivered at the next resume, @code{sb-fiber:without-heap}
+for bookkeeping the layer keeps in global structures, and
+@code{sb-fiber:release-fiber} to return a process's memory in one step. The
+test file @code{tests/fiber-carriers.impure.lisp} is the least such layer,
+a pool of carrier threads, and exercises those primitives with the
+sender and the receiver on different threads.
+
