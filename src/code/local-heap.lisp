@@ -119,6 +119,10 @@ success."
 (define-condition sb-kernel::local-heap-exhausted-error (storage-condition)
   ((available :initarg :available :reader sb-kernel::local-heap-exhausted-error-available-bytes)
    (requested :initarg :requested :reader sb-kernel::local-heap-exhausted-error-requested-bytes))
+  (:documentation "Signaled by an allocation that would take the installed heap past
+its hard limit, with the global heap installed for the extent of the error;
+the heap is reinstalled when the error is handled within its dynamic extent.
+The readers give the bytes available and requested.")
   (:report
    (lambda (condition stream)
      (format stream "Local heap exhausted (hard limit reached).
@@ -136,6 +140,10 @@ success."
    (heap-epoch :initarg :heap-epoch :reader sb-kernel::heap-allocation-trap-heap-epoch)
    (claimed :initarg :claimed :reader sb-kernel::heap-allocation-trap-claimed)
    (trap :initarg :trap :reader sb-kernel::heap-allocation-trap-trap))
+  (:documentation "Signaled, through *HEAP-ALLOCATION-TRAP-FUNCTION* when it is set,
+once the bytes a heap has ever claimed pass the threshold that
+ARM-HEAP-ALLOCATION-TRAP set; the readers give the heap's id and epoch, the
+bytes claimed and the threshold.")
   (:report
    (lambda (condition stream)
      (format stream "Local heap #~D claimed ~D bytes, past its allocation ~
@@ -174,6 +182,12 @@ success."
   ((object :initarg :object :reader sb-kernel::heap-store-error-object)
    (value :initarg :value :reader sb-kernel::heap-store-error-value)
    (kind :initarg :kind :reader sb-kernel::heap-store-error-kind))
+  (:documentation "Signaled by the store barrier, in the storing thread, before the
+store is performed. HEAP-STORE-ERROR-OBJECT is the object stored into,
+HEAP-STORE-ERROR-VALUE the value, and HEAP-STORE-ERROR-KIND :ESCAPE for a
+locally-owned value stored into a global object, :CROSS-HEAP for a value owned
+by another heap, or :GLOBAL for any checked store into a global object under a
+strict heap. A CONTINUE restart performs the store anyway.")
   (:report
    (lambda (condition stream)
      (let ((object (sb-kernel::heap-store-error-object condition))

@@ -5,6 +5,13 @@
 
 (in-package :sb-fiber)
 
+;;; Without local heaps the store-checking and heap-switching forms are
+;;; plain progns; heap.lisp defines them when the feature is on.
+#-sb-local-heaps
+(defmacro without-store-checking (&body body) `(progn ,@body))
+#-sb-local-heaps
+(defmacro without-heap (&body body) `(progn ,@body))
+
 #+sb-fiber
 (progn
 
@@ -56,6 +63,12 @@
                        %fiber-control-stack-used-bytes)
     unsigned-long
   (fiber system-area-pointer))
+
+#+sb-local-heaps
+(define-alien-routine ("sb_fiber_set_heap" %fiber-set-heap)
+    int
+  (fiber system-area-pointer)
+  (heap system-area-pointer))
 
 ;;; --- Conditions ---------------------------------------------------------
 
@@ -129,6 +142,41 @@ current fiber, was attempted while FIBER was current.")
                      (current-fiber-error-operation c)
                      (fiber-error-fiber c)))))
 
+;;; Values crossing a fiber boundary are stored in the (global) fiber
+;;; wrapper, so anything owned by a local heap is copied out first.
+(declaim (inline globalize-values))
+(defun globalize-values (values)
+  (declare (type list values))
+  #+sb-local-heaps (globalize values)
+  #-sb-local-heaps values)
+
+(define-condition heap-fiber-escape (error)
+  ((fiber :initarg :fiber :reader heap-fiber-escape-fiber)
+   (condition-type :initarg :condition-type :reader heap-fiber-escape-condition-type)
+   (message :initarg :message :reader heap-fiber-escape-message))
+  (:documentation
+   "Signaled in the resumer when a fiber with a local heap exits via a
+condition that could not be copied out of its heap.")
+  (:report (lambda (c stream)
+             (format stream "fiber ~S exited via ~S: ~A"
+                     (heap-fiber-escape-fiber c)
+                     (heap-fiber-escape-condition-type c)
+                     (heap-fiber-escape-message c)))))
+
+(defun globalize-condition (fiber condition)
+  (declare (ignorable fiber))
+  #-sb-local-heaps condition
+  #+sb-local-heaps
+  (if (zerop (sb-vm::object-owner condition))
+      condition
+      (without-heap
+        (handler-case (copy-for-transfer condition)
+          (error ()
+            (make-condition 'heap-fiber-escape
+                            :fiber fiber
+                            :condition-type (type-of condition)
+                            :message (princ-to-string condition)))))))
+
 (declaim (inline %fiber-ctx))
 (defun %fiber-ctx (sap)
   (declare (type sb-sys:system-area-pointer sap))
@@ -148,6 +196,8 @@ current fiber, was attempted while FIBER was current.")
                   (:print-object %print-fiber))
   (sap (sb-sys:int-sap 0) :type sb-sys:system-area-pointer)
   (function nil :type (or null function symbol))
+  ;; The local heap this fiber owns, or NIL.
+  (%heap nil)
   (pending-condition nil :type (or null condition))
   (escape-condition nil :type (or null condition))
   (escape-throw-tag nil :type symbol)
@@ -239,14 +289,23 @@ thread has no main fiber."
                                        (let ((fn (fiber-function f)))
                                          (funcall (if (symbolp fn) (symbol-function fn) fn)))))))
                          (when (fiber-return-fiber f)
-                           (setf (fiber-value (fiber-return-fiber f)) rv-list)))
+                           (let ((values (globalize-values rv-list)))
+                             ;; The fiber struct is global; a strict heap
+                             ;; would refuse these stores.
+                             (without-store-checking
+                               (setf (fiber-value (fiber-return-fiber f))
+                                     values)))))
                      (error (c)
-                       (setf (fiber-escape-condition f) c)))
+                       (let ((condition (globalize-condition f c)))
+                         (without-store-checking
+                           (setf (fiber-escape-condition f) condition)))))
                    (return-from done)))
             (macrolet ((with-root-catch (tag &body inner)
                          `(let ((vals (multiple-value-list (catch ,tag ,@inner))))
-                            (setf (fiber-escape-throw-tag f) ,tag
-                                  (fiber-escape-throw-values f) vals)
+                            (let ((values (globalize-values vals)))
+                              (without-store-checking
+                                (setf (fiber-escape-throw-tag f) ,tag
+                                      (fiber-escape-throw-values f) values)))
                             (return-from done))))
               (with-root-catch 'sb-impl::toplevel-catcher
                 (with-root-catch 'sb-impl::%end-of-the-world
