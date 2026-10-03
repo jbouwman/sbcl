@@ -109,6 +109,26 @@
                         (lambda ())))
                  '(:kept :zeroed :kept))))
 
+#+(and arm64 sb-local-heaps)
+(with-test (:name (:fiber :stack-scrub :after-a-collection-of-a-heap-it-installed))
+  (let ((used (make-heap))
+        (other (make-heap)))
+    (unwind-protect
+         (flet ((collect (heap) (lambda () (with-heap (heap) (heap-gc heap)))))
+           ;; A fiber that installed a heap other than its own is scrubbed
+           ;; after any local collection.
+           (assert (equal (run-stale-word-probe
+                           (lambda () (with-heap (used) (list 1)) nil)
+                           (list (collect other) (lambda ()) (collect used)))
+                          '(:zeroed :kept :zeroed)))
+           ;; One that never did is not.
+           (assert (equal (run-stale-word-probe
+                           (lambda ())
+                           (list (collect other) (collect used) (lambda ())))
+                          '(:kept :kept :kept))))
+      (release-heap used)
+      (release-heap other))))
+
 (with-test (:name (:fiber :trampoline-vs-gc-stop))
   (let ((done (sb-thread:make-semaphore))
         (stop-gc nil))
