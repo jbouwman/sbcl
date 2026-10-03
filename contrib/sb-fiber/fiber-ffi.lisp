@@ -5,6 +5,13 @@
 
 (in-package :sb-fiber)
 
+;;; Without local heaps the store-checking and heap-switching forms are
+;;; plain progns; heap.lisp defines them when the feature is on.
+#-sb-local-heaps
+(defmacro without-store-checking (&body body) `(progn ,@body))
+#-sb-local-heaps
+(defmacro without-heap (&body body) `(progn ,@body))
+
 #+sb-fiber
 (progn
 

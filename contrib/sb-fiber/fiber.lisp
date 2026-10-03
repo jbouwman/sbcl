@@ -13,8 +13,6 @@
 (defvar *default-fiber-binding-stack-size* 8192
   "Default binding stack size (bytes) for MAKE-FIBER.")
 
-#-sb-local-heaps
-(defmacro without-heap (&body body) `(progn ,@body))
 
 (defmacro with-fiber-sap ((sap alloc-form) &body body)
   "Bind SAP to ALLOC-FORM.  Signal if the SAP is null; on non-local
