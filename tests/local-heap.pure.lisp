@@ -1044,5 +1044,8 @@
                (assert (every (lambda (x) (= x 7)) (second msg))))))
       (release-heap sender)
       (release-heap receiver))
+    ;; The stack is scanned conservatively: a stale word from the frames
+    ;; above would keep the binary alive through the collection.
+    (sb-sys:scrub-control-stack)
     (sb-ext:gc :full t)
     (assert (null (weak-pointer-value wp)))))
