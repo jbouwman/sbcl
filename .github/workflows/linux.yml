@@ -9,19 +9,24 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        options: [--with-sb-thread, --without-sb-thread]
+        options: [--with-sb-thread, --without-sb-thread, --without-sb-unicode]
         arch: [x86, x86-64]
         subfeatures: ['']
         include:
           - { arch: x86-64, subfeatures: sse4, options: --with-sb-thread --with-nonstop-foreign-call --with-tls-based-mv-return }
           - { arch: x86-64, subfeatures: fasteval, options: --with-sb-fasteval --without-sb-eval --with-nonstop-foreign-call }
           - { arch: x86-64, options: --with-mark-region-gc --with-nonstop-foreign-call }
-          - { arch: x86-64, options: --without-sb-unicode --with-nonstop-foreign-call }
+          - { arch: x86-64, options: --fancy --with-sb-fiber --without-gencgc --with-mark-region-gc --with-sb-local-heaps }
 
       fail-fast: false
 
     steps:
     - uses: actions/checkout@v1
+    - name: Fetch upstream release tags for version generation
+      shell: bash
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - name: install host sbcl
       run: |
         sudo apt-get -qq update | true
