@@ -103,6 +103,9 @@ struct extra_thread_data
     struct sb_fiber_ctx *fiber_list; // head of registered fiber list
     int fiber_list_lock;             // see sb_fiber_list_lock
     struct sb_fiber_ctx *current_fiber; // the RUNNING fiber, if any registered
+    // A local heap has been installed while the thread's own stack was
+    // the running stack (see sb_fiber_note_heap_installed).
+    unsigned char heap_on_main_stack;
 #endif
 #ifdef LISP_FEATURE_SB_LOCAL_HEAPS
     // Local heap whose regions are installed in mixed_tlab/cons_tlab, or NULL.

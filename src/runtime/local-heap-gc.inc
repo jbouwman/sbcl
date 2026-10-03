@@ -1078,6 +1078,9 @@ int local_heap_collect_impl(struct local_heap *h, void *approx_sp, int full)
      * collector scrubs for the same reason, and a suspended fiber whose
      * stack may refer into this heap is scrubbed when it resumes. */
     scrub_thread_control_stack(th);
+#ifdef LISP_FEATURE_SB_FIBER
+    sb_fiber_note_local_gc();
+#endif
 
     ph_scan_thread_roots(th, approx_sp);
     if (!full) ph_scan_old_cards(h);
