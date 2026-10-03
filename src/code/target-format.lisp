@@ -131,11 +131,15 @@
                 (tokens
                   (if (functionp string-or-fun)
                       (or (fmt-control-memo string-or-fun)
-                          ;; Memoize the parse back into the object
+                          ;; Memoize the parse back into the object.  The
+                          ;; object is global, and the tokenizer conses its
+                          ;; list in the system TLAB, so the whole parse is
+                          ;; built in the global heap.
                           (setf (fmt-control-memo string-or-fun)
-                                (%tokenize-control-string
-                                 string 0 (length string)
-                                 (fmt-control-symbols string-or-fun))))
+                                (sb-kernel::with-global-heap
+                                  (%tokenize-control-string
+                                   string 0 (length string)
+                                   (fmt-control-symbols string-or-fun)))))
                       (tokenize-control-string string))))
            (interpret-directive-list stream tokens orig-args args))))))
 

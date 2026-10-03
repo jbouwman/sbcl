@@ -1817,10 +1817,29 @@ multiple threads accessing the same hash-table without locking."
   ;;
   ;; The read-only vector is an optimization reducing the size of
   ;; never-used tables down to the absolute minimum.
+  ;;
+  ;; With local heaps the rule reads the same way: a table grows where
+  ;; it lives.
+  #-sb-local-heaps
   `(if (dynamic-space-obj-p ,hash-table)
        (locally (declare (sb-c::tlab :system))
          ,@body)
-       (progn ,@body)))
+       (progn ,@body))
+  #+sb-local-heaps
+  `(cond ((not (dynamic-space-obj-p ,hash-table))
+          ,@body)
+         ((and (not (zerop (sb-sys:sap-int
+                            (sb-vm::current-thread-offset-sap sb-vm::thread-local-heap-slot))))
+               (sb-vm::locally-owned-p ,hash-table))
+          ;; A table owned by a local heap grows in the installed heap, its
+          ;; own in every intended use; the barrier catches another heap's
+          ;; table at the store of the new storage.
+          ,@body)
+         (t
+          ;; A global table grows in the system TLAB, the global heap
+          ;; whatever the user TLAB points at (an arena or a local heap).
+          (locally (declare (sb-c::tlab :system))
+            ,@body))))
 
 #+nil
 (declaim (inline weak-eq-std-hash-table-p))

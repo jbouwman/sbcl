@@ -548,7 +548,7 @@ SB-EXT:SAVE-LISP-AND-DIE.)"
        ;; in places where interrupts should already be disabled.
        (unwind-protect
             (progn
-              (setf (thread-waiting-for ,n-thread) ,new)
+              (set-thread-waiting-for ,n-thread ,new)
               (barrier (:memory))
               ,@forms)
          ;; Interrupt handlers and GC save and restore any
@@ -1085,11 +1085,19 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
 
 #+(and sb-thread (not sb-futex))
 (progn
+  ;; Taking the queue's lock stores the thread into it, and the list
+  ;; operations under the lock store into the queue and the waiting
+  ;; threads: the runtime's bookkeeping on global objects, not charged to
+  ;; a strict local heap. The cell is allocated globally since the queue
+  ;; holds it.
+  (defmacro with-waitqueue-lock ((queue) &body body)
+    `(sb-kernel::without-store-checking
+       (%with-cas-lock ((waitqueue-%owner ,queue)) ,@body)))
   (defun %waitqueue-enqueue (thread queue)
     (setf (thread-waiting-for thread) queue)
     (let ((head (waitqueue-%head queue))
           (tail (waitqueue-%tail queue))
-          (new (list thread)))
+          (new (sb-kernel::with-global-heap (list thread))))
       (unless head
         (setf (waitqueue-%head queue) new))
       (when tail
@@ -1192,7 +1200,7 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
                             :ok))))
                 #-sb-futex
                 (progn
-                 (%with-cas-lock ((waitqueue-%owner queue))
+                 (with-waitqueue-lock (queue)
                    (%waitqueue-enqueue me queue))
                  (release-mutex mutex)
                  (setf status
@@ -1205,7 +1213,7 @@ or :ERROR respectively, or release the mutex anyway if :FORCE."
                                (%%wait-for #'wakeup stop-sec stop-usec)))
                            :timeout)))
            #-sb-futex
-           (%with-cas-lock ((waitqueue-%owner queue))
+           (with-waitqueue-lock (queue)
              (if (eq queue (thread-waiting-for me))
                  (%waitqueue-drop me queue)
                  (unless (eq :ok status)
@@ -1340,7 +1348,8 @@ must be held by this thread during this call."
         (futex-wake (waitqueue-token-address queue) n))
       nil)
   #+(and sb-thread (not sb-futex))
-  (with-cas-lock ((waitqueue-%owner queue)) (%waitqueue-wakeup queue n)))
+  (without-interrupts
+    (with-waitqueue-lock (queue) (%waitqueue-wakeup queue n))))
 
 (declaim (ftype (sfunction (waitqueue) null) condition-broadcast))
 (defun condition-broadcast (queue)
@@ -2336,7 +2345,6 @@ implementations consider such usage to be well-defined.
           :late ("SBCL" "1.2.15")
           (function destroy-thread :replacement terminate-thread)))
 
-;;; The thread slot SB-SPROF:SAMPLE-TAG reads and sets.
 (declaim (type fixnum *sprof-tag*))
 
 (defvar *interrupt-handler* nil
@@ -2346,11 +2354,32 @@ The default behavior is to use FUNCALL.")
 (declaim (type (or sb-kernel:function-designator null) *interrupt-handler*)
          (sb-ext:always-bound *interrupt-handler*))
 
+;;; The interruption queue is the runtime's bookkeeping on the thread
+;;; struct, a global object: its cells are allocated globally since the
+;;; thread holds them, and its stores are not charged to a strict local
+;;; heap, whether the interrupter or the interrupted thread is in one.
+(defmacro pop-thread-interruption (thread)
+  `(sb-kernel::without-store-checking (pop (thread-interruptions ,thread))))
+(defmacro append-thread-interruption (thread cell)
+  `(sb-kernel::without-store-checking
+     (setf (thread-interruptions ,thread)
+           (nconc (thread-interruptions ,thread) ,cell))))
+
 ;;; Called from the signal handler.
 #-(or sb-safepoint win32)
 (defun run-interruption ()
+  #+sb-local-heaps
+  (unless (zerop (sb-vm::current-local-heap-address))
+    (let ((trap (sb-vm::take-local-heap-allocation-trap)))
+      (unless (zerop trap)
+        (when (thread-interruptions *current-thread*)
+          (sb-unix:raise sb-unix:sigurg))
+        (without-interrupts
+          (allow-with-interrupts
+            (sb-vm::signal-local-heap-allocation-trap trap)))
+        (return-from run-interruption))))
   (let ((interruption (with-tls-lock (*current-thread*)
-                        (pop (thread-interruptions *current-thread*)))))
+                        (pop-thread-interruption *current-thread*))))
     ;; If there is more to do, then resignal and let the normal
     ;; interrupt deferral mechanism take care of the rest. From the
     ;; OS's point of view the signal we are in the handler for is no
@@ -2369,7 +2398,7 @@ The default behavior is to use FUNCALL.")
 (defun run-interruption (*current-internal-error-context*)
   (in-interruption () ;the non-thruption code does this in the signal handler
     (let ((interruption (with-tls-lock (*current-thread*)
-                          (pop (thread-interruptions *current-thread*)))))
+                          (pop-thread-interruption *current-thread*))))
       (when interruption
         (without-interrupts (allow-with-interrupts (funcall interruption)))
         ;; I tried implementing this function as an explicit LOOP, because
@@ -2454,13 +2483,25 @@ Short version: be careful out there."
 ;;; "If an application attempts to use a thread ID whose lifetime has ended,
 ;;;  the behavior is undefined."
 ;;; so we use the TLS lock to keep the thread alive, unless it already isn't.
-(defun %interrupt-thread (thread function &aux (tail (list function)))
+(defun %interrupt-thread (thread function
+                          ;; The queue lives on the target thread, a global
+                          ;; object, so its cells are allocated globally even
+                          ;; when the interrupter runs in a local heap.
+                          &aux (tail (sb-kernel::with-global-heap (list function))))
+  ;; FUNCTION reaches the queue through that fresh cell, which no barrier
+  ;; sees: a function owned by a local heap would escape into the target
+  ;; thread unchecked, so it is checked here as a store into THREAD.
+  #+sb-local-heaps
+  (when (sb-vm::locally-owned-p function)
+    (sb-vm::check-store thread function
+                        #+c-stack-is-control-stack (sb-sys:sap-int (sb-kernel:%caller-pc))
+                        #-c-stack-is-control-stack (sb-kernel:get-lisp-obj-address (sb-kernel:%caller-pc))))
   (with-tls-lock (thread c-thread)
     (when (/= c-thread 0)
       ;; Append to the end of the interruptions queue. It's
       ;; O(N), but it does not hurt to slow interruptors down a
       ;; bit when the queue gets long.
-      (setf (thread-interruptions thread) (nconc (thread-interruptions thread) tail))
+      (append-thread-interruption thread tail)
       ;; We use SIGURG because it satisfies a lot of requirements that
       ;; other people have thought about more than we have.
       ;; See https://golang.org/src/runtime/signal_unix.go where they describe
