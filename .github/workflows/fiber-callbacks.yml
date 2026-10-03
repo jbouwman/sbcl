@@ -23,4 +23,4 @@ jobs:
         run: ./make.sh --fancy --with-sb-fiber --without-gencgc --with-mark-region-gc --with-sb-local-heaps --xc-host='sbcl --lose-on-corruption --disable-ldb --dynamic-space-size 2GB --disable-debugger'
       - name: Exercise fibers and restored callback pages
         working-directory: tests
-        run: ./run-tests.sh fiber.pure.lisp fiber-callback-core.test.sh
+        run: ./run-tests.sh fiber.pure.lisp darwin-saved-callables.test.sh
