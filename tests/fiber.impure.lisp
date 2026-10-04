@@ -180,25 +180,27 @@
   (let ((sem (sb-thread:make-semaphore))
         (inner-caught nil)
         (outer-caught nil))
-    (sb-thread:make-thread
-     (lambda ()
-       (let* ((mf (make-main-fiber))
-              (f nil))
-         (setf f (make-fiber
-                  (lambda ()
-                    (handler-case
-                        (handler-case
-                            (progn (switch-fiber f mf) (error "boom"))
-                          (error (e) (setf inner-caught (princ-to-string e))))
-                      (error (e) (setf outer-caught (princ-to-string e)))))))
-         (switch-fiber mf f)
-         (switch-fiber mf f)
-         (release-fiber f)
-         (release-fiber mf))
-       (sb-thread:signal-semaphore sem)))
-    (assert (sb-thread:wait-on-semaphore sem :timeout 5))
-    (assert (equal "boom" inner-caught))
-    (assert (null outer-caught))))
+    (let ((thread
+            (sb-thread:make-thread
+             (lambda ()
+               (let* ((mf (make-main-fiber))
+                      (f nil))
+                 (setf f (make-fiber
+                          (lambda ()
+                            (handler-case
+                                (handler-case
+                                    (progn (switch-fiber f mf) (error "boom"))
+                                  (error (e) (setf inner-caught (princ-to-string e))))
+                              (error (e) (setf outer-caught (princ-to-string e)))))))
+                 (switch-fiber mf f)
+                 (switch-fiber mf f)
+                 (release-fiber f)
+                 (release-fiber mf))
+               (sb-thread:signal-semaphore sem)))))
+      (assert (sb-thread:wait-on-semaphore sem :timeout 5))
+      (sb-thread:join-thread thread)
+      (assert (equal "boom" inner-caught))
+      (assert (null outer-caught)))))
 
 (with-test (:name (:fiber :handler :escape))
   (let (caught)

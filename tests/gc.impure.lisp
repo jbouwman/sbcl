@@ -90,7 +90,7 @@
 ;;; This test needs dynamic-extent to work properly.
 ;;; (I don't know what platforms it passes on, but at least these two it does)
 (with-test (:name :repeatably-count-allocated-objects
-            :fails-on :mark-region-gc
+            :fails-on (and :mark-region-gc (not :sb-local-heaps))
             :skipped-on (or (not (or :x86 :x86-64))
                             :gc-stress
                             :interpreter))
