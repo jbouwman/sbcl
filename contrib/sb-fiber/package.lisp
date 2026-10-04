@@ -70,6 +70,24 @@
    #:heap-id
    #:heap-fiber
    #:heap-alive-p
+   #:heap-kind
+   #:make-fragment-recorder
+   #:with-fragment-recorder
+   #:with-fragment-record
+   #:fragment-records
+   #:fragment-linkage-sites
+   #:fragment-record-kind
+   #:fragment-record-target
+   #:fragment-record-args
+   #:fragment-record-escapes
+   #:fragment-record-replay-values
+   #:fragment-unaccounted-escapes
+   #:fragment-cache-escapes
+   #:seal-fragment
+   #:map-fragment-members
+   #:activate-fragment-file
+   #:*fragment-namer*
+   #:*fragment-resolver*
    #:heap-released-p
    #:current-heap
    #:object-heap

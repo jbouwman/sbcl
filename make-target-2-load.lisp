@@ -421,6 +421,7 @@ Please check that all strings which were not recognizable to the compiler
           sb-impl::link-save-supported-p sb-impl::core-sources ; for programs that keep link cores
           sb-kernel::%%make-random-state
           sb-kernel::with-global-heap ; for tests
+          sb-kernel::with-fragment-record sb-kernel::with-fragment-cache ; for sb-fiber
           sb-lockless::+hash-nbits+ sb-lockless::%make-so-set-node ; for tests
           sb-loop::*loop-epilogue* sb-loop::add-loop-path ; internals to keep CLSQL working
           sb-profile::make-counter)))) ; for a test
@@ -454,7 +455,18 @@ Please check that all strings which were not recognizable to the compiler
                                     sb-vm::current-local-heap-sap
                                     sb-vm::current-local-heap-address
                                     sb-vm::%switch-local-heap
-                                    sb-vm::local-heap-collect))
+                                    sb-vm::local-heap-collect
+                                    sb-vm::make-fragment-recorder
+                                    sb-vm::fragment-recorder-records
+                                    sb-vm::fragment-recorder-unaccounted
+                                    sb-vm::fragment-recorder-cache-escapes
+                                    sb-vm::fragment-record-kind
+                                    sb-vm::fragment-record-target
+                                    sb-vm::fragment-record-args
+                                    sb-vm::fragment-record-escapes
+                                    sb-vm::fragment-record-replay-values
+                                    sb-vm::seal-fragment
+                                    sb-vm::map-fragment-members))
                             ,@(or #+(or arm64 x86 x86-64)
                                   '(sb-vm::%vector-cas-pair
                                     sb-vm::%instance-cas-pair

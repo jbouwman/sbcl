@@ -85,14 +85,18 @@
                 (unless (eq epoch *fname-map-observed-gc-epoch*) ; Rebuild the freelist as needed
                   (setf *fname-map-observed-gc-epoch* epoch
                         *fname-map-available-elts*
-                        (let ((n -1))
-                          (collect ((result))
-                            (dovector (inner *linkage-name-map* (result))
-                              (unless (eql inner 0)
-                                (dotimes (j (weak-vector-len inner))
-                                  (incf n)
-                                  (when (null (weak-vector-ref inner j))
-                                    (result n)))))))))
+                        ;; State of this image, consed in the global heap so
+                        ;; that a fragment being built neither carries nor
+                        ;; records it.
+                        (sb-kernel::with-global-heap
+                          (let ((n -1))
+                            (collect ((result))
+                              (dovector (inner *linkage-name-map* (result))
+                                (unless (eql inner 0)
+                                  (dotimes (j (weak-vector-len inner))
+                                    (incf n)
+                                    (when (null (weak-vector-ref inner j))
+                                      (result n))))))))))
                 (when (or *fname-map-available-elts* (typep *next-fname-index* 'linkage-index))
                   (if *fname-map-available-elts*
                       (setq index (pop *fname-map-available-elts*))
@@ -100,10 +104,14 @@
                   (binding* (((hi lo) (floor index linkage-smallvec-elts))
                              (map *linkage-name-map*)
                              (inner (svref map hi)))
-                    (when (eql inner 0)
-                      (setf inner (make-weak-vector linkage-smallvec-elts :initial-element 0)
-                            (svref map hi) inner))
-                    (setf (weak-vector-ref inner lo) fname))
+                    ;; The map from index to name is state of this image: a fragment's
+                    ;; names get their indices again when it is activated, so a name
+                    ;; the fragment owns is a cache entry here, not an escape.
+                    (sb-kernel::with-fragment-cache
+                      (when (eql inner 0)
+                        (setf inner (make-weak-vector linkage-smallvec-elts :initial-element 0)
+                              (svref map hi) inner))
+                      (setf (weak-vector-ref inner lo) fname)))
                   (let ((simply-callable (ensure-simplistic (fdefn-fun fname) fname)))
                     (with-pinned-objects (simply-callable)
                       (multiple-value-bind (entrypoint cell) (entry-addr index simply-callable)
@@ -120,30 +128,31 @@
   (declare (type (or function (eql 0)) function))
   (let ((fname (the (not null) (if (listp designator) (find-fdefn designator) designator))))
     (declare (type (or fdefn symbol) fname))
-    (with-system-mutex (*linkage-space-mutex*)
-      (let ((index (fname-linkage-index fname)))
-        (if (= index 0)
-            (%primitive set-fname-fun fname function (int-sap 0) 0)
-            (let ((bits *linkage-cell-modified*)
-                  (initial-count (extern-alien "initial_linkage_table_count" int)))
-              (when (plusp initial-count)
-                (when (null bits)
-                  (setf bits (make-array initial-count :element-type 'bit :initial-element 0)
-                        *linkage-cell-modified* bits))
-                (when (and (< index (length bits)) (= (sbit bits index) 0))
-                  ;; Undo direct linkage in any code object that calls the entrypoint
-                  ;; currently in this linkage cell.
-                  (let ((fun (sap-ref-word *linkage-table* (ash index word-shift))))
-                    ;; Don't scan all code if FUN couldn't have been direct-linked
-                    (when (and (>= fun text-space-start)
-                               (< fun (sap-int *text-space-free-pointer*)))
-                      (unbypass-linkage (if (fdefn-p fname) (fdefn-name fname) fname)
-                                        fun index)))
-                  (setf (sbit bits index) 1)))
-              (let ((simply-callable (ensure-simplistic function fname)))
-                (with-pinned-objects (simply-callable)
-                  (multiple-value-bind (entrypoint cell) (entry-addr index simply-callable)
-                    (%primitive set-fname-fun fname function cell entrypoint)))))))))
+    (sb-kernel::with-fragment-record (:set-function fname fname)
+      (with-system-mutex (*linkage-space-mutex*)
+        (let ((index (fname-linkage-index fname)))
+          (if (= index 0)
+              (%primitive set-fname-fun fname function (int-sap 0) 0)
+              (let ((bits *linkage-cell-modified*)
+                    (initial-count (extern-alien "initial_linkage_table_count" int)))
+                (when (plusp initial-count)
+                  (when (null bits)
+                    (setf bits (make-array initial-count :element-type 'bit :initial-element 0)
+                          *linkage-cell-modified* bits))
+                  (when (and (< index (length bits)) (= (sbit bits index) 0))
+                    ;; Undo direct linkage in any code object that calls the entrypoint
+                    ;; currently in this linkage cell.
+                    (let ((fun (sap-ref-word *linkage-table* (ash index word-shift))))
+                      ;; Don't scan all code if FUN couldn't have been direct-linked
+                      (when (and (>= fun text-space-start)
+                                 (< fun (sap-int *text-space-free-pointer*)))
+                        (unbypass-linkage (if (fdefn-p fname) (fdefn-name fname) fname)
+                                          fun index)))
+                    (setf (sbit bits index) 1)))
+                (let ((simply-callable (ensure-simplistic function fname)))
+                  (with-pinned-objects (simply-callable)
+                    (multiple-value-bind (entrypoint cell) (entry-addr index simply-callable)
+                      (%primitive set-fname-fun fname function cell entrypoint))))))))))
   function)
 ) ; end MACROLET
 

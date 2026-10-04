@@ -37,7 +37,13 @@ struct thread;
 
 enum local_heap_kind {
     LOCAL_HEAP_PROCESS  = 1,  /* attached to a process; collected locally */
-    LOCAL_HEAP_FRAGMENT = 2   /* a sealed message; adopted by the receiver */
+    LOCAL_HEAP_FRAGMENT = 2,  /* a sealed message; adopted by the receiver */
+    /* A module being built into a core fragment.  While installed it
+     * takes every allocation of its thread: code, the system TLABs and
+     * WITH-GLOBAL-HEAP included.  It claims whole pages, which it shares
+     * with no other heap, and is never collected locally: a global
+     * collection walks all of it as roots and frees none of it. */
+    LOCAL_HEAP_BUILD    = 3
 };
 
 enum local_heap_state {
@@ -87,6 +93,11 @@ struct local_heap {
     /* Parked allocation regions while the heap is not installed on a thread. */
     struct alloc_region parked_cons;
     struct alloc_region parked_mixed;
+    /* Kind BUILD only: the parked system TLABs, and the region code is
+     * allocated from, which stays here while the heap is installed. */
+    struct alloc_region parked_sys_cons;
+    struct alloc_region parked_sys_mixed;
+    struct alloc_region code_alloc;
 
     /* Every page on which this heap owns a block, small and large alike. */
     page_index_t *pages;
@@ -141,6 +152,14 @@ struct local_heap {
     lispobj root;
     struct local_heap *next_in_mailbox;
     uint32_t sender_id;
+
+    /* Kind BUILD only.  A sealed heap is never installed again: its
+     * allocation is over and its objects are a core fragment.  MEMBERS
+     * holds the fragment's objects once traced, tagged and sorted by
+     * address; see corefrag-members.c. */
+    uint32_t sealed;
+    lispobj *members;
+    uword_t nmembers;
 };
 
 /* Ownership metadata: one entry per block (0 = free or global), and per
@@ -208,6 +227,7 @@ uword_t local_heap_take_exhausted(void);
  * and the return address into the code that made the store. */
 void local_heap_check_store(lispobj value, lispobj object, uword_t pc);
 int  local_heap_classify_store(lispobj value, lispobj object, uword_t pc);
+uword_t local_heap_last_store_pc(void);
 int  local_heap_switch_address(uword_t heap);
 int  local_heap_install_global(void);
 uword_t local_heap_current_address(void);
@@ -266,6 +286,9 @@ void local_heap_reset_violations(void);
 
 /* Mailbox: fragments are local heaps of kind FRAGMENT. */
 int  local_heap_seal(struct local_heap *fragment);
+/* Core fragments (corefrag-members.c). */
+sword_t local_heap_fragment_trace(struct local_heap *h, lispobj root);
+lispobj local_heap_fragment_member(struct local_heap *h, uword_t i);
 int  local_heap_send(struct local_heap *dest, struct local_heap *fragment,
                        uint32_t sender_id);
 lispobj local_heap_receive(struct local_heap *h, int *found,

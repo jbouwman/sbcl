@@ -4052,14 +4052,15 @@ expansion happened."
                  ((= count 1)
                   (let ((container *eql-type-cache*)
                         (key (first (xset-data xset))))
-                    (with-system-mutex ((hash-table-lock container))
-                      ;; This is like ENSURE-GETHASH but it potentially copies the key
-                      (or (gethash key container)
-                          (let ((copy (copy-ctype temp)))
-                            ;; re-fetch KEY from XSET in case it was copied.
-                            ;; hope no off-heap pointers buried within KEY.
-                            (setf (gethash (first (member-type-members copy)) container)
-                                  copy))))))
+                    (sb-kernel::with-fragment-record (:interned container)
+                      (with-system-mutex ((hash-table-lock container))
+                        ;; This is like ENSURE-GETHASH but it potentially copies the key
+                        (or (gethash key container)
+                            (let ((copy (copy-ctype temp)))
+                              ;; re-fetch KEY from XSET in case it was copied.
+                              ;; hope no off-heap pointers buried within KEY.
+                              (setf (gethash (first (member-type-members copy)) container)
+                                    copy)))))))
                  ((xset-every (lambda (x) (typep x '(or symbol number character))) xset)
                   (hashset-insert-if-absent *member-type-hashset* temp #'copy-ctype))
                  (t

@@ -57,6 +57,19 @@ immediate or lives in the global heap."
     int
   (heap unsigned-long))
 
+(define-alien-routine ("local_heap_stat" %local-heap-stat) unsigned-long
+  (heap unsigned-long)
+  (which int))
+
+;;; LOCAL_HEAP_BUILD, and the stats that read a heap's kind and id.
+(defconstant build-heap-kind 3)
+(defconstant heap-kind-stat 26)
+(defconstant heap-id-stat 11)
+
+;;; A build heap takes what the global heap would otherwise get: its
+;;; objects are the fragment being built, which owns them whether or not
+;;; global objects refer to them.
+
 (define-alien-routine ("local_heap_install_global" %install-global-heap) int)
 
 ;;; Run THUNK with the global heap installed on the current heap's behalf:
@@ -68,7 +81,8 @@ immediate or lives in the global heap."
 (defun sb-kernel::call-with-global-heap (thunk)
   (declare (function thunk) (dynamic-extent thunk))
   (let ((prev (current-local-heap-address)))
-    (if (zerop prev)
+    (if (or (zerop prev)
+            (= (%local-heap-stat prev heap-kind-stat) build-heap-kind))
         (funcall thunk)
         (let ((check (sap-int (current-thread-offset-sap thread-local-heap-check-slot))))
           (%install-global-heap)
@@ -154,10 +168,6 @@ bytes claimed and the threshold.")
 
 (define-alien-routine ("local_heap_take_alloc_trap" take-local-heap-allocation-trap)
     unsigned-long)
-
-(define-alien-routine ("local_heap_stat" %local-heap-stat) unsigned-long
-  (heap unsigned-long)
-  (which int))
 
 (defvar sb-kernel::*heap-allocation-trap-function* nil)
 (declaim (type (or function null) sb-kernel::*heap-allocation-trap-function*)
@@ -245,11 +255,258 @@ strict heap. A CONTINUE restart performs the store anyway.")
 (defun sb-kernel::heap-store-error (object value kind)
   (let ((saved (%store-check-suspend)))
     (unwind-protect
-         (cerror "Perform the store anyway."
-                 'sb-kernel::heap-store-error
-                 :object object :value value
-                 :kind (ecase kind (1 :escape) (2 :cross-heap) (3 :global)))
+         (unless (and (eql kind 1)
+                      sb-kernel::*fragment-recorder*
+                      (note-fragment-escape object value))
+           (cerror "Perform the store anyway."
+                   'sb-kernel::heap-store-error
+                   :object object :value value
+                   :kind (ecase kind (1 :escape) (2 :cross-heap) (3 :global))))
       (%store-check-resume saved))))
+
+;;; --- Core fragment records ---
+
+;;; A module is built into a core fragment by loading it with a build heap
+;;; installed, which takes everything the load allocates, and a recorder
+;;; bound.  The definers note their effects on global objects outside the
+;;; fragment as records (WITH-FRAGMENT-RECORD), which activating the
+;;; fragment replays; the store barrier reports every store that makes a
+;;; global object refer into the heap, and each must fall inside a record
+;;; or a cache fill (WITH-FRAGMENT-CACHE).  The recorder and its records
+;;; are allocated in the build heap: they are part of the fragment.
+
+(defstruct (fragment-record
+            (:constructor make-fragment-record (kind target args))
+            (:copier nil))
+  (kind nil :type symbol :read-only t)
+  (target nil :read-only t)
+  (args nil :type list :read-only t)
+  ;; Escapes the record accounts for.
+  (escapes 0 :type fixnum)
+  ;; What the target holds once the fragment is built, which replaying
+  ;; the record installs: set by SEAL-FRAGMENT for the kinds whose effect
+  ;; is a value rather than their arguments.
+  (replay-values nil :type list))
+
+(defstruct (fragment-recorder
+            (:constructor %make-fragment-recorder (heap-address heap-id))
+            (:copier nil))
+  (heap-address 0 :type word :read-only t)
+  (heap-id 0 :type (unsigned-byte 32) :read-only t)
+  ;; Newest first.
+  (records nil :type list)
+  ;; The record the thread is inside, :CACHE inside a cache fill, or NIL.
+  (open nil)
+  (cache-escapes 0 :type fixnum)
+  ;; The one :INTERNED record for each interning table, by table.
+  (interned nil :type list)
+  ;; Escapes nothing accounts for, as (object value store-pc), newest first.
+  (unaccounted nil :type list)
+  ;; The linkage cell references the loader patched into the fragment's
+  ;; code, by code address: (offset kind index), newest first.  The table
+  ;; and its entries are in the global heap and hold no pointer into the
+  ;; build heap, so that the fragment carries none of it.
+  (linkage-sites (sb-kernel::with-global-heap (make-hash-table :test 'eql))
+   :type hash-table :read-only t))
+
+(defun make-fragment-recorder ()
+  "Make the recorder for a fragment built in the build heap installed on
+this thread."
+  (let ((heap (current-local-heap-address)))
+    (unless (and (/= heap 0)
+                 (= (%local-heap-stat heap heap-kind-stat) build-heap-kind))
+      (error "A fragment recorder needs a build heap installed."))
+    (%make-fragment-recorder heap (%local-heap-stat heap heap-id-stat))))
+
+;;; True when RECORDER's heap is the one allocation goes to: records are
+;;; noted, and escapes accounted, only for stores made on its behalf.
+(declaim (inline recording-p))
+(defun recording-p (recorder)
+  (= (current-local-heap-address) (fragment-recorder-heap-address recorder)))
+
+;;; Note that the loader patched a reference to linkage cell INDEX into
+;;; CODE, an object of the fragment being built, at byte OFFSET of its
+;;; instructions with a fixup of KIND.  The cells are the builder's:
+;;; activating the fragment resolves each name again and patches the
+;;; reference, so the sites are kept with the recorder.
+(defun note-linkage-site (code offset kind index)
+  (let ((recorder sb-kernel::*fragment-recorder*))
+    (when (and recorder
+               (recording-p recorder)
+               (= (object-owner code) (fragment-recorder-heap-id recorder)))
+      (let ((sites (fragment-recorder-linkage-sites recorder))
+            (key (get-lisp-obj-address code)))
+        (sb-kernel::with-global-heap
+          (push (list offset kind index) (gethash key sites)))))))
+
+(defun sb-kernel::call-with-fragment-record (kind target args-fun body-fun)
+  (declare (function args-fun body-fun) (dynamic-extent args-fun body-fun))
+  (let ((recorder sb-kernel::*fragment-recorder*))
+    (if (or (fragment-recorder-open recorder)
+            (not (recording-p recorder))
+            (and target
+                 (= (object-owner target) (fragment-recorder-heap-id recorder))))
+        (funcall body-fun)
+        (let ((record (case kind
+                        (:cache kind)
+                        ;; Interning into a global table: one record per
+                        ;; table, whose replay interns the fragment's members.
+                        (:interned
+                         (or (cdr (assoc target (fragment-recorder-interned recorder)))
+                             (let ((record (make-fragment-record kind target nil)))
+                               (push record (fragment-recorder-records recorder))
+                               (push (cons target record)
+                                     (fragment-recorder-interned recorder))
+                               record)))
+                        (t
+                         (let ((record (make-fragment-record kind target
+                                                             (funcall args-fun))))
+                           (push record (fragment-recorder-records recorder))
+                           record)))))
+          (setf (fragment-recorder-open recorder) record)
+          (unwind-protect (funcall body-fun)
+            (setf (fragment-recorder-open recorder) nil))))))
+
+(define-alien-routine ("local_heap_last_store_pc" local-heap-last-store-pc)
+    unsigned-long)
+
+;;; An object whose contents are a hash cache: the cache vector, or the
+;;; symbol holding it.
+(defun hash-cache-object-p (object)
+  (dolist (symbol sb-impl::*cache-vector-symbols*)
+    (when (or (eq object symbol) (eq object (symbol-global-value symbol)))
+      (return t))))
+
+;;; Account for a store that makes OBJECT refer to VALUE, of the fragment
+;;; being built, and return true; return NIL when the store was not made
+;;; on the recorder's behalf.  Called from inside the escaping store,
+;;; which may hold a system lock on the structure it stores into, so
+;;; this touches nothing but the recorder.  A store into a global
+;;; symbol that no record covers is its value being set: that becomes a
+;;; :SET-VALUE record, replayed with the value the symbol has once the
+;;; fragment is built.
+(defun note-fragment-escape (object value)
+  (let ((recorder sb-kernel::*fragment-recorder*))
+    (when (recording-p recorder)
+      (let ((open (fragment-recorder-open recorder)))
+        (cond ((eq open :cache)
+               (incf (fragment-recorder-cache-escapes recorder)))
+              (open
+               (incf (fragment-record-escapes open)))
+              ((hash-cache-object-p object)
+               (incf (fragment-recorder-cache-escapes recorder)))
+              ((symbolp object)
+               (let ((record (find-if (lambda (record)
+                                        (and (eq (fragment-record-kind record) :set-value)
+                                             (eq (fragment-record-target record) object)))
+                                      (fragment-recorder-records recorder))))
+                 (unless record
+                   (setq record (make-fragment-record :set-value object (list object)))
+                   (push record (fragment-recorder-records recorder)))
+                 (incf (fragment-record-escapes record))))
+              (t
+               (push (list object value (local-heap-last-store-pc))
+                     (fragment-recorder-unaccounted recorder)))))
+      t)))
+
+;;; --- Sealing a fragment ---
+
+(define-alien-routine ("local_heap_seal" %seal-local-heap) int
+  (heap unsigned-long))
+
+(define-alien-routine ("local_heap_fragment_trace" %trace-fragment) long
+  (heap unsigned-long)
+  (root unsigned-long))
+
+(define-alien-routine ("local_heap_fragment_member" %fragment-member) unsigned-long
+  (heap unsigned-long)
+  (index unsigned-long))
+
+(defconstant heap-member-count-stat 28)
+
+;;; The value RECORD's target holds now, for the kinds that replay a value:
+;;; a function definition, a global value, a globaldb entry, a layout the
+;;; forward-reference table holds, an eql specializer, and the objects of
+;;; the heap HEAP-ID that a global interning table holds, which replaying
+;;; the record interns again: a hashset's elements, or a hash table's
+;;; entries as (key value) lists.
+(defun fragment-record-current-values (record heap-id)
+  (let ((target (fragment-record-target record))
+        (args (fragment-record-args record)))
+    (flet ((owned-p (x) (= (object-owner x) heap-id)))
+      (case (fragment-record-kind record)
+        (:set-function
+         (let ((function (if (sb-kernel:fdefn-p target)
+                             (sb-kernel:fdefn-fun target)
+                             (sb-kernel:%symbol-function target))))
+           (and function (list function))))
+        (:set-value
+         (handler-case (list (sb-ext:symbol-global-value target))
+           (unbound-variable () nil)))
+        (:set-info
+         (destructuring-bind (name info-number) args
+           (multiple-value-bind (value found) (sb-impl::get-info-value name info-number)
+             (and found (list value)))))
+        (:forward-layout
+         (let ((layout (gethash (first args) sb-kernel::*forward-referenced-layouts*)))
+           (and layout (list layout))))
+        (:fdefn
+         ;; The fdefn made for the name, an object of the heap, which replay
+         ;; installs under the name again.
+         (let ((fdefn (sb-int:find-fdefn (first args))))
+           (and fdefn (list fdefn))))
+        (:eql-specializer
+         (let ((specializer (gethash (first args) target)))
+           (and specializer (list specializer))))
+        (:interned
+         (let ((members '()))
+           (cond ((hash-table-p target)
+                  (maphash (lambda (k v)
+                             (when (or (owned-p k) (owned-p v)) (push (list k v) members)))
+                           target))
+                 ((typep target 'sb-impl::robinhood-hashset)
+                  (sb-int:map-hashset (lambda (x) (when (owned-p x) (push x members)))
+                                      target)))
+           members))))))
+
+(defun seal-fragment (recorder)
+  "Finish the fragment RECORDER was recording: note in each record the value
+it replays, seal the build heap so that nothing more is allocated in it, and
+find the fragment's objects, the heap's objects that the records reach.
+Return their number.  The heap must not be installed."
+  (let ((heap (fragment-recorder-heap-address recorder)))
+    (when (fragment-recorder-unaccounted recorder)
+      (cerror "Seal it anyway."
+              "~D escapes from the fragment are accounted to no record."
+              (length (fragment-recorder-unaccounted recorder))))
+    (when (= (current-local-heap-address) heap)
+      (error "The build heap of a fragment being sealed is installed."))
+    (dolist (record (fragment-recorder-records recorder))
+      (setf (fragment-record-replay-values record)
+            (fragment-record-current-values record (fragment-recorder-heap-id recorder))))
+    (let ((rc (%seal-local-heap heap)))
+      (unless (zerop rc)
+        (error "Sealing the build heap failed: ~D" rc)))
+    ;; The roots are what the records refer to: their targets, arguments
+    ;; and values, in a vector outside the heap, so that the fragment does
+    ;; not carry the records themselves.
+    (let ((roots (sb-kernel::with-global-heap
+                   (coerce (loop for record in (fragment-recorder-records recorder)
+                                 collect (fragment-record-target record)
+                                 append (fragment-record-args record)
+                                 append (fragment-record-replay-values record))
+                           'simple-vector))))
+      (without-gcing
+        (with-pinned-objects (roots)
+          (%trace-fragment heap (get-lisp-obj-address roots)))))))
+
+(defun map-fragment-members (function recorder)
+  "Call FUNCTION on each object of the fragment RECORDER was recording, in
+address order, once SEAL-FRAGMENT has found them."
+  (declare (function function))
+  (let ((heap (fragment-recorder-heap-address recorder)))
+    (dotimes (i (%local-heap-stat heap heap-member-count-stat))
+      (funcall function (%make-lisp-obj (%fragment-member heap i))))))
 
 ;;; Called from C (local_heap_exhausted).  The runtime has already
 ;;; uninstalled the exhausted heap, so the condition is built in the

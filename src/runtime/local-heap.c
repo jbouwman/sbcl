@@ -203,9 +203,13 @@ struct local_heap *local_heap_create(int kind, uword_t gc_threshold,
     if (!h) return NULL;
     gc_set_region_empty(&h->parked_cons);
     gc_set_region_empty(&h->parked_mixed);
+    gc_set_region_empty(&h->parked_sys_cons);
+    gc_set_region_empty(&h->parked_sys_mixed);
+    gc_set_region_empty(&h->code_alloc);
     h->kind = kind;
     h->state = LOCAL_HEAP_LIVE;
-    h->gc_threshold = gc_threshold;
+    /* A build heap keeps everything it allocates. */
+    h->gc_threshold = kind == LOCAL_HEAP_BUILD ? 0 : gc_threshold;
     h->hard_limit = hard_limit;
     h->fullsweep_after = 16;
     local_heap_set_flags(h, flags);
@@ -222,6 +226,7 @@ static void free_descriptor(struct local_heap *h)
     pthread_mutex_destroy(&h->mailbox_lock);
     free(h->pages);
     free(h->outgoing);
+    free(h->members);
     free(h);
 }
 
@@ -234,6 +239,9 @@ int local_heap_release_internal(struct local_heap *h, int force)
 {
     struct thread *th = get_sb_vm_thread();
     if (h->state != LOCAL_HEAP_LIVE && h->state != LOCAL_HEAP_RELEASING) return -2;
+    /* Global tables refer into a build heap once it has been used: its
+     * objects stay part of the process. */
+    if (h->kind == LOCAL_HEAP_BUILD && !force) return -3;
     if (h->installed_on) {
         if (h->installed_on == th) local_heap_switch(th, NULL);
         else if (!force) return -1;
@@ -293,6 +301,10 @@ int local_heap_release_id(uint32_t id, uint32_t epoch)
         table_unlock(&old);
         return -1;
     }
+    if (h->kind == LOCAL_HEAP_BUILD) {
+        ignore_value(mutex_release(&local_heap_table_lock));
+        return -3;
+    }
     h->state = LOCAL_HEAP_RELEASING;
     table_unlock(&old);
     return local_heap_release_internal(h, 0);
@@ -311,6 +323,7 @@ int local_heap_switch_in_pa(struct thread *th, struct local_heap *to)
     struct local_heap *from = ed->current_heap;
     if (from == to) return 0;
     if (to && to->state != LOCAL_HEAP_LIVE) return -2;
+    if (to && to->sealed) return -3;
     if (to && to->installed_on && to->installed_on != th) return -1;
     if (from) {
         from->parked_mixed = th->mixed_tlab;
@@ -330,6 +343,26 @@ int local_heap_switch_in_pa(struct thread *th, struct local_heap *to)
     } else {
         th->mixed_tlab = ed->saved_mixed_tlab;
         th->cons_tlab  = ed->saved_cons_tlab;
+    }
+    /* A build heap takes the system TLABs as well.  The thread's own are
+     * saved while any build heap is installed. */
+    bool from_build = from && from->kind == LOCAL_HEAP_BUILD;
+    bool to_build = to && to->kind == LOCAL_HEAP_BUILD;
+    if (from_build) {
+        from->parked_sys_mixed = th->sys_mixed_tlab;
+        from->parked_sys_cons  = th->sys_cons_tlab;
+    } else if (to_build) {
+        ed->saved_sys_mixed_tlab = th->sys_mixed_tlab;
+        ed->saved_sys_cons_tlab  = th->sys_cons_tlab;
+    }
+    if (to_build) {
+        th->sys_mixed_tlab = to->parked_sys_mixed;
+        th->sys_cons_tlab  = to->parked_sys_cons;
+        gc_set_region_empty(&to->parked_sys_mixed);
+        gc_set_region_empty(&to->parked_sys_cons);
+    } else if (from_build) {
+        th->sys_mixed_tlab = ed->saved_sys_mixed_tlab;
+        th->sys_cons_tlab  = ed->saved_sys_cons_tlab;
     }
     ed->current_heap = to;
     th->local_heap = to;
@@ -513,6 +546,32 @@ void local_heap_exhausted(struct local_heap *h, sword_t nbytes)
  *
  * This calls no Lisp, so Lisp may call it directly for a store the
  * compiler does not barrier (see SB-VM::CHECK-STORE). */
+/* The return address of the most recent store this thread classified as a
+ * violation, for Lisp code handling it: the store barrier calls Lisp with
+ * the object and value only. */
+static _Thread_local uword_t last_store_pc;
+
+uword_t local_heap_last_store_pc(void)
+{
+    return last_store_pc;
+}
+
+/* The owner the store check sees for an object of the heap ID: the
+ * process, when that heap is a build heap other than CHECKED, the one
+ * whose stores are being checked.  A build heap is never released: once
+ * its fragment is sealed, or its build abandoned, its objects are what
+ * the builder's global state refers to, and a fragment built afterwards
+ * refers to them as imports; so a store of one is the store of a global
+ * value, and a store into one is an escape that a record accounts for. */
+static inline uint32_t effective_owner(uint32_t id, struct local_heap *checked)
+{
+    if (id) {
+        struct local_heap *h = local_heap_from_id(id);
+        if (h && h != checked && h->kind == LOCAL_HEAP_BUILD) return 0;
+    }
+    return id;
+}
+
 int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
 {
     struct thread *th = get_sb_vm_thread();
@@ -520,14 +579,15 @@ int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
     if (!h) return 0;
     /* Stack-allocated objects belong to the storing process. */
     if (!is_lisp_pointer(object) || is_in_stack_space(object)) return 0;
-    uint32_t value_owner = local_heap_owner_of(value);
-    uint32_t object_owner = local_heap_owner_of(object);
+    uint32_t value_owner = effective_owner(local_heap_owner_of(value), h);
+    uint32_t object_owner = effective_owner(local_heap_owner_of(object), h);
     int kind = 0;
     if (value_owner && value_owner != object_owner)
         kind = object_owner ? LOCAL_HEAP_STORE_CROSS_HEAP : LOCAL_HEAP_STORE_ESCAPE;
     else if (h->strict && th->local_heap == h && !object_owner)
         kind = LOCAL_HEAP_STORE_GLOBAL;
     if (!kind) return 0;
+    last_store_pc = pc;
     int signaled = h->store_check == LOCAL_HEAP_STORES_SIGNALED;
     local_heap_note_store_violation(native_pointer(object), value,
                                     signaled
@@ -658,9 +718,13 @@ void local_heap_reset_violations(void)
 
 /* --- Mailbox --- */
 
+/* Seal a message fragment before it is sent, or a build heap whose
+ * module is built: close its regions, and for a build heap make its
+ * objects enumerable and refuse to install it again. */
 int local_heap_seal(struct local_heap *f)
 {
-    if (f->kind != LOCAL_HEAP_FRAGMENT || f->state != LOCAL_HEAP_LIVE)
+    if ((f->kind != LOCAL_HEAP_FRAGMENT && f->kind != LOCAL_HEAP_BUILD)
+        || f->state != LOCAL_HEAP_LIVE)
         return -3;
     if (f->installed_on) return -1;
     /* Closing touches page metadata that a concurrent global GC would
@@ -669,6 +733,13 @@ int local_heap_seal(struct local_heap *f)
     block_blockable_signals(&old);
     ensure_region_closed(&f->parked_mixed, PAGE_TYPE_MIXED);
     ensure_region_closed(&f->parked_cons, PAGE_TYPE_CONS);
+    if (f->kind == LOCAL_HEAP_BUILD) {
+        ensure_region_closed(&f->parked_sys_mixed, PAGE_TYPE_MIXED);
+        ensure_region_closed(&f->parked_sys_cons, PAGE_TYPE_CONS);
+        ensure_region_closed(&f->code_alloc, PAGE_TYPE_CODE);
+        local_heap_materialize(f);
+        f->sealed = 1;
+    }
     thread_sigmask(SIG_SETMASK, &old, 0);
     return 0;
 }
@@ -809,6 +880,9 @@ uword_t local_heap_stat(struct local_heap *h, int which)
     case 23: return h->epoch;
     case 24: return h->bytes_claimed;
     case 25: return h->alloc_trap;
+    case 26: return h->kind;
+    case 27: return h->sealed;
+    case 28: return h->nmembers;
     default: return 0;
     }
 }

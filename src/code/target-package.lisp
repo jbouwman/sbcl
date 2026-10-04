@@ -112,6 +112,12 @@
 ;;; alterations to the mapping are exceedingly rare.
 (defun pkgnick-update (this-package string other-package)
   (declare (type (or null package) other-package))
+  (sb-kernel::with-fragment-record
+      (:package-nickname nil this-package string other-package)
+    (%pkgnick-update this-package string other-package)))
+
+(defun %pkgnick-update (this-package string other-package)
+  (declare (type (or null package) other-package))
   (let ((entry
          (when other-package ; Ensure that STRING has a nickname-id
            (let* ((id-map *package-nickname-ids*)
@@ -660,9 +666,11 @@ an error if PACKAGE or any of the PACKAGES-TO-ADD is not a valid
 package designator."
   (let ((package (find-undeleted-package-or-lose package))
         (packages-to-add (package-listify packages-to-add)))
-    (setf (package-%implementation-packages package)
-          (union (package-%implementation-packages package)
-                 (mapcar #'find-undeleted-package-or-lose packages-to-add)))))
+    (sb-kernel::with-fragment-record
+        (:add-implementation-package package package packages-to-add)
+      (setf (package-%implementation-packages package)
+            (union (package-%implementation-packages package)
+                   (mapcar #'find-undeleted-package-or-lose packages-to-add))))))
 
 (defun remove-implementation-package (packages-to-remove
                                       &optional (package *package*))
@@ -1129,6 +1137,11 @@ Experimental: interface subject to change."
 ;;; The first element is the primary name and the rest are nicknames.
 (defun package-registry-update (package namelist)
   (declare (type (or list (eql t)) namelist))
+  (sb-kernel::with-fragment-record (:register-package nil package namelist)
+    (%package-registry-update package namelist)))
+
+(defun %package-registry-update (package namelist)
+  (declare (type (or list (eql t)) namelist))
   (aver (sb-thread:holding-mutex-p *package-table-lock*))
   (when (and namelist (not (package-id package)))
     ;; Registration ensures a non-null id if it can (even for a "deferred" package)
@@ -1147,7 +1160,7 @@ Experimental: interface subject to change."
         (setf (package-id package) new-id
               (aref vector new-id) package))))
   (when (eq namelist 't)
-    (return-from package-registry-update))
+    (return-from %package-registry-update))
   (let* ((n (length namelist))
          (new-hashes (mapcar #'sxhash namelist))
          (new-keys (make-array (* 2 n)))
@@ -1405,11 +1418,12 @@ Experimental: interface subject to change."
                 ;; so that (symbol-package (intern x #<pkg>)) = #<pkg>.
                 ;; This matters in the case of concurrent INTERN.
                 (%set-symbol-package symbol package)
-                (if ignore-lock
-                    (add-symbol table symbol 'intern)
-                    (with-single-package-locked-error
-                        (:package package "interning ~A" symbol-name)
-                      (add-symbol table symbol 'intern)))
+                (sb-kernel::with-fragment-record (:intern package package symbol)
+                  (if ignore-lock
+                      (add-symbol table symbol 'intern)
+                      (with-single-package-locked-error
+                          (:package package "interning ~A" symbol-name)
+                        (add-symbol table symbol 'intern))))
                 (values symbol nil)))))))
 
 (macrolet ((find/intern (function package-lookup &rest more-args)
@@ -1734,14 +1748,15 @@ uninterned."
         ;; And now, three pages later, we export the suckers.
         (let ((internal (package-internal-symbols package))
               (external (package-external-symbols package)))
-          (dolist (sym syms)
-            ;; no error if this condition is false: inaccessibility
-            ;; and subsequent conflicts handled above by IMPORT can
-            ;; mean that some symbols in the original export list are
-            ;; not exportable.
-            (when (eql (find-symbol (symbol-name sym) package) sym)
-              (add-symbol external sym 'export)
-              (nuke-symbol internal sym 'export)))))
+          (sb-kernel::with-fragment-record (:export package package syms)
+            (dolist (sym syms)
+              ;; no error if this condition is false: inaccessibility
+              ;; and subsequent conflicts handled above by IMPORT can
+              ;; mean that some symbols in the original export list are
+              ;; not exportable.
+              (when (eql (find-symbol (symbol-name sym) package) sym)
+                (add-symbol external sym 'export)
+                (nuke-symbol internal sym 'export))))))
       t)))
 
 ;;; Check that all symbols are accessible, then move from external to internal.
@@ -1765,9 +1780,10 @@ uninterned."
                                    (length syms) syms))
         (let ((internal (package-internal-symbols package))
               (external (package-external-symbols package)))
-          (dolist (sym syms)
-            (add-symbol internal sym 'unexport)
-            (nuke-symbol external sym 'unexport))))
+          (sb-kernel::with-fragment-record (:unexport package package syms)
+            (dolist (sym syms)
+              (add-symbol internal sym 'unexport)
+              (nuke-symbol external sym 'unexport)))))
       t)))
 
 ;;; Check for name conflict caused by the import and let the user
@@ -1814,8 +1830,9 @@ the importation, then a correctable error is signalled."
                                      (length union) union)))
         ;; Add the new symbols to the internal hashtable.
         (let ((internal (package-internal-symbols package)))
-          (dolist (sym syms)
-            (add-symbol internal sym 'import)))
+          (sb-kernel::with-fragment-record (:import package package syms)
+            (dolist (sym syms)
+              (add-symbol internal sym 'import))))
         ;; If any of the symbols are uninterned, make them be owned by PACKAGE.
         (dolist (sym homeless)
           (%set-symbol-package sym package))
@@ -1832,22 +1849,23 @@ the importation, then a correctable error is signalled."
            (symbols (symbol-listify symbols))
            (lock-asserted-p nil))
       (with-single-package-locked-error ()
-        (dolist (sym symbols)
-          (multiple-value-bind (s w) (find-symbol (symbol-name sym) package)
-            (unless (or lock-asserted-p
-                        (and (eq s sym)
-                             (member s (package-shadowing-symbols package))))
-              (assert-package-unlocked package "shadowing-importing symbol~P ~
-                                           ~{~A~^, ~}" (length symbols) symbols)
-              (setf lock-asserted-p t))
-            (unless (and w (not (eq w :inherited)) (eq s sym))
-              (when (or (eq w :internal) (eq w :external))
-                ;; If it was shadowed, we don't want UNINTERN to flame out...
-                (setf (package-%shadowing-symbols package)
-                      (remove s (the list (package-%shadowing-symbols package))))
-                (unintern s package))
-              (add-symbol internal sym 'shadowing-import))
-            (pushnew sym (package-%shadowing-symbols package)))))))
+        (sb-kernel::with-fragment-record (:shadowing-import package package symbols)
+          (dolist (sym symbols)
+            (multiple-value-bind (s w) (find-symbol (symbol-name sym) package)
+              (unless (or lock-asserted-p
+                          (and (eq s sym)
+                               (member s (package-shadowing-symbols package))))
+                (assert-package-unlocked package "shadowing-importing symbol~P ~
+                                             ~{~A~^, ~}" (length symbols) symbols)
+                (setf lock-asserted-p t))
+              (unless (and w (not (eq w :inherited)) (eq s sym))
+                (when (or (eq w :internal) (eq w :external))
+                  ;; If it was shadowed, we don't want UNINTERN to flame out...
+                  (setf (package-%shadowing-symbols package)
+                        (remove s (the list (package-%shadowing-symbols package))))
+                  (unintern s package))
+                (add-symbol internal sym 'shadowing-import))
+              (pushnew sym (package-%shadowing-symbols package))))))))
   t)
 
 (defun shadow (symbols &optional (package (sane-package)))
@@ -1863,19 +1881,20 @@ it is not already present."
       (flet ((present-p (w)
                (and w (not (eq w :inherited)))))
         (with-single-package-locked-error ()
-          (dolist (name symbols)
-            (multiple-value-bind (s w) (find-symbol name package)
-              (unless (or lock-asserted-p
-                          (and (present-p w)
-                               (member s (package-shadowing-symbols package))))
-                (assert-package-unlocked package "shadowing symbol~P ~{~A~^, ~}"
-                                         (length symbols) symbols)
-                (setf lock-asserted-p t))
-              (unless (present-p w)
-                (setq s (%make-symbol 2 name)) ; 2 = random interned symbol
-                (%set-symbol-package s package)
-                (add-symbol internal s 'shadow))
-              (pushnew s (package-%shadowing-symbols package))))))))
+          (sb-kernel::with-fragment-record (:shadow package package symbols)
+            (dolist (name symbols)
+              (multiple-value-bind (s w) (find-symbol name package)
+                (unless (or lock-asserted-p
+                            (and (present-p w)
+                                 (member s (package-shadowing-symbols package))))
+                  (assert-package-unlocked package "shadowing symbol~P ~{~A~^, ~}"
+                                           (length symbols) symbols)
+                  (setf lock-asserted-p t))
+                (unless (present-p w)
+                  (setq s (%make-symbol 2 name)) ; 2 = random interned symbol
+                  (%set-symbol-package s package)
+                  (add-symbol internal s 'shadow))
+                (pushnew s (package-%shadowing-symbols package)))))))))
   t)
 
 ;;; Do stuff to use a package, with all kinds of fun name-conflict checking.
@@ -1883,6 +1902,12 @@ it is not already present."
   "Add all the PACKAGES-TO-USE to the use list for PACKAGE so that the
 external symbols of the used packages are accessible as internal symbols in
 PACKAGE."
+  (let ((target (find-package package)))
+    (declare (ignorable target)) ; unused without local heaps
+    (sb-kernel::with-fragment-record (:use-package target target packages-to-use)
+      (%use-package packages-to-use package))))
+
+(defun %use-package (packages-to-use package)
   ;; These don't have to be continuable errors.
   ;; Don't signal them while holding the graph lock
   ;; (Note that we resolve the names outside of any lock.
@@ -2197,12 +2222,15 @@ PACKAGE."
                   (let* ((string (car cell))
                          (pkg (,sub-finder string))
                          (new (sb-c::allocate-weak-vector 3)))
-                    (sb-kernel::with-global-heap
-                      (setf (weak-vector-ref new 0) *package-names-cookie*
-                            (weak-vector-ref new 1) (info-gethash string (car *package-nickname-ids*))
-                            (weak-vector-ref new 2) pkg)
-                      (sb-thread:barrier (:write))
-                      (setf (cdr cell) new))
+                    ;; The memo is a cache: a fragment being built does not carry
+                    ;; it, and the cell in the caller's constants is refilled.
+                    (sb-kernel::with-fragment-cache
+                      (sb-kernel::with-global-heap
+                        (setf (weak-vector-ref new 0) *package-names-cookie*
+                              (weak-vector-ref new 1) (info-gethash string (car *package-nickname-ids*))
+                              (weak-vector-ref new 2) pkg)
+                        (sb-thread:barrier (:write))
+                        (setf (cdr cell) new)))
                     pkg)))))
 
   (def-finder cached-find-undeleted-package find-undeleted-package-or-lose
