@@ -91,8 +91,9 @@ static int compare_lispobj(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-/* Trace the objects of the sealed build heap H reachable from ROOT
- * through objects of H, and keep them in H, sorted by address, for
+/* Trace the objects of the sealed build heap H reachable from ROOT, an
+ * object of H or a vector of roots outside it, through objects of H, and
+ * keep them in H, sorted by address, for
  * local_heap_fragment_member.  Return their number, or -3 if H is not a
  * sealed build heap.  Global collection must be inhibited. */
 sword_t local_heap_fragment_trace(struct local_heap *h, lispobj root)
@@ -107,7 +108,13 @@ sword_t local_heap_fragment_trace(struct local_heap *h, lispobj root)
     for (sword_t i = 0; i < h->npages; i++) t.page_slot[h->pages[i]] = i;
 
     corefrag = &t;
-    corefrag_visit(root);
+    /* ROOT is an object of H, or a vector outside H whose elements are
+     * the roots. */
+    if (is_lisp_pointer(root) && find_page_index((void*)root) >= 0
+        && block_owner[address_block(native_pointer(root))] == h->id)
+        corefrag_visit(root);
+    else
+        corefrag_trace_object(native_pointer(root));
     for (uword_t i = 0; i < t.nmembers; i++) {
         lispobj object = t.members[i];
         if (listp(object)) {

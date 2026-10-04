@@ -556,6 +556,22 @@ uword_t local_heap_last_store_pc(void)
     return last_store_pc;
 }
 
+/* The owner the store check sees for an object of the heap ID: the
+ * process, when that heap is a build heap other than CHECKED, the one
+ * whose stores are being checked.  A build heap is never released: once
+ * its fragment is sealed, or its build abandoned, its objects are what
+ * the builder's global state refers to, and a fragment built afterwards
+ * refers to them as imports; so a store of one is the store of a global
+ * value, and a store into one is an escape that a record accounts for. */
+static inline uint32_t effective_owner(uint32_t id, struct local_heap *checked)
+{
+    if (id) {
+        struct local_heap *h = local_heap_from_id(id);
+        if (h && h != checked && h->kind == LOCAL_HEAP_BUILD) return 0;
+    }
+    return id;
+}
+
 int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
 {
     struct thread *th = get_sb_vm_thread();
@@ -563,8 +579,8 @@ int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
     if (!h) return 0;
     /* Stack-allocated objects belong to the storing process. */
     if (!is_lisp_pointer(object) || is_in_stack_space(object)) return 0;
-    uint32_t value_owner = local_heap_owner_of(value);
-    uint32_t object_owner = local_heap_owner_of(object);
+    uint32_t value_owner = effective_owner(local_heap_owner_of(value), h);
+    uint32_t object_owner = effective_owner(local_heap_owner_of(object), h);
     int kind = 0;
     if (value_owner && value_owner != object_owner)
         kind = object_owner ? LOCAL_HEAP_STORE_CROSS_HEAP : LOCAL_HEAP_STORE_ESCAPE;

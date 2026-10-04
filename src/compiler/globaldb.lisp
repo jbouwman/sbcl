@@ -184,13 +184,17 @@
   (when (pcl-methodfn-name-p name)
     (error "Can't SET-INFO-VALUE on PCL-internal function"))
   (let (new)
+    ;; A fragment being built records the clearing like a store (see
+    ;; SET-INFO-VALUE): the info vector it leaves in a global name is a
+    ;; new object, and replaying the record clears the same entries.
     (with-globaldb-name (key1 key2) name
       :simple
       ;; If PACKED-INFO-REMOVE has nothing to do, it returns NIL,
       ;; corresponding to the input that UPDATE-SYMBOL-INFO expects.
-      (dx-flet ((clear-simple (old)
-                  (setq new (packed-info-remove old key2 info-numbers))))
-        (update-symbol-info key1 #'clear-simple))
+      (sb-kernel::with-fragment-record (:clear-info key1 name (copy-list info-numbers))
+        (dx-flet ((clear-simple (old)
+                    (setq new (packed-info-remove old key2 info-numbers))))
+          (update-symbol-info key1 #'clear-simple)))
       :hairy
       ;; The global hashtable is not imbued with knowledge of the convention
       ;; for PACKED-INFO-REMOVE because that would render it less useful
@@ -198,13 +202,14 @@
       ;; that I might want it to store aside from packed infos.
       ;; So here UPDATE might receive NIL but must not return NIL if
       ;; there was a non-nil input. NIL doesn't mean "do nothing".
-      (dx-flet ((clear-hairy (old)
-                  (if old
-                      ;; if -REMOVE => nil, then update NEW but return OLD
-                      (or (setq new (packed-info-remove
-                                     old +no-auxiliary-key+ info-numbers))
-                          old))))
-        (info-puthash *info-environment* name #'clear-hairy)))
+      (sb-kernel::with-fragment-record (:clear-info nil name (copy-list info-numbers))
+        (dx-flet ((clear-hairy (old)
+                    (if old
+                        ;; if -REMOVE => nil, then update NEW but return OLD
+                        (or (setq new (packed-info-remove
+                                       old +no-auxiliary-key+ info-numbers))
+                            old))))
+          (info-puthash *info-environment* name #'clear-hairy))))
     (not (null new))))
 
 ;;;; GET-INFO-VALUE

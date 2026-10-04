@@ -89,7 +89,10 @@
 (defun release-buffer (buffer)
   (declare (sb-c::tlab :system))
   (reset-buffer buffer)
-  (atomic-push buffer *available-buffers*))
+  ;; A pool of this image: a fragment being built neither carries nor
+  ;; records what it returns to it.
+  (sb-kernel::with-fragment-cache
+    (atomic-push buffer *available-buffers*)))
 
 
 ;;;; the FD-STREAM structure
