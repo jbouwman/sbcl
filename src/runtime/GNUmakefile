@@ -84,7 +84,7 @@ COMMON_SRC += run-program.c sprof.c
 endif
 
 ifdef LISP_FEATURE_SB_LOCAL_HEAPS
-COMMON_SRC += local-heap.c corefrag-members.c
+COMMON_SRC += local-heap.c corefrag-members.c corefrag-activate.c
 endif
 
 C_SRC = $(COMMON_SRC) ${ARCH_SRC} ${OS_SRC} ${GC_SRC}

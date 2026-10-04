@@ -1021,3 +1021,27 @@ into a local heap, and pointers between different local heaps."
       (setf (heap-reference-checking) was))))
 
 ) ; end PROGN
+
+;;;; Activating a fragment file
+
+(define-alien-routine ("corefrag_activate_file" %activate-fragment-file) int
+  (path c-string)
+  (out (* unsigned-long)))
+
+(defun activate-fragment-file (pathname)
+  "Map the page runs of the fragment file at PATHNAME at their planned
+addresses and install them in the collector as pseudo-static pages.  This
+is the prebound case: the file was written against this core and its
+planned pages are free.  Nothing is relocated, no import is resolved and
+no record is replayed.  Returns the number of runs and the bytes mapped."
+  (let ((path (sb-ext:native-namestring (merge-pathnames pathname) :as-file t)))
+    (with-alien ((out (array unsigned-long 2)))
+      (let ((rc (sb-sys:without-gcing (%activate-fragment-file path (cast out (* unsigned-long))))))
+        (case rc
+          (0 (values (deref out 0) (deref out 1)))
+          (-1 (error "~A is not a fragment file" path))
+          (-2 (error "~A was written for another fragment file version" path))
+          (-3 (error "a run of ~A lies outside dynamic space or is not page-aligned" path))
+          (-4 (error "a planned page of ~A is in use" path))
+          (-5 (error "mapping a run of ~A failed" path))
+          (t (error "unexpected return code ~D activating ~A" rc path)))))))

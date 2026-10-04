@@ -322,7 +322,13 @@
           (typecase x
             (symbol (push (list :symbol (symbol-name x) (and (symbol-package x) (package-name (symbol-package x)))
                                 (+ new-raw sb-vm:other-pointer-lowtag))
-                          result))
+                          result)
+                    ;; The symbol's function when it is a simple-fun of a member
+                    ;; code object: callable from the activated fragment directly.
+                    (let ((f (and (fboundp x) (symbol-function x))))
+                      (when (and f (sb-kernel:simple-fun-p f))
+                        (let ((new (forward-address layout (sb-kernel:get-lisp-obj-address f))))
+                          (when new (push (list :function (symbol-name x) (and (symbol-package x) (package-name (symbol-package x))) new) result))))))
             (sb-kernel:fdefn (push (list :fdefn (prin1-to-string (sb-kernel:fdefn-name x))
                                          (+ new-raw sb-vm:other-pointer-lowtag))
                                    result))))))
@@ -554,7 +560,8 @@ from the planned address BASE. Return a plist of what was written."
   (with-open-file (stream pathname :element-type '(unsigned-byte 8))
     (let ((sections (read-sections stream)))
       (list :identity (read-printed (section sections +section-identity+))
-            :provenance (read-printed (section sections +section-provenance+))))))
+            :provenance (read-printed (section sections +section-provenance+))
+            :exports (read-printed (section sections +section-exports+))))))
 
 (defun verify-fragment-file (pathname)
   "Read the fragment file at PATHNAME back and check its relocation
@@ -610,6 +617,9 @@ of counts; signal FRAGMENT-FILE-ERROR on the first violation."
           (fail "~D pointer-map bits, ~D pointers written" npointers (getf provenance :pointers)))
         (dolist (e exports)
           (let ((address (car (last e))))
-            (unless (object-start-p (- address (logand address sb-vm:lowtag-mask)))
-              (fail "export ~S names no object start" e)))))
+            ;; A function export names a simple-fun inside a code object.
+            (unless (if (eq (first e) :function)
+                        (some (lambda (r) (and (>= address (second r)) (< address (+ (second r) (third r))))) runs)
+                        (object-start-p (- address (logand address sb-vm:lowtag-mask))))
+              (fail "export ~S names no object in the fragment" e)))))
       (list :members total-objects :pointers npointers :words nwords :runs (length runs) :exports (length exports)))))

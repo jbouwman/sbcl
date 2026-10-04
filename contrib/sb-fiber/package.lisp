@@ -84,6 +84,7 @@
    #:fragment-cache-escapes
    #:seal-fragment
    #:map-fragment-members
+   #:activate-fragment-file
    #:heap-released-p
    #:current-heap
    #:object-heap

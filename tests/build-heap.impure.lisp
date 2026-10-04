@@ -327,3 +327,64 @@
             ;; The 4000-element vector takes pages of its own: at least four runs.
             (assert (>= (getf written :runs) 4))
             (assert (plusp (getf verified :exports)))))))))
+
+;;; --- Activating ---
+
+;;; A fragment written by one process is read back by a fresh process
+;;; started from the same core: its runs are mapped at their planned
+;;; addresses and installed as pseudo-static pages, and its functions run
+;;; there, with the struct's layout and the base core's linkage cells.
+(with-test (:name (:build-heap :activate :in-a-fresh-process))
+  (load "../tools-for-build/corefile.lisp")
+  (load "../tools-for-build/corefrag-writer.lisp")
+  (with-scratch-file (source "lisp")
+    (with-scratch-file (fasl "fasl")
+      (with-scratch-file (file "sbfr")
+        (with-open-file (s source :direction :output :if-exists :supersede)
+          (write-string "(defpackage \"BUILD-HEAP-ACTIVATED\" (:use \"CL\"))
+(in-package \"BUILD-HEAP-ACTIVATED\")
+(defstruct point x y)
+(defun norm (p) (+ (abs (point-x p)) (abs (point-y p))))
+(defvar *p* (make-point :x -3 :y 4))
+" s))
+        (compile-file source :output-file fasl)
+        (when (find-package "BUILD-HEAP-ACTIVATED") (delete-package "BUILD-HEAP-ACTIVATED"))
+        (let* ((heap (make-heap :kind :build :check-stores :error))
+               (recorder (make-fragment-recorder heap)))
+          (with-open-file (stream fasl :element-type '(unsigned-byte 8))
+            (with-fragment-recorder (recorder)
+              (with-heap (heap) (load stream))))
+          (assert-all-accounted recorder)
+          (let* ((count (seal-fragment recorder))
+                 (base (+ sb-vm:dynamic-space-start (* 3 (floor (sb-ext:dynamic-space-size) 4))))
+                 (written (funcall (intern "WRITE-FRAGMENT" "SB-COREFRAG-WRITER") recorder file :base base))
+                 (exports (getf (funcall (intern "FRAGMENT-FILE-STATS" "SB-COREFRAG-WRITER") file) :exports))
+                 (norm (car (last (find-if (lambda (e) (and (eq (first e) :function) (string= (second e) "NORM"))) exports))))
+                 (p (car (last (find-if (lambda (e) (and (eq (first e) :symbol) (string= (second e) "*P*"))) exports)))))
+            (assert (= (getf written :members) count))
+            (assert (and norm p))
+            ;; The child activates the file and calls NORM, through its simple-fun,
+            ;; on the point *P* holds, read from the symbol's global value slot: a
+            ;; full call to a function of the fragment would go through a linkage
+            ;; cell only the builder assigned, which is the record replay's work.
+            ;; It prints the run count, the member count it sees, and the result.
+            (let* ((forms (format nil "(multiple-value-bind (runs bytes) (sb-fiber:activate-fragment-file ~S) (let ((n 0)) (sb-vm:map-allocated-objects (lambda (x type size) (declare (ignore type size)) (let ((a (sb-kernel:get-lisp-obj-address x))) (when (and (>= a ~D) (< a (+ ~D bytes))) (incf n)))) :dynamic) (format t \"~~&RESULT ~~D ~~D ~~D~~%\" runs n (funcall (sb-kernel:%make-lisp-obj ~D) (sb-ext:symbol-global-value (sb-kernel:%make-lisp-obj ~D))))))"
+                                  (namestring file) base base norm p))
+                   (output (with-output-to-string (s)
+                             (run-program sb-ext:*runtime-pathname*
+                                          (list "--core" (namestring sb-ext:*core-pathname*)
+                                                "--dynamic-space-size" (format nil "~DMB" (floor (sb-ext:dynamic-space-size) (* 1024 1024)))
+                                                "--noinform" "--non-interactive" "--no-sysinit" "--no-userinit"
+                                                "--eval" "(require :sb-fiber)" "--eval" forms)
+                                          :output s :error s :search nil)))
+                   (start (search "RESULT " output)))
+              (unless start (error "the child did not report: ~A" output))
+              (destructuring-bind (runs seen result)
+                  (handler-case (with-input-from-string (s output :start (+ start 7))
+                                  (let ((v (list (read s) (read s) (read s))))
+                                    (unless (every (function integerp) v) (error "not integers"))
+                                    v))
+                    (error () (error "the child reported ~A" output)))
+                (assert (= runs (getf written :runs)))
+                (assert (= seen count))
+                (assert (= result 7))))))))))
