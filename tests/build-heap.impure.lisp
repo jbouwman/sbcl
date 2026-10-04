@@ -284,3 +284,46 @@
           (assert-error (with-heap (heap) (list 1)))
           (sb-ext:gc :full t)
           (assert (equal *build-heap-sealed-value* '(:sealed))))))))
+
+;;; --- Writing ---
+
+;;; The fragment writer lays a sealed fragment out at planned addresses,
+;;; packed by page type, and writes it; reading the file back checks that
+;;; every relocated word points into the fragment at an object, that no
+;;; other word does, and that the counts agree with what was sealed.
+(with-test (:name (:build-heap :write :verifies))
+  (load "../tools-for-build/corefile.lisp")
+  (load "../tools-for-build/corefrag-writer.lisp")
+  (with-scratch-file (source "lisp")
+    (with-scratch-file (fasl "fasl")
+      (with-scratch-file (file "sbfr")
+        (with-open-file (s source :direction :output :if-exists :supersede)
+          (write-string "(defpackage \"BUILD-HEAP-WRITTEN\" (:use \"CL\"))
+(in-package \"BUILD-HEAP-WRITTEN\")
+(defstruct point x y)
+(defun norm (p) (+ (abs (point-x p)) (abs (point-y p))))
+(defgeneric area (shape))
+(defmethod area ((p point)) (* (point-x p) (point-y p)))
+(defun make-adder (n) (lambda (x) (+ x n)))
+(defvar *adder* (make-adder 3))
+(defvar *table* (let ((h (make-hash-table :test 'equal))) (setf (gethash \"k\" h) (list 1 2 3)) h))
+(defvar *big* (make-array 4000 :initial-element nil))
+" s))
+        (compile-file source :output-file fasl)
+        (when (find-package "BUILD-HEAP-WRITTEN") (delete-package "BUILD-HEAP-WRITTEN"))
+        (let* ((heap (make-heap :kind :build :check-stores :error))
+               (recorder (make-fragment-recorder heap)))
+          (with-open-file (stream fasl :element-type '(unsigned-byte 8))
+            (with-fragment-recorder (recorder)
+              (with-heap (heap) (load stream))))
+          (assert-all-accounted recorder)
+          (let* ((count (seal-fragment recorder))
+                 (base (+ sb-vm:dynamic-space-start (* 3 (floor (sb-ext:dynamic-space-size) 4))))
+                 (written (funcall (intern "WRITE-FRAGMENT" "SB-COREFRAG-WRITER") recorder file :base base))
+                 (verified (funcall (intern "VERIFY-FRAGMENT-FILE" "SB-COREFRAG-WRITER") file)))
+            (assert (= (getf written :members) count))
+            (assert (= (getf verified :members) count))
+            (assert (= (getf verified :pointers) (getf written :pointers)))
+            ;; The 4000-element vector takes pages of its own: at least four runs.
+            (assert (>= (getf written :runs) 4))
+            (assert (plusp (getf verified :exports)))))))))
