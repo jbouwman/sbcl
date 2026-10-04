@@ -40,6 +40,31 @@ uint32_t local_heap_count;
 int local_heap_check_refs;
 
 static pthread_mutex_t local_heap_table_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Both locks below are taken by local_heap_release_internal with blockable
+ * signals blocked, so every other holder must block them too: a holder
+ * stopped for a global collection would leave the releaser waiting with
+ * SIG_STOP_FOR_GC blocked, and the collector waiting for the releaser. */
+static inline void table_lock(sigset_t *old)
+{
+    block_blockable_signals(old);
+    ignore_value(mutex_acquire(&local_heap_table_lock));
+}
+static inline void table_unlock(sigset_t *old)
+{
+    ignore_value(mutex_release(&local_heap_table_lock));
+    thread_sigmask(SIG_SETMASK, old, 0);
+}
+static inline void mailbox_lock(struct local_heap *h, sigset_t *old)
+{
+    block_blockable_signals(old);
+    ignore_value(mutex_acquire(&h->mailbox_lock));
+}
+static inline void mailbox_unlock(struct local_heap *h, sigset_t *old)
+{
+    ignore_value(mutex_release(&h->mailbox_lock));
+    thread_sigmask(SIG_SETMASK, old, 0);
+}
 static uint32_t local_heap_next_epoch;
 
 /* Caller holds the table lock. */
@@ -257,18 +282,19 @@ int local_heap_release(struct local_heap *h)
 int local_heap_release_id(uint32_t id, uint32_t epoch)
 {
     struct thread *th = get_sb_vm_thread();
-    ignore_value(mutex_acquire(&local_heap_table_lock));
+    sigset_t old;
+    table_lock(&old);
     struct local_heap *h = table_lookup(id, epoch);
     if (!h || h->state != LOCAL_HEAP_LIVE) {
-        ignore_value(mutex_release(&local_heap_table_lock));
+        table_unlock(&old);
         return -2;
     }
     if (h->installed_on && h->installed_on != th) {
-        ignore_value(mutex_release(&local_heap_table_lock));
+        table_unlock(&old);
         return -1;
     }
     h->state = LOCAL_HEAP_RELEASING;
-    ignore_value(mutex_release(&local_heap_table_lock));
+    table_unlock(&old);
     return local_heap_release_internal(h, 0);
 }
 
@@ -650,20 +676,22 @@ int local_heap_seal(struct local_heap *f)
 int local_heap_send_id(uint32_t dest_id, uint32_t dest_epoch,
                          struct local_heap *f, uint32_t sender_id)
 {
-    ignore_value(mutex_acquire(&local_heap_table_lock));
+    sigset_t old;
+    table_lock(&old);
     struct local_heap *dest = table_lookup(dest_id, dest_epoch);
     int rc = dest ? local_heap_send(dest, f, sender_id) : -2;
-    ignore_value(mutex_release(&local_heap_table_lock));
+    table_unlock(&old);
     return rc;
 }
 
 uword_t local_heap_stat_id(uint32_t id, uint32_t epoch, int which)
 {
-    ignore_value(mutex_acquire(&local_heap_table_lock));
+    sigset_t old;
+    table_lock(&old);
     struct local_heap *h = table_lookup(id, epoch);
     uword_t value = h ? local_heap_stat(h, which)
         : which == 10 ? LOCAL_HEAP_RELEASED : 0;
-    ignore_value(mutex_release(&local_heap_table_lock));
+    table_unlock(&old);
     return value;
 }
 
@@ -674,9 +702,10 @@ int local_heap_send(struct local_heap *dest, struct local_heap *f,
         || f->installed_on)
         return -3;
     if (dest->kind != LOCAL_HEAP_PROCESS) return -3;
-    ignore_value(mutex_acquire(&dest->mailbox_lock));
+    sigset_t old;
+    mailbox_lock(dest, &old);
     if (dest->state != LOCAL_HEAP_LIVE) {
-        ignore_value(mutex_release(&dest->mailbox_lock));
+        mailbox_unlock(dest, &old);
         return -2;
     }
     f->sender_id = sender_id;
@@ -686,7 +715,7 @@ int local_heap_send(struct local_heap *dest, struct local_heap *f,
     dest->mailbox_tail = f;
     dest->mailbox_count++;
     dest->mailbox_bytes += f->bytes_allocated;
-    ignore_value(mutex_release(&dest->mailbox_lock));
+    mailbox_unlock(dest, &old);
     return 0;
 }
 
@@ -727,17 +756,18 @@ lispobj local_heap_receive(struct local_heap *h, int *found,
     *found = 0;
     *sender_id = 0;
     if (h->installed_on != th) { *found = -1; return 0; }
-    ignore_value(mutex_acquire(&h->mailbox_lock));
+    sigset_t old;
+    mailbox_lock(h, &old);
     struct local_heap *f = h->mailbox_head;
     if (!f) {
-        ignore_value(mutex_release(&h->mailbox_lock));
+        mailbox_unlock(h, &old);
         return 0;
     }
     h->mailbox_head = f->next_in_mailbox;
     if (!h->mailbox_head) h->mailbox_tail = NULL;
     h->mailbox_count--;
     h->mailbox_bytes -= f->bytes_allocated;
-    ignore_value(mutex_release(&h->mailbox_lock));
+    mailbox_unlock(h, &old);
     lispobj root = f->root;
     *sender_id = f->sender_id;
     local_heap_adopt(h, f);
