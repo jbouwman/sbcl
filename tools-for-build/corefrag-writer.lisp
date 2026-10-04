@@ -387,8 +387,12 @@
           (setf header (append header
                                (list (run-type run) (run-base run) (run-nbytes run) (run-npages run)
                                      (length (run-objects run)))
+                               ;; As a core's page table entry: the large-object flag in the
+                               ;; low bit of the words used, the page type in the low three
+                               ;; bits of the scan start offset.
                                (loop for (words large sso) in ptes
-                                     append (list (logior (ash words 1) (if large 1 0)) sso))))
+                                     append (list (logior (ash words 1) (if large 1 0))
+                                                  (logior sso (run-type run))))))
           (push (bits-octets (run-alloc-bits run)) data)
           (push (run-buffer run) data)))
       ;; The header is padded to a page so that the first run's bytes start
@@ -529,7 +533,8 @@ from the planned address BASE. Return a plist of what was written."
         (let ((ptes (loop repeat npages
                           collect (prog1 (list (ash (octets-word pages index) -1)
                                                (logbitp 0 (octets-word pages index))
-                                               (octets-word pages (1+ index)))
+                                               (logandc2 (octets-word pages (1+ index)) 7)
+                                               (logand (octets-word pages (1+ index)) 7))
                                     (incf index 2)))))
           (push (list type base nbytes npages nobjects ptes position) runs))))
     (setf position (* (ceiling (* index +word-bytes+) +page-bytes+) +page-bytes+))
