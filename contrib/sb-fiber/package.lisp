@@ -86,6 +86,8 @@
    #:seal-fragment
    #:map-fragment-members
    #:activate-fragment-file
+   #:*fragment-namer*
+   #:*fragment-resolver*
    #:heap-released-p
    #:current-heap
    #:object-heap

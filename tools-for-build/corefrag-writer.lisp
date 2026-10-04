@@ -223,9 +223,18 @@
         (simple-vector
          (loop for i from sb-vm:vector-data-offset below nwords do (forward i)))
         (sb-kernel:code-component
-         ;; The boxed header, then each simple-fun's self word, which is
-         ;; the absolute address of its first instruction.
+         ;; The boxed header; the jump table, whose entries are absolute
+         ;; addresses of instructions in this code object, after the word
+         ;; that holds their count; then each simple-fun's self word, the
+         ;; absolute address of its first instruction.
          (loop for i from 1 below (sb-kernel:code-header-words x) do (forward i))
+         (let ((table (sb-kernel:code-header-words x)))
+           (loop for i from 1 below (ldb (byte 14 0) (word-at table))
+                 do (let ((w (word-at (+ table i))))
+                      (unless (zerop w)
+                        (set-word (+ table i)
+                                  (or (forward-code-address layout w)
+                                      (fail "jump table entry ~X of ~S points outside it" w x)))))))
          (let ((old-raw (- (sb-kernel:get-lisp-obj-address x) sb-vm:other-pointer-lowtag)))
            (dotimes (k (sb-kernel:code-n-entries x))
              (let* ((fun (sb-kernel:%code-entry-point x k))
@@ -332,11 +341,12 @@
 
 ;;; A reference to X as the activator reads it: a member by its planned
 ;;; address; a symbol, string, number or character as itself; a list
-;;; element by element; a package or fdefn by name; a ctype by its
-;;; specifier and a source location by its parts, derived state the
-;;; activator rebuilds; any other object of the core by its address, the
-;;; same in a process started from this core; and anything else by its
-;;; type alone, which the activator cannot resolve.
+;;; element by element; a package, fdefn, classoid or layout by name; a
+;;; ctype by its specifier and a source location by its parts, derived
+;;; state the activator rebuilds; an object the application names through
+;;; SB-FIBER:*FRAGMENT-NAMER* by that name; any other object of the core
+;;; by its address, the same in a process started from this core; and
+;;; anything else by its type alone, which the activator cannot resolve.
 (defun object-reference (layout x)
   (let ((new (and (not (sb-int:fixnump x)) (not (characterp x))
                   (forward-address layout (sb-kernel:get-lisp-obj-address x)))))
@@ -348,6 +358,11 @@
            (list :global :fdefn (object-reference layout (sb-kernel:fdefn-name x))))
           ((typep x 'sb-kernel:classoid)
            (list :global :classoid (object-reference layout (sb-kernel:classoid-name x))))
+          ((typep x 'sb-kernel:layout)
+           (list :global :layout
+                 (object-reference layout (sb-kernel:classoid-name (sb-kernel:layout-classoid x)))))
+          ((and sb-fiber:*fragment-namer* (funcall sb-fiber:*fragment-namer* x))
+           (list :global :named (funcall sb-fiber:*fragment-namer* x)))
           ((typep x 'sb-kernel:ctype)
            (list :global :type (object-reference layout (sb-kernel:type-specifier x))))
           ((typep x 'sb-c:definition-source-location)
@@ -357,7 +372,28 @@
                  (object-reference layout (sb-c::definition-source-location-plist x))))
           ((core-object-p x)
            (list :global :address (sb-kernel:get-lisp-obj-address x) (princ-to-string (type-of x))))
+          ((value-symbol x)
+           (list :global :value (object-reference layout (value-symbol x))))
           (t (list :global :unnamed (princ-to-string (type-of x)))))))
+
+;;; The symbol whose global value is X, for an object that is reached that
+;;; way, as a module's registries and tables are: the activating process
+;;; takes the value of the same symbol.  The table is built once per
+;;; writer run, over every symbol with a global value that is an object
+;;; outside the fragment.
+(defvar *value-symbols* nil)
+(defun value-symbol (x)
+  (unless *value-symbols*
+    (let ((table (make-hash-table :test 'eq)))
+      (do-all-symbols (symbol)
+        ;; A special bound only in threads has no global value.
+        (let ((value (handler-case (sb-ext:symbol-global-value symbol)
+                       (unbound-variable () nil))))
+          (unless (or (null value) (sb-int:fixnump value) (symbolp value) (characterp value)
+                      (gethash value table))
+            (setf (gethash value table) symbol))))
+      (setf *value-symbols* table)))
+  (values (gethash x *value-symbols*)))
 
 (defun exports (layout)
   (let ((result '()))
@@ -522,6 +558,7 @@
 (defun write-fragment (recorder pathname &key base (name "fragment"))
   "Write the fragment RECORDER was recording, sealed, to PATHNAME, laid out
 from the planned address BASE. Return a plist of what was written."
+  (setf *value-symbols* nil)
   (let* ((heap-id (sb-vm::fragment-recorder-heap-id recorder))
          (members (collect-members recorder))
          (base (or base (fail "a planned base address is required")))

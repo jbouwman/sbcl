@@ -1077,11 +1077,23 @@ into a local heap, and pointers between different local heaps."
                   (read-from-string
                    (sb-ext:octets-to-string octets :external-format :utf-8)))))))))))
 
+(defvar *fragment-namer* nil
+  "A function of one argument, or NIL: called by the fragment writer on an
+object outside the fragment that it cannot name itself, it returns a
+readable form naming the object for *FRAGMENT-RESOLVER*, or NIL.")
+
+(defvar *fragment-resolver* nil
+  "A function of one argument, or NIL: called when a fragment is activated
+with a form *FRAGMENT-NAMER* returned in the builder, it returns the object
+the form names in this process.")
+
 ;;; The object a reference of the writer's names: a member by its planned
 ;;; address, now mapped; a global symbol, string, number or character as
-;;; itself; a list element by element; a global package or fdefn by name;
-;;; a ctype by its specifier and a source location by its parts, rebuilt;
-;;; an object of the core by its address, which this process shares.
+;;; itself; a list element by element; a global package, fdefn, classoid
+;;; or layout by name; a ctype by its specifier and a source location by
+;;; its parts, rebuilt; an object the application named, through
+;;; *FRAGMENT-RESOLVER*; an object of the core by its address, which this
+;;; process shares.
 (defun fragment-reference-object (reference)
   (ecase (first reference)
     (:member (sb-kernel:%make-lisp-obj (second reference)))
@@ -1095,6 +1107,12 @@ into a local heap, and pointers between different local heaps."
                            (error "no package ~A" (first parts))))
              (:fdefn (sb-kernel:find-or-create-fdefn (fragment-reference-object (first parts))))
              (:classoid (sb-kernel:find-classoid (fragment-reference-object (first parts))))
+             (:layout (sb-kernel:find-layout (fragment-reference-object (first parts))))
+             (:value (sb-ext:symbol-global-value (fragment-reference-object (first parts))))
+             (:named (if *fragment-resolver*
+                         (funcall *fragment-resolver* (first parts))
+                         (error "a fragment refers to ~S by a name, and no resolver is set"
+                                (first parts))))
              (:type (sb-kernel:specifier-type (fragment-reference-object (first parts))))
              (:source-location
               (destructuring-bind (namestring indices plist) parts
@@ -1205,8 +1223,23 @@ into a local heap, and pointers between different local heaps."
              (sb-int:clear-info-values (object (first args)) (object (second args)))
              (done))
             (:register-package
-             (sb-int:with-system-mutex (sb-impl::*package-table-lock*)
-               (sb-impl::package-registry-update (object (first args)) (object (second args))))
+             (let ((package (object (first args))))
+               (sb-int:with-system-mutex (sb-impl::*package-table-lock*)
+                 ;; The fragment's symbols carry the package id the builder
+                 ;; gave the package, so the package keeps it: its slot in
+                 ;; the id table must be free here, or already its own.
+                 (let ((id (sb-impl::package-id package)))
+                   (when id
+                     (let ((vector sb-impl::*id->package*))
+                       (when (>= id (length vector))
+                         (let ((new (make-array (1+ id) :initial-element nil)))
+                           (replace new vector)
+                           (setf sb-impl::*id->package* new vector new)))
+                       (let ((holder (aref vector id)))
+                         (unless (or (null holder) (eq holder package))
+                           (error "package id ~D of ~A is held by ~A" id package holder)))
+                       (setf (aref vector id) package))))
+                 (sb-impl::package-registry-update package (object (second args)))))
              (done))
             (:intern
              (let ((package (object (first args))) (symbol (object (second args))))

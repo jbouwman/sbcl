@@ -353,6 +353,7 @@
 (defun norm (p) (+ (abs (point-x p)) (abs (point-y p))))
 (defun twice-norm (p) (* 2 (norm p)))
 (defun cl-user::activated-norm (p) (norm p))
+(defun pick (&key (a 0) (b 0) (c 0) (d 0) (e 0) (f 0) (g 0) (h 0)) (+ a b c d e f g h))
 (defvar *p* (make-point :x -3 :y 4))
 " s))
         (compile-file source :output-file fasl)
@@ -363,6 +364,10 @@
             (with-fragment-recorder (recorder)
               (with-heap (heap) (load stream))))
           (assert-all-accounted recorder)
+          (assert (> (sb-kernel:code-jump-table-words
+                      (sb-kernel:fun-code-header
+                       (symbol-function (find-symbol "PICK" "BUILD-HEAP-ACTIVATED"))))
+                     1))
           (let* ((count (seal-fragment recorder))
                  (base (+ sb-vm:dynamic-space-start (* 3 (floor (sb-ext:dynamic-space-size) 4))))
                  (written (funcall (intern "WRITE-FRAGMENT" "SB-COREFRAG-WRITER") recorder file :base base))
@@ -385,8 +390,8 @@
             ;; record, replayed.  It prints the run count, the member count it
             ;; sees, the three results, and the counts of sites patched and
             ;; definitions installed.
-            (let* ((forms (format nil "(multiple-value-bind (runs bytes sites definitions) (sb-fiber:activate-fragment-file ~S) (let ((n 0) (p (sb-ext:symbol-global-value (sb-kernel:%make-lisp-obj ~D)))) (sb-vm:map-allocated-objects (lambda (x type size) (declare (ignore type size)) (let ((a (sb-kernel:get-lisp-obj-address x))) (when (and (>= a ~D) (< a (+ ~D bytes))) (incf n)))) :dynamic) (format t \"~~&RESULT ~~D ~~D ~~D ~~D ~~D ~~D ~~D~~%\" runs n (funcall (sb-kernel:%make-lisp-obj ~D) p) (funcall (symbol-function (sb-kernel:%make-lisp-obj ~D)) p) (funcall 'cl-user::activated-norm p) sites definitions)))"
-                                  (namestring file) p base base twice norm))
+            (let* ((forms (format nil "(multiple-value-bind (runs bytes sites definitions) (sb-fiber:activate-fragment-file ~S) (let ((n 0) (p (sb-ext:symbol-global-value (sb-kernel:%make-lisp-obj ~D)))) (sb-vm:map-allocated-objects (lambda (x type size) (declare (ignore type size)) (let ((a (sb-kernel:get-lisp-obj-address x))) (when (and (>= a ~D) (< a (+ ~D bytes))) (incf n)))) :dynamic) (format t \"~~&RESULT ~~D ~~D ~~D ~~D ~~D ~~D ~~D ~~D~~%\" runs n (funcall (sb-kernel:%make-lisp-obj ~D) p) (funcall (symbol-function (sb-kernel:%make-lisp-obj ~D)) p) (funcall 'cl-user::activated-norm p) (funcall (find-symbol \"PICK\" (symbol-package (sb-kernel:%make-lisp-obj ~D))) :g 7) sites definitions)))"
+                                  (namestring file) p base base twice norm norm))
                    (output (with-output-to-string (s)
                              (run-program sb-ext:*runtime-pathname*
                                           (list "--core" (namestring sb-ext:*core-pathname*)
@@ -396,9 +401,9 @@
                                           :output s :error s :search nil)))
                    (start (search "RESULT " output)))
               (unless start (error "the child did not report: ~A" output))
-              (destructuring-bind (runs seen twice-result norm-result by-name-result sites definitions)
+              (destructuring-bind (runs seen twice-result norm-result by-name-result picked sites definitions)
                   (handler-case (with-input-from-string (s output :start (+ start 7))
-                                  (let ((v (loop repeat 7 collect (read s))))
+                                  (let ((v (loop repeat 8 collect (read s))))
                                     (unless (every (function integerp) v) (error "not integers"))
                                     v))
                     (error () (error "the child reported ~A" output)))
@@ -407,6 +412,9 @@
                 (assert (= twice-result 14))
                 (assert (= norm-result 7))
                 (assert (= by-name-result 7))
+                ;; PICK parses its keywords through a jump table of absolute
+                ;; addresses in its code object, which the writer relocated.
+                (assert (= picked 7))
                 (assert (= sites (getf written :linkage-sites)))
                 (assert (plusp definitions))))))))))
 
