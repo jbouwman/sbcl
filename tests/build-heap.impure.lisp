@@ -322,7 +322,7 @@
                  (base (+ sb-vm:dynamic-space-start (* 3 (floor (sb-ext:dynamic-space-size) 4))))
                  (written (funcall (intern "WRITE-FRAGMENT" "SB-COREFRAG-WRITER") recorder file :base base))
                  (verified (funcall (intern "VERIFY-FRAGMENT-FILE" "SB-COREFRAG-WRITER") file)))
-            (assert (= (getf written :members) count))
+            (assert (= (- (getf written :members) (getf written :adopted)) count))
             (assert (= (getf verified :members) count))
             (assert (= (getf verified :pointers) (getf written :pointers)))
             ;; A run per page type, and the 4000-element vector on pages of
@@ -375,7 +375,7 @@
                  (twice (car (last (find-if (lambda (e) (and (eq (first e) :function) (string= (second e) "TWICE-NORM"))) exports))))
                  (norm (car (last (find-if (lambda (e) (and (eq (first e) :symbol) (string= (second e) "NORM"))) exports))))
                  (p (car (last (find-if (lambda (e) (and (eq (first e) :symbol) (string= (second e) "*P*"))) exports)))))
-            (assert (= (getf written :members) count))
+            (assert (= (- (getf written :members) (getf written :adopted)) count))
             ;; Only a target with linkage space has linkage sites.
             (when (member :linkage-space sb-impl:+internal-features+)
               (assert (plusp (getf written :linkage-sites))))
@@ -457,7 +457,7 @@
           (let* ((count (seal-fragment recorder))
                  (base (+ sb-vm:dynamic-space-start (* 3 (floor (sb-ext:dynamic-space-size) 4))))
                  (written (funcall (intern "WRITE-FRAGMENT" "SB-COREFRAG-WRITER") recorder file :base base)))
-            (assert (= (getf written :members) count))
+            (assert (= (- (getf written :members) (getf written :adopted)) count))
             (let* ((forms (format nil "(multiple-value-bind (runs bytes sites replayed skipped) (sb-fiber:activate-fragment-file ~S) (declare (ignore runs bytes sites)) (let* ((package (find-package \"BUILD-HEAP-REPLAYED\")) (make-point (and package (find-symbol \"MAKE-POINT\" package))) (p (and make-point (funcall make-point :x -3 :y 4)))) (format t \"~~&RESULT ~~S~~%\" (list replayed skipped (and package t) (and p (funcall (find-symbol \"NORM\" package) p)) cl-user::*replayed-value* (and (fboundp '(setf cl-user::replayed-norm)) t) (and (find-symbol \"BUILD-HEAP-REPLAYED-KEYWORD\" \"KEYWORD\") t) (and p (princ-to-string p)) (and p (funcall (find-symbol \"AREA\" package) p)) (and package (typep (make-condition (find-symbol \"REPLAYED-ERROR\" package)) 'error)) (sb-kernel:type-specifier (sb-int:info :function :type 'cl-user::replayed-norm)) (and package (typep 3 (find-symbol \"SMALL\" package))) (and package (mapcar (function car) (package-local-nicknames package)))))))"
                                   (namestring file)))
                    (output (with-output-to-string (s)

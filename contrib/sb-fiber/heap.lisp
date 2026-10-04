@@ -1089,8 +1089,8 @@ the form names in this process.")
 
 ;;; The object a reference of the writer's names: a member by its planned
 ;;; address, now mapped; a global symbol, string, number or character as
-;;; itself; a list element by element; a global package, fdefn, classoid
-;;; or layout by name; a ctype by its specifier and a source location by
+;;; itself; a list element by element, a dotted pair by its halves; a
+;;; global package, fdefn, classoid or layout by name; a ctype by its specifier and a source location by
 ;;; its parts, rebuilt; an object the application named, through
 ;;; *FRAGMENT-RESOLVER*; an object of the core by its address, which this
 ;;; process shares.
@@ -1098,6 +1098,8 @@ the form names in this process.")
   (ecase (first reference)
     (:member (sb-kernel:%make-lisp-obj (second reference)))
     (:list (mapcar #'fragment-reference-object (second reference)))
+    (:cons (cons (fragment-reference-object (second reference))
+                 (fragment-reference-object (third reference))))
     (:global
      (if (null (cddr reference))
          (second reference)
@@ -1105,6 +1107,10 @@ the form names in this process.")
            (ecase kind
              (:package (or (find-package (first parts))
                            (error "no package ~A" (first parts))))
+             (:symbol (let ((package (and (second parts) (fragment-reference-object (second parts)))))
+                        (if package
+                            (intern (first parts) package)
+                            (make-symbol (first parts)))))
              (:fdefn (sb-kernel:find-or-create-fdefn (fragment-reference-object (first parts))))
              (:classoid (sb-kernel:find-classoid (fragment-reference-object (first parts))))
              (:layout (sb-kernel:find-layout (fragment-reference-object (first parts))))
@@ -1114,6 +1120,8 @@ the form names in this process.")
                          (error "a fragment refers to ~S by a name, and no resolver is set"
                                 (first parts))))
              (:type (sb-kernel:specifier-type (fragment-reference-object (first parts))))
+             (:key-info (sb-kernel::make-key-info (fragment-reference-object (first parts))
+                                                 (fragment-reference-object (second parts))))
              (:source-location
               (destructuring-bind (namestring indices plist) parts
                 (let ((plist (fragment-reference-object plist)))

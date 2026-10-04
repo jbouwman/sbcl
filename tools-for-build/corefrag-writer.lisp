@@ -120,6 +120,69 @@
     (sb-fiber:map-fragment-members (lambda (x) (push x members)) recorder)
     (nreverse members)))
 
+;;; True of X when OBJECT-REFERENCE can name it to the activator without
+;;; its being a member: as itself, by name, by its parts, or as an object
+;;; of the core by its address.
+(defun nameable-p (x)
+  (or (sb-int:fixnump x) (characterp x) (symbolp x) (stringp x) (numberp x) (consp x)
+      (packagep x)
+      (typep x '(or sb-kernel:fdefn sb-kernel:classoid sb-kernel:layout sb-kernel::key-info
+                 sb-kernel:ctype sb-c:definition-source-location))
+      (and sb-fiber:*fragment-namer* (funcall sb-fiber:*fragment-namer* x))
+      (core-object-p x)
+      (value-symbol x)))
+
+;;; The objects outside the fragment and the core that MEMBERS refer to,
+;;; directly or through one another, and that OBJECT-REFERENCE could not
+;;; name: taken into the fragment as members.  They are the builder's,
+;;; made outside the build heap on the fragment's behalf (a package's
+;;; table vectors, say), and their addresses mean nothing elsewhere.  An
+;;; object of the build heap that is not a member is not taken: the
+;;; trace left it out, and the dangling check reports it.
+;;; True of X when it is an immediate or a pointer into a space of this
+;;; process: the walker hands back a raw word now and then, which must
+;;; not be read as an object.
+(defun plausible-object-p (x)
+  (let ((a (sb-kernel:get-lisp-obj-address x)))
+    (or (sb-int:fixnump x) (characterp x)
+        (and (pointerp a)
+             (or (<= sb-vm:dynamic-space-start a (+ sb-vm:dynamic-space-start (sb-ext:dynamic-space-size)))
+                 (<= sb-vm:read-only-space-start a (sb-sys:sap-int sb-vm:*read-only-space-free-pointer*))
+                 (<= sb-vm:static-space-start a (sb-sys:sap-int sb-vm:*static-space-free-pointer*)))))))
+
+(defvar *walking* nil)
+(defun adopt-unnamed (members)
+  (let ((member-p (make-hash-table :test 'eq))
+        (adopted '())
+        (queue '()))
+    (dolist (m members) (setf (gethash m member-p) t))
+    (flet ((consider (x)
+             (unless (plausible-object-p x)
+               (when (eq *verbose* :objects)
+                 (format *trace-output* ";;   skip word ~X in ~S~%" (sb-kernel:get-lisp-obj-address x) (type-of *walking*)))
+               (return-from consider))
+             ;; Of the global heap: an object of another build heap is another
+             ;; fragment's, and one of this heap is the trace's business.
+             (when (and (not (gethash x member-p))
+                        (zerop (sb-vm::object-owner x)))
+               (cond ((consp x)
+                      ;; Copied by structure wherever it is referred to; what
+                      ;; it holds may still need adopting.
+                      (setf (gethash x member-p) t)
+                      (push x queue))
+                     ((not (nameable-p x))
+                      (setf (gethash x member-p) t)
+                      (push x adopted)
+                      (push x queue)
+                      (when (eq *verbose* :objects)
+                        (format *trace-output* ";;   adopt ~X ~S from ~S~%" (sb-kernel:get-lisp-obj-address x) (type-of x) (type-of *walking*))))))))
+      (dolist (m members)
+        (let ((*walking* m)) (sb-vm::do-referenced-object (m consider))))
+      (loop while queue
+            do (let* ((x (pop queue)) (*walking* x))
+                 (sb-vm::do-referenced-object (x consider)))))
+    (nreverse adopted)))
+
 ;;; Assign every member a planned address: the small objects of each page
 ;;; type packed into one run per type, in the order cons, mixed, code,
 ;;; and each large object on pages of its own after them.
@@ -362,8 +425,21 @@
   (let ((new (and (not (sb-int:fixnump x)) (not (characterp x))
                   (forward-address layout (sb-kernel:get-lisp-obj-address x)))))
     (cond (new (list :member new))
-          ((or (symbolp x) (stringp x) (numberp x) (characterp x)) (list :global x))
-          ((consp x) (list :list (mapcar (lambda (e) (object-reference layout e)) x)))
+          ((symbolp x)
+           ;; By name where the reader will find it: a symbol accessible in a
+           ;; package of the core.  Otherwise by name and package, which the
+           ;; activator interns, or makes when the symbol has none.
+           (let ((package (symbol-package x)))
+             (if (and package (core-object-p package)
+                      (eq (find-symbol (symbol-name x) package) x))
+                 (list :global x)
+                 (list :global :symbol (symbol-name x)
+                       (and package (object-reference layout package))))))
+          ((or (stringp x) (numberp x) (characterp x)) (list :global x))
+          ((consp x)
+           (if (sb-int:proper-list-p x)
+               (list :list (mapcar (lambda (e) (object-reference layout e)) x))
+               (list :cons (object-reference layout (car x)) (object-reference layout (cdr x)))))
           ((packagep x) (list :global :package (package-name x)))
           ((typep x 'sb-kernel:fdefn)
            (list :global :fdefn (object-reference layout (sb-kernel:fdefn-name x))))
@@ -374,6 +450,10 @@
                  (object-reference layout (sb-kernel:classoid-name (sb-kernel:layout-classoid x)))))
           ((and sb-fiber:*fragment-namer* (funcall sb-fiber:*fragment-namer* x))
            (list :global :named (funcall sb-fiber:*fragment-namer* x)))
+          ((typep x 'sb-kernel::key-info)
+           (list :global :key-info
+                 (object-reference layout (sb-kernel::key-info-name x))
+                 (object-reference layout (sb-kernel::key-info-type x))))
           ((typep x 'sb-kernel:ctype)
            (list :global :type (object-reference layout (sb-kernel:type-specifier x))))
           ((typep x 'sb-c:definition-source-location)
@@ -471,7 +551,8 @@
                                                (list offset kind (object-reference layout fname)))))
                                          (sort (copy-list code-sites) #'< :key #'first)))
                            result))
-                    ((sb-c:unpack-code-fixup-locs (sb-vm::%code-fixups x))
+                    ((and (= (sb-vm::object-owner x) (layout-heap-id layout))
+                          (sb-c:unpack-code-fixup-locs (sb-vm::%code-fixups x)))
                      (fail "~S references linkage cells but no site was noted for it: was it loaded with the recorder bound?" x))))))))
     (values (nreverse result) nsites)))
 
@@ -572,8 +653,9 @@ from the planned address BASE. Return a plist of what was written."
   (setf *value-symbols* nil)
   (let* ((heap-id (sb-vm::fragment-recorder-heap-id recorder))
          (members (collect-members recorder))
+         (adopted (progn (stage "adopt") (adopt-unnamed members)))
          (base (or base (fail "a planned base address is required")))
-         (layout (progn (stage "layout") (lay-out members base heap-id)))
+         (layout (progn (stage "layout") (lay-out (append members adopted) base heap-id)))
          (stats (progn (stage "copy and relocate") (copy-and-relocate layout))))
     (when (stats-dangling stats)
       (fail "~D references from members to objects of the build heap that are not members, such as ~{~S~^, ~}"
@@ -600,6 +682,7 @@ from the planned address BASE. Return a plist of what was written."
                                                            (layout-runs layout))
                                              :pointers (stats-pointers stats)
                                              :imports (length (stats-imports stats))
+                                             :adopted (length adopted)
                                              :linkage-sites (car linkage)
                                              :written (get-universal-time))))
            (sections (list (cons +section-pages+ pages) (cons +section-pointer-map+ pointer-map)
@@ -635,6 +718,7 @@ from the planned address BASE. Return a plist of what was written."
             :runs (length (layout-runs layout))
             :bytes (reduce #'+ (layout-runs layout) :key #'run-nbytes)
             :pointers (stats-pointers stats) :imports (length (stats-imports stats))
+            :adopted (length adopted)
             :linkage-sites (car linkage)))))
 
 ;;;; Reading back
