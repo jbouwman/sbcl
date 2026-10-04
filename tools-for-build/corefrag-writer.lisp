@@ -56,6 +56,12 @@
 ;;; three bits being flags, of a symbol and of an fdefn alike.  Zero on a
 ;;; target without linkage space.
 (defconstant +fname-index-mask+ (ash (1- (ash 1 sb-vm:n-linkage-index-bits)) 3))
+;;; The slot of an fdefn's raw entry address, on a target without linkage
+;;; space, where the symbol exists.
+(defvar *fdefn-raw-addr-slot*
+  (let ((slot (find-symbol "FDEFN-RAW-ADDR-SLOT" "SB-VM")))
+    (and (not (member :linkage-space sb-impl:+internal-features+))
+         slot (boundp slot) (symbol-value slot))))
 
 (define-condition fragment-file-error (error)
   ((message :initarg :message :reader fragment-file-error-message))
@@ -273,7 +279,12 @@
          (forward sb-vm:symbol-info-slot) (forward sb-vm:symbol-name-slot))
         (sb-kernel:fdefn
          (set-word sb-vm:symbol-hash-slot (logandc2 (word-at sb-vm:symbol-hash-slot) +fname-index-mask+))
-         (forward sb-vm:fdefn-name-slot) (forward sb-vm:fdefn-fun-slot))
+         (forward sb-vm:fdefn-name-slot) (forward sb-vm:fdefn-fun-slot)
+         ;; Without linkage space the fdefn also holds the raw address of its
+         ;; function's entry, or of a trampoline of the core.
+         (when *fdefn-raw-addr-slot*
+           (let ((new (forward-code-address layout (word-at *fdefn-raw-addr-slot*))))
+             (when new (set-word *fdefn-raw-addr-slot* new)))))
         (sb-ext:weak-pointer
          (forward sb-vm:weak-pointer-value-slot))
         ((and array (not simple-array)) ; an array header: data vector, displaced-from
