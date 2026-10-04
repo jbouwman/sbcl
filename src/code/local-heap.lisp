@@ -301,7 +301,13 @@ strict heap. A CONTINUE restart performs the store anyway.")
   ;; The one :INTERNED record for each interning table, by table.
   (interned nil :type list)
   ;; Escapes nothing accounts for, as (object value store-pc), newest first.
-  (unaccounted nil :type list))
+  (unaccounted nil :type list)
+  ;; The linkage cell references the loader patched into the fragment's
+  ;; code, by code address: (offset kind index), newest first.  The table
+  ;; and its entries are in the global heap and hold no pointer into the
+  ;; build heap, so that the fragment carries none of it.
+  (linkage-sites (sb-kernel::with-global-heap (make-hash-table :test 'eql))
+   :type hash-table :read-only t))
 
 (defun make-fragment-recorder ()
   "Make the recorder for a fragment built in the build heap installed on
@@ -317,6 +323,21 @@ this thread."
 (declaim (inline recording-p))
 (defun recording-p (recorder)
   (= (current-local-heap-address) (fragment-recorder-heap-address recorder)))
+
+;;; Note that the loader patched a reference to linkage cell INDEX into
+;;; CODE, an object of the fragment being built, at byte OFFSET of its
+;;; instructions with a fixup of KIND.  The cells are the builder's:
+;;; activating the fragment resolves each name again and patches the
+;;; reference, so the sites are kept with the recorder.
+(defun note-linkage-site (code offset kind index)
+  (let ((recorder sb-kernel::*fragment-recorder*))
+    (when (and recorder
+               (recording-p recorder)
+               (= (object-owner code) (fragment-recorder-heap-id recorder)))
+      (let ((sites (fragment-recorder-linkage-sites recorder))
+            (key (get-lisp-obj-address code)))
+        (sb-kernel::with-global-heap
+          (push (list offset kind index) (gethash key sites)))))))
 
 (defun sb-kernel::call-with-fragment-record (kind target args-fun body-fun)
   (declare (function args-fun body-fun) (dynamic-extent args-fun body-fun))

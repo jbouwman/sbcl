@@ -75,6 +75,7 @@
    #:with-fragment-recorder
    #:with-fragment-record
    #:fragment-records
+   #:fragment-linkage-sites
    #:fragment-record-kind
    #:fragment-record-target
    #:fragment-record-args
@@ -84,6 +85,7 @@
    #:fragment-cache-escapes
    #:seal-fragment
    #:map-fragment-members
+   #:activate-fragment-file
    #:heap-released-p
    #:current-heap
    #:object-heap
