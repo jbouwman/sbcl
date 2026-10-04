@@ -85,14 +85,18 @@
                 (unless (eq epoch *fname-map-observed-gc-epoch*) ; Rebuild the freelist as needed
                   (setf *fname-map-observed-gc-epoch* epoch
                         *fname-map-available-elts*
-                        (let ((n -1))
-                          (collect ((result))
-                            (dovector (inner *linkage-name-map* (result))
-                              (unless (eql inner 0)
-                                (dotimes (j (weak-vector-len inner))
-                                  (incf n)
-                                  (when (null (weak-vector-ref inner j))
-                                    (result n)))))))))
+                        ;; State of this image, consed in the global heap so
+                        ;; that a fragment being built neither carries nor
+                        ;; records it.
+                        (sb-kernel::with-global-heap
+                          (let ((n -1))
+                            (collect ((result))
+                              (dovector (inner *linkage-name-map* (result))
+                                (unless (eql inner 0)
+                                  (dotimes (j (weak-vector-len inner))
+                                    (incf n)
+                                    (when (null (weak-vector-ref inner j))
+                                      (result n))))))))))
                 (when (or *fname-map-available-elts* (typep *next-fname-index* 'linkage-index))
                   (if *fname-map-available-elts*
                       (setq index (pop *fname-map-available-elts*))

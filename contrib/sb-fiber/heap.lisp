@@ -1040,8 +1040,13 @@ into a local heap, and pointers between different local heaps."
 ;;; section.  The sections read here are printed forms.
 (defconstant +fragment-magic+ #x53424652)
 (defconstant +fragment-version+ 2)
+(defconstant +fragment-section-imports+ 5)
 (defconstant +fragment-section-records+ 6)
 (defconstant +fragment-section-linkage+ 8)
+
+(define-alien-routine ("corefrag_patch_word" %patch-fragment-word) void
+  (address unsigned-long)
+  (value unsigned-long))
 
 (defun read-fragment-word (stream)
   (let ((word 0))
@@ -1074,16 +1079,58 @@ into a local heap, and pointers between different local heaps."
 
 ;;; The object a reference of the writer's names: a member by its planned
 ;;; address, now mapped; a global symbol, string, number or character as
-;;; itself; a global fdefn or package by name.
+;;; itself; a list element by element; a global package or fdefn by name;
+;;; a ctype by its specifier and a source location by its parts, rebuilt;
+;;; an object of the core by its address, which this process shares.
 (defun fragment-reference-object (reference)
   (ecase (first reference)
     (:member (sb-kernel:%make-lisp-obj (second reference)))
-    (:global (destructuring-bind (x &optional (y nil y-p)) (rest reference)
-               (cond ((not y-p) x)
-                     ((eq x :fdefn) (sb-kernel:find-or-create-fdefn y))
-                     ((eq x :package) (or (find-package y) (error "no package ~A" y)))
-                     (t (error "a fragment record refers to ~A, which has no name" y)))))
-    (:list (mapcar #'fragment-reference-object (second reference)))))
+    (:list (mapcar #'fragment-reference-object (second reference)))
+    (:global
+     (if (null (cddr reference))
+         (second reference)
+         (destructuring-bind (kind &rest parts) (rest reference)
+           (ecase kind
+             (:package (or (find-package (first parts))
+                           (error "no package ~A" (first parts))))
+             (:fdefn (sb-kernel:find-or-create-fdefn (fragment-reference-object (first parts))))
+             (:classoid (sb-kernel:find-classoid (fragment-reference-object (first parts))))
+             (:type (sb-kernel:specifier-type (fragment-reference-object (first parts))))
+             (:source-location
+              (destructuring-bind (namestring indices plist) parts
+                (let ((plist (fragment-reference-object plist)))
+                  (if plist
+                      (sb-c::%make-full-definition-source-location namestring indices plist)
+                      (sb-c::%make-basic-definition-source-location namestring indices)))))
+             (:address (sb-kernel:%make-lisp-obj (first parts)))
+             (:unnamed (error "a fragment record refers to an object of type ~A ~
+                               that the file does not name" (first parts)))))))))
+
+;;; Resolve the fragment's imports: the words of its objects that refer to
+;;; objects outside it.  An object of the core is at the same address in
+;;; this process and needs nothing; any other is resolved from the
+;;; reference the writer made and stored in the word, fdefns last, since
+;;; an fdefn's name may be a list of the fragment whose words are being
+;;; resolved.  IMPORTS is the file's imports section: per word its
+;;; address and the reference.  Returns the number of words stored.
+(defun resolve-fragment-imports (imports)
+  (let ((resolved 0))
+    (flet ((resolve (import)
+             (destructuring-bind (address reference) import
+               (let ((object (fragment-reference-object reference)))
+                 (sb-sys:with-pinned-objects (object)
+                   (%patch-fragment-word address (sb-kernel:get-lisp-obj-address object)))
+                 (incf resolved))))
+           (fdefn-p (import)
+             (let ((reference (second import)))
+               (and (eq (first reference) :global) (eq (second reference) :fdefn))))
+           (core-p (import)
+             (let ((reference (second import)))
+               (and (eq (first reference) :global) (eq (second reference) :address)))))
+      (dolist (import imports)
+        (unless (or (core-p import) (fdefn-p import)) (resolve import)))
+      (dolist (import imports resolved)
+        (when (fdefn-p import) (resolve import))))))
 
 ;;; Resolve the names the fragment's code calls through linkage cells and
 ;;; patch each reference.  The builder assigned the cells it had free;
@@ -1093,7 +1140,7 @@ into a local heap, and pointers between different local heaps."
 ;;; collector follows to the names, is written again with the new
 ;;; indices.  LINKAGE is the file's linkage section: per code object its
 ;;; address, then per site the offset of the reference, the fixup kind
-;;; that wrote it, and the address of the name.
+;;; that wrote it, and a reference to the name.
 #+linkage-space
 (defun relink-fragment (linkage)
   (let ((nsites 0))
@@ -1103,8 +1150,8 @@ into a local heap, and pointers between different local heaps."
               (callees '()))
           (sb-sys:with-pinned-objects (code)
             (dolist (site sites)
-              (destructuring-bind (offset kind name-address) site
-                (let* ((fname (sb-kernel:%make-lisp-obj name-address))
+              (destructuring-bind (offset kind name) site
+                (let* ((fname (fragment-reference-object name))
                        (index (sb-int:ensure-linkage-index fname)))
                   (sb-vm:fixup-code-object code offset index kind :linkage-cell)
                   (unless (sb-int:permanent-fname-p
@@ -1123,34 +1170,136 @@ into a local heap, and pointers between different local heaps."
     (error "the fragment references linkage cells, which this runtime has none of"))
   0)
 
-;;; Replay the fragment's records.  A :SET-FUNCTION record names a
-;;; function name, of the fragment or of this image, and the function it
-;;; held when the fragment was sealed, which FSET installs again: in the
-;;; name, and in its linkage cell when it has one.  The other kinds are
-;;; not replayed yet.  Returns the number of definitions installed and
-;;; the number of records of other kinds.
+;;; Replay the fragment's records in order, each through the definer
+;;; whose effect it noted, with the objects the file refers to.  A record
+;;; that carries a value installs what its target held when the fragment
+;;; was sealed.  Returns the number of records replayed and an alist of
+;;; the kinds not replayed with their counts: the kinds whose replay is
+;;; not written yet, and those whose value the target did not hold.
 (defun replay-fragment-records (records)
-  (let ((definitions 0) (others 0))
-    (dolist (record records (values definitions others))
+  (let ((replayed 0) (skipped '()))
+    (dolist (record records (values replayed (nreverse skipped)))
       (destructuring-bind (kind target args values) record
-        (declare (ignore args))
-        (case kind
-          (:set-function
-           (when values
-             (sb-int:fset (fragment-reference-object target)
-                          (fragment-reference-object (first values)))
-             (incf definitions)))
-          (t (incf others)))))))
+        (flet ((object (reference) (fragment-reference-object reference))
+               (done () (incf replayed))
+               (skip ()
+                 (let ((entry (assoc kind skipped)))
+                   (if entry (incf (cdr entry)) (push (cons kind 1) skipped)))))
+          (case kind
+            (:set-function
+             (if values
+                 (progn (sb-int:fset (object target) (object (first values))) (done))
+                 (skip)))
+            (:set-value
+             (if values
+                 (progn (setf (sb-ext:symbol-global-value (object target)) (object (first values)))
+                        (done))
+                 (skip)))
+            (:set-info
+             (if values
+                 (progn (sb-int:set-info-value (object (first args)) (object (second args))
+                                               (object (first values)))
+                        (done))
+                 (skip)))
+            (:clear-info
+             (sb-int:clear-info-values (object (first args)) (object (second args)))
+             (done))
+            (:register-package
+             (sb-int:with-system-mutex (sb-impl::*package-table-lock*)
+               (sb-impl::package-registry-update (object (first args)) (object (second args))))
+             (done))
+            (:intern
+             (let ((package (object (first args))) (symbol (object (second args))))
+               (sb-thread:with-recursive-lock (sb-impl::*package-graph-lock*)
+                 (sb-impl::add-symbol (if (eq package (find-package "KEYWORD"))
+                                          (sb-kernel:package-external-symbols package)
+                                          (sb-kernel:package-internal-symbols package))
+                                      symbol 'intern)))
+             (done))
+            (:export (export (object (second args)) (object (first args))) (done))
+            (:unexport (unexport (object (second args)) (object (first args))) (done))
+            (:import (import (object (second args)) (object (first args))) (done))
+            (:shadowing-import (shadowing-import (object (second args)) (object (first args))) (done))
+            (:shadow (shadow (object (second args)) (object (first args))) (done))
+            (:use-package (use-package (object (second args)) (object (first args))) (done))
+            (:fdefn
+             ;; The fdefn is the fragment's, installed under its name again:
+             ;; in the symbol's info for a (SETF symbol) name, as
+             ;; FIND-OR-CREATE-FDEFN would, in the table of fancily named
+             ;; fdefns otherwise.
+             (let ((name (object (first args))))
+               (if values
+                   (let ((fdefn (object (first values))))
+                     (if (and (listp name) (listp (cdr name)) (null (cddr name))
+                              (symbolp (first name)) (symbolp (second name)))
+                         (sb-int:set-info-value
+                          name (sb-int:meta-info-number (sb-int:meta-info :function :definition))
+                          fdefn)
+                         (let ((found (sb-impl::get-fancily-named-fdefn
+                                       name (lambda (name) (declare (ignore name)) fdefn))))
+                           (unless (eq found fdefn)
+                             (error "~S already names ~S; the fragment carries ~S"
+                                    name found fdefn)))))
+                   (sb-kernel:find-or-create-fdefn name)))
+             (done))
+            (:forward-layout
+             (sb-kernel:with-world-lock ()
+               (setf (gethash (object (first args)) sb-kernel::*forward-referenced-layouts*)
+                     (object (second args))))
+             (done))
+            (:add-subclassoid
+             (sb-kernel::%add-subclassoid (object (first args)) (object (second args))
+                                          (object (third args)))
+             (done))
+            (:add-direct-subclass
+             (sb-mop:add-direct-subclass (object (first args)) (object (second args)))
+             (done))
+            (:add-direct-method
+             (sb-mop:add-direct-method (object (first args)) (object (second args)))
+             (done))
+            (:add-method
+             (let ((gf (object (first args))) (method (object (second args))))
+               ;; The method is the fragment's, and was added to this generic
+               ;; function in the builder; it is added here as new.
+               (when (eq (sb-mop:method-generic-function method) gf)
+                 (setf (sb-mop:method-generic-function method) nil))
+               (add-method gf method))
+             (done))
+            (:reinitialize-generic-function
+             (apply #'reinitialize-instance (object (first args)) (object (second args)))
+             (done))
+            (:eql-specializer
+             (if values
+                 (progn (setf (gethash (object (first args)) (object target)) (object (first values)))
+                        (done))
+                 (skip)))
+            (:interned
+             (let ((container (object target)))
+               (dolist (reference values)
+                 (let ((x (object reference)))
+                   (if (hash-table-p container)
+                       (setf (gethash (first x) container) (second x))
+                       (sb-int:hashset-insert container x)))))
+             (done))
+            (:call
+             (apply (object (first args)) (mapcar #'object (rest args)))
+             (done))
+            (:put
+             (setf (gethash (object (first args)) (object target)) (object (second args)))
+             (done))
+            (t (skip))))))))
 
 (defun activate-fragment-file (pathname)
   "Map the page runs of the fragment file at PATHNAME at their planned
 addresses and install them in the collector as pseudo-static pages; then
 resolve the names the fragment's code calls through linkage cells and
-patch the references, and replay its function definitions.  This is the
-prebound case: the file was written against this core and its planned
-pages are free; nothing is relocated and no other import is resolved.
-Returns the number of runs and the bytes mapped, the number of linkage
-references patched, and the number of definitions installed."
+patch the references, resolve its imports, and replay its records.  This
+is the prebound case: the file was written against this core and its
+planned pages are free, so nothing is relocated, and an import of an
+object of the core needs no resolution.  Returns the number of runs and
+the bytes mapped, the number of linkage references patched, the number
+of records replayed, an alist of the record kinds not replayed with their
+counts, and the number of imports resolved."
   (let ((path (sb-ext:native-namestring (merge-pathnames pathname) :as-file t)))
     (multiple-value-bind (runs bytes)
         (with-alien ((out (array unsigned-long 2)))
@@ -1164,7 +1313,9 @@ references patched, and the number of definitions installed."
               (-4 (error "a planned page of ~A is in use" path))
               (-5 (error "mapping a run of ~A failed" path))
               (t (error "unexpected return code ~D activating ~A" rc path)))))
-      (let* ((sites (relink-fragment (read-fragment-section path +fragment-section-linkage+)))
-             (definitions (replay-fragment-records
-                           (read-fragment-section path +fragment-section-records+))))
-        (values runs bytes sites definitions)))))
+      (let* ((imports (resolve-fragment-imports
+                       (read-fragment-section path +fragment-section-imports+)))
+             (sites (relink-fragment (read-fragment-section path +fragment-section-linkage+))))
+        (multiple-value-bind (replayed skipped)
+            (replay-fragment-records (read-fragment-section path +fragment-section-records+))
+          (values runs bytes sites replayed skipped imports))))))

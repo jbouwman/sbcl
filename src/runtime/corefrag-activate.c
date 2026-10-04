@@ -153,4 +153,13 @@ bad:
     free(runs); close(fd); return -1;
 }
 
+/* Store VALUE at ADDRESS, a word of an activated fragment, and mark its
+ * card: the fragment's pages are pseudo-static, and the collector finds
+ * a reference from them to a younger object by the mark. */
+void corefrag_patch_word(uword_t address, lispobj value)
+{
+    *(lispobj*)address = value;
+    gc_card_mark[addr_to_card_index((void*)address)] = CARD_MARKED;
+}
+
 #endif /* LISP_FEATURE_MARK_REGION_GC */

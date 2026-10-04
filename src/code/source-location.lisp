@@ -73,8 +73,11 @@
         (let ((new (if plist
                        (%make-full-definition-source-location namestring indices plist)
                        (%make-basic-definition-source-location namestring indices))))
+          ;; A memo of the last location made, which a fragment being built
+          ;; does not carry.
           (when source-info
-            (setf (source-info-last-defn-source-loc source-info) new))
+            (sb-kernel::with-fragment-cache
+              (setf (source-info-last-defn-source-loc source-info) new)))
           new))))
 
 (defun make-definition-source-location ()

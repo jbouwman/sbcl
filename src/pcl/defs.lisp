@@ -569,7 +569,7 @@
 (defun intern-eql-specializer (object)
   ;; Avoid style-warning about compiler-macro being unavailable.
   (declare (notinline make-instance))
-  (sb-kernel::with-fragment-record (:eql-specializer nil object)
+  (sb-kernel::with-fragment-record (:eql-specializer *eql-specializer-table* object)
     (with-system-mutex ((hash-table-lock *eql-specializer-table*))
       (ensure-gethash object *eql-specializer-table*
                       (make-instance 'eql-specializer :object object)))))

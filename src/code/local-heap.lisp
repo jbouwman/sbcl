@@ -425,22 +425,49 @@ this thread."
 (defconstant heap-member-count-stat 28)
 
 ;;; The value RECORD's target holds now, for the kinds that replay a value:
-;;; a function definition, a global value, a globaldb entry.
-(defun fragment-record-current-values (record)
-  (let ((target (fragment-record-target record)))
-    (case (fragment-record-kind record)
-      (:set-function
-       (let ((function (if (sb-kernel:fdefn-p target)
-                           (sb-kernel:fdefn-fun target)
-                           (sb-kernel:%symbol-function target))))
-         (and function (list function))))
-      (:set-value
-       (handler-case (list (sb-ext:symbol-global-value target))
-         (unbound-variable () nil)))
-      (:set-info
-       (destructuring-bind (name info-number) (fragment-record-args record)
-         (multiple-value-bind (value found) (sb-impl::get-info-value name info-number)
-           (and found (list value))))))))
+;;; a function definition, a global value, a globaldb entry, a layout the
+;;; forward-reference table holds, an eql specializer, and the objects of
+;;; the heap HEAP-ID that a global interning table holds, which replaying
+;;; the record interns again: a hashset's elements, or a hash table's
+;;; entries as (key value) lists.
+(defun fragment-record-current-values (record heap-id)
+  (let ((target (fragment-record-target record))
+        (args (fragment-record-args record)))
+    (flet ((owned-p (x) (= (object-owner x) heap-id)))
+      (case (fragment-record-kind record)
+        (:set-function
+         (let ((function (if (sb-kernel:fdefn-p target)
+                             (sb-kernel:fdefn-fun target)
+                             (sb-kernel:%symbol-function target))))
+           (and function (list function))))
+        (:set-value
+         (handler-case (list (sb-ext:symbol-global-value target))
+           (unbound-variable () nil)))
+        (:set-info
+         (destructuring-bind (name info-number) args
+           (multiple-value-bind (value found) (sb-impl::get-info-value name info-number)
+             (and found (list value)))))
+        (:forward-layout
+         (let ((layout (gethash (first args) sb-kernel::*forward-referenced-layouts*)))
+           (and layout (list layout))))
+        (:fdefn
+         ;; The fdefn made for the name, an object of the heap, which replay
+         ;; installs under the name again.
+         (let ((fdefn (sb-int:find-fdefn (first args))))
+           (and fdefn (list fdefn))))
+        (:eql-specializer
+         (let ((specializer (gethash (first args) target)))
+           (and specializer (list specializer))))
+        (:interned
+         (let ((members '()))
+           (cond ((hash-table-p target)
+                  (maphash (lambda (k v)
+                             (when (or (owned-p k) (owned-p v)) (push (list k v) members)))
+                           target))
+                 ((typep target 'sb-impl::robinhood-hashset)
+                  (sb-int:map-hashset (lambda (x) (when (owned-p x) (push x members)))
+                                      target)))
+           members))))))
 
 (defun seal-fragment (recorder)
   "Finish the fragment RECORDER was recording: note in each record the value
@@ -456,7 +483,8 @@ Return their number.  The heap must not be installed."
       (error "The build heap of a fragment being sealed is installed."))
     ;; The values are consed in the heap, where the trace can follow them.
     (dolist (record (fragment-recorder-records recorder))
-      (let ((current (fragment-record-current-values record)))
+      (let ((current (fragment-record-current-values
+                      record (fragment-recorder-heap-id recorder))))
         (when current
           (unless (nth-value 1 (sb-kernel::call-with-heap-of
                                 recorder

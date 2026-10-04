@@ -616,14 +616,22 @@ boundness checks from value lookups.")
     (when (boundp '*compilation*)
       (%compiler-proclaim kind args))
     (labels ((store-location (name &key (key kind))
-               (if location
-                   (setf (getf (info :source-location :declaration name) key)
-                         location)
-                   ;; Without this WHEN, globaldb would accumulate
-                   ;; a bunch of explicitly stored empty lists because
-                   ;; it does not know that there's no need to store NIL.
-                   (when (info :source-location :declaration name)
-                     (remf (info :source-location :declaration name) key))))
+               ;; The plist already stored is modified in place before the
+               ;; new one is stored, so a fragment being built records the
+               ;; whole update as the store of this entry.
+               (sb-kernel::with-fragment-record
+                   (:set-info (sb-impl::with-globaldb-name (key1 key2) name
+                                :simple key1 :hairy nil)
+                              name
+                              (meta-info-number (meta-info :source-location :declaration)))
+                 (if location
+                     (setf (getf (info :source-location :declaration name) key)
+                           location)
+                     ;; Without this WHEN, globaldb would accumulate
+                     ;; a bunch of explicitly stored empty lists because
+                     ;; it does not know that there's no need to store NIL.
+                     (when (info :source-location :declaration name)
+                       (remf (info :source-location :declaration name) key)))))
              (map-names (names function &rest extra-args)
                (mapc (lambda (name)
                        (store-location name)

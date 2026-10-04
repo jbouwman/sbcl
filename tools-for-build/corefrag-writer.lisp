@@ -319,15 +319,45 @@
 
 ;;;; Exports, imports, records
 
+;;; True of an object of the core, at the same address in every process
+;;; started from it: in read-only or static space, or pseudo-static in
+;;; dynamic space.
+(defun core-object-p (x)
+  (let ((address (sb-kernel:get-lisp-obj-address x)))
+    (or (and (>= address sb-vm:read-only-space-start)
+             (< address (sb-sys:sap-int sb-vm:*read-only-space-free-pointer*)))
+        (and (>= address sb-vm:static-space-start)
+             (< address (sb-sys:sap-int sb-vm:*static-space-free-pointer*)))
+        (eql (ignore-errors (sb-kernel:generation-of x)) sb-vm:+pseudo-static-generation+))))
+
+;;; A reference to X as the activator reads it: a member by its planned
+;;; address; a symbol, string, number or character as itself; a list
+;;; element by element; a package or fdefn by name; a ctype by its
+;;; specifier and a source location by its parts, derived state the
+;;; activator rebuilds; any other object of the core by its address, the
+;;; same in a process started from this core; and anything else by its
+;;; type alone, which the activator cannot resolve.
 (defun object-reference (layout x)
   (let ((new (and (not (sb-int:fixnump x)) (not (characterp x))
                   (forward-address layout (sb-kernel:get-lisp-obj-address x)))))
     (cond (new (list :member new))
           ((or (symbolp x) (stringp x) (numberp x) (characterp x)) (list :global x))
-          ((packagep x) (list :global :package (package-name x)))
           ((consp x) (list :list (mapcar (lambda (e) (object-reference layout e)) x)))
-          ((typep x 'sb-kernel:fdefn) (list :global :fdefn (sb-kernel:fdefn-name x)))
-          (t (list :global :unnamed (type-of x))))))
+          ((packagep x) (list :global :package (package-name x)))
+          ((typep x 'sb-kernel:fdefn)
+           (list :global :fdefn (object-reference layout (sb-kernel:fdefn-name x))))
+          ((typep x 'sb-kernel:classoid)
+           (list :global :classoid (object-reference layout (sb-kernel:classoid-name x))))
+          ((typep x 'sb-kernel:ctype)
+           (list :global :type (object-reference layout (sb-kernel:type-specifier x))))
+          ((typep x 'sb-c:definition-source-location)
+           (list :global :source-location
+                 (sb-c:definition-source-location-namestring x)
+                 (sb-c::definition-source-location-indices x)
+                 (object-reference layout (sb-c::definition-source-location-plist x))))
+          ((core-object-p x)
+           (list :global :address (sb-kernel:get-lisp-obj-address x) (princ-to-string (type-of x))))
+          (t (list :global :unnamed (princ-to-string (type-of x)))))))
 
 (defun exports (layout)
   (let ((result '()))
@@ -356,7 +386,8 @@
                   (object-reference layout (sb-fiber:fragment-record-target record))
                   (mapcar (lambda (a) (object-reference layout a)) (sb-fiber:fragment-record-args record))
                   (mapcar (lambda (v) (object-reference layout v)) (sb-fiber:fragment-record-replay-values record))))
-          (reverse (sb-fiber:fragment-records recorder))))
+          ;; Oldest first, the order the activator replays them in.
+          (sb-fiber:fragment-records recorder)))
 
 ;;;; Linkage sites
 
@@ -369,9 +400,10 @@
 ;;; The references the fragment's code makes through linkage cells, as
 ;;; the activator reads them: per code object its planned address, then
 ;;; per site the byte offset of the reference into the instructions, the
-;;; fixup kind that wrote it, and the address of the name the cell is for:
-;;; planned when the name is a member, the builder's otherwise, as for
-;;; any import.  Returns the list and the number of sites.
+;;; fixup kind that wrote it, and a reference to the name the cell is
+;;; for, as OBJECT-REFERENCE makes it: a member by its planned address,
+;;; a global symbol as itself, a global fdefn by name.  Returns the list
+;;; and the number of sites.
 (defun linkage-sites (layout recorder)
   (let ((sites (sb-fiber:fragment-linkage-sites recorder))
         (result '())
@@ -386,11 +418,10 @@
                      (push (cons (+ new-raw sb-vm:other-pointer-lowtag)
                                  (mapcar (lambda (site)
                                            (destructuring-bind (offset kind index) site
-                                             (let* ((fname (or (linkage-name index)
-                                                               (fail "linkage cell ~D, referenced by ~S, is for no name" index x)))
-                                                    (address (sb-kernel:get-lisp-obj-address fname)))
+                                             (let ((fname (or (linkage-name index)
+                                                              (fail "linkage cell ~D, referenced by ~S, is for no name" index x))))
                                                (incf nsites)
-                                               (list offset kind (or (forward-address layout address) address)))))
+                                               (list offset kind (object-reference layout fname)))))
                                          (sort (copy-list code-sites) #'< :key #'first)))
                            result))
                     ((sb-c:unpack-code-fixup-locs (sb-vm::%code-fixups x))
@@ -508,7 +539,7 @@ from the planned address BASE. Return a plist of what was written."
            (exports (progn (stage "exports") (printed-octets (exports layout))))
            (.s-imports. (stage "imports"))
            (imports (printed-octets (mapcar (lambda (i)
-                                              (when (eq *verbose* :objects) (format *trace-output* ";;   import ~X from ~S~%" (second i) (third i)))
+                                              (when (eq *verbose* :objects) (format *trace-output* ";;   import ~X (~S) from ~S at ~X~%" (second i) (type-of (sb-kernel:%make-lisp-obj (second i))) (third i) (first i)))
                                               (list (first i) (object-reference layout (sb-kernel:%make-lisp-obj (second i)))))
                                             (reverse (stats-imports stats)))))
            (records (progn (stage "records") (printed-octets (records layout recorder))))
@@ -693,12 +724,12 @@ FRAGMENT-FILE-ERROR on the first violation."
                            (object-start-p (- code-address (logand code-address sb-vm:lowtag-mask))))
                 (fail "linkage sites at ~X name no code object in the fragment" code-address))
               (dolist (site sites)
-                (destructuring-bind (offset kind name-address) site
+                (destructuring-bind (offset kind name) site
                   (declare (ignore kind))
                   (unless (< (+ code-address offset) (+ (second run) (third run)))
                     (fail "linkage site ~D of the code object at ~X lies outside its run" offset code-address))
-                  (when (and (some (lambda (r) (and (>= name-address (second r)) (< name-address (+ (second r) (third r))))) runs)
-                             (not (object-start-p (- name-address (logand name-address sb-vm:lowtag-mask)))))
+                  (when (and (eq (first name) :member)
+                             (not (object-start-p (- (second name) (logand (second name) sb-vm:lowtag-mask)))))
                     (fail "linkage site ~D of the code object at ~X names no object in the fragment" offset code-address))
                   (incf nsites))))))
         (unless (= nsites (getf provenance :linkage-sites))
