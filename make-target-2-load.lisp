@@ -463,7 +463,10 @@ Please check that all strings which were not recognizable to the compiler
                                     sb-vm::fragment-record-kind
                                     sb-vm::fragment-record-target
                                     sb-vm::fragment-record-args
-                                    sb-vm::fragment-record-escapes))
+                                    sb-vm::fragment-record-escapes
+                                    sb-vm::fragment-record-replay-values
+                                    sb-vm::seal-fragment
+                                    sb-vm::map-fragment-members))
                             ,@(or #+(or arm64 x86 x86-64)
                                   '(sb-vm::%vector-cas-pair
                                     sb-vm::%instance-cas-pair

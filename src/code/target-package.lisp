@@ -2222,12 +2222,15 @@ PACKAGE."
                   (let* ((string (car cell))
                          (pkg (,sub-finder string))
                          (new (sb-c::allocate-weak-vector 3)))
-                    (sb-kernel::with-global-heap
-                      (setf (weak-vector-ref new 0) *package-names-cookie*
-                            (weak-vector-ref new 1) (info-gethash string (car *package-nickname-ids*))
-                            (weak-vector-ref new 2) pkg)
-                      (sb-thread:barrier (:write))
-                      (setf (cdr cell) new))
+                    ;; The memo is a cache: a fragment being built does not carry
+                    ;; it, and the cell in the caller's constants is refilled.
+                    (sb-kernel::with-fragment-cache
+                      (sb-kernel::with-global-heap
+                        (setf (weak-vector-ref new 0) *package-names-cookie*
+                              (weak-vector-ref new 1) (info-gethash string (car *package-nickname-ids*))
+                              (weak-vector-ref new 2) pkg)
+                        (sb-thread:barrier (:write))
+                        (setf (cdr cell) new)))
                     pkg)))))
 
   (def-finder cached-find-undeleted-package find-undeleted-package-or-lose

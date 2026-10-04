@@ -79,8 +79,11 @@
    #:fragment-record-target
    #:fragment-record-args
    #:fragment-record-escapes
+   #:fragment-record-replay-values
    #:fragment-unaccounted-escapes
    #:fragment-cache-escapes
+   #:seal-fragment
+   #:map-fragment-members
    #:heap-released-p
    #:current-heap
    #:object-heap

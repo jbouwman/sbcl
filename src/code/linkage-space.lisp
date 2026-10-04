@@ -100,10 +100,14 @@
                   (binding* (((hi lo) (floor index linkage-smallvec-elts))
                              (map *linkage-name-map*)
                              (inner (svref map hi)))
-                    (when (eql inner 0)
-                      (setf inner (make-weak-vector linkage-smallvec-elts :initial-element 0)
-                            (svref map hi) inner))
-                    (setf (weak-vector-ref inner lo) fname))
+                    ;; The map from index to name is state of this image: a fragment's
+                    ;; names get their indices again when it is activated, so a name
+                    ;; the fragment owns is a cache entry here, not an escape.
+                    (sb-kernel::with-fragment-cache
+                      (when (eql inner 0)
+                        (setf inner (make-weak-vector linkage-smallvec-elts :initial-element 0)
+                              (svref map hi) inner))
+                      (setf (weak-vector-ref inner lo) fname)))
                   (let ((simply-callable (ensure-simplistic (fdefn-fun fname) fname)))
                     (with-pinned-objects (simply-callable)
                       (multiple-value-bind (entrypoint cell) (entry-addr index simply-callable)
