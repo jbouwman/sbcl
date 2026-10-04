@@ -1181,11 +1181,19 @@ int local_heap_verify(struct local_heap *h)
     struct thread *th = get_sb_vm_thread();
     if (h->state != LOCAL_HEAP_LIVE) return -2;
     if (h->installed_on != th) return -1;
+    /* Closing the regions and checking the blocks take the page table lock,
+     * which an allocator in another thread waits for inside pseudo-atomic,
+     * where its stop-for-GC is deferred.  A verifier stopped for a global
+     * collection while holding the lock would therefore deadlock that
+     * allocator against the collector, so hold it with signals blocked. */
+    sigset_t old;
+    block_blockable_signals(&old);
     ph_close_installed_regions(th);
     local_heap_materialize(h);
     acquire_gc_page_table_lock();
     local_heap_check_blocks(h, "verify");
     release_gc_page_table_lock();
+    thread_sigmask(SIG_SETMASK, &old, 0);
     for (sword_t j = 0; j < h->npages; j++) {
         page_index_t p = h->pages[j];
         if (page_single_obj_p(p)) {

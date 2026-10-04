@@ -302,6 +302,64 @@
         (assert (> (sb-thread:join-thread th) 0)))
       (sb-thread:join-thread gc-thread))))
 
+;;; A thread stopped for a global collection while holding the heap table lock
+;;; (statistics, the release lookup) must not leave a releasing thread, which waits
+;;; for that lock with stop-for-GC blocked, deadlocked with the collector.
+(with-test (:name (:local-heap :threads :release-against-full-gc))
+  (let* ((stop nil)
+         (rounds 300)
+         (gc-thread (sb-thread:make-thread
+                     (lambda () (let ((n 0)) (loop until stop do (sb-ext:gc :full t) (incf n) (sleep 0.001)) n))
+                     :name "gc-thread"))
+         (workers
+           (loop for k below 6
+                 collect (sb-thread:make-thread
+                          (lambda ()
+                            (dotimes (r rounds r)
+                              (let ((h (make-heap :gc-threshold (* 256 1024))))
+                                (unwind-protect
+                                     (with-heap (h)
+                                       (let ((keep nil))
+                                         (dotimes (i 200) (push (make-string 8 :initial-element #\r) keep))
+                                         (assert (= (length keep) 200)))
+                                       (dotimes (i 100) (heap-gc-count h)))
+                                  (release-heap h)))))
+                          :name (format nil "release-worker-~D" k)))))
+    ;; No SLEEP here: a sleep beside continuous collections is stretched by the
+    ;; time its thread spends stopped. The workers bound the test by their rounds.
+    (dolist (w workers)
+      (assert (eql (sb-thread:join-thread w :timeout 120) rounds)))
+    (setf stop t)
+    (assert (plusp (sb-thread:join-thread gc-thread :timeout 60)))))
+
+;;; verify-heap holds the page table lock; an allocator in another thread waits for it
+;;; inside pseudo-atomic with its stop-for-GC deferred. A verifier stopped for a global
+;;; collection while holding the lock must not leave the two deadlocked with the collector.
+(with-test (:name (:local-heap :threads :verify-against-full-gc))
+  (let* ((stop nil)
+         (rounds 100)
+         (gc-thread (sb-thread:make-thread
+                     (lambda () (let ((n 0)) (loop until stop do (sb-ext:gc :full t) (incf n) (sleep 0.001)) n))
+                     :name "gc-thread"))
+         (workers
+           (loop for k below 4
+                 collect (sb-thread:make-thread
+                          (lambda ()
+                            (let ((h (make-heap :gc-threshold (* 256 1024))))
+                              (unwind-protect
+                                   (with-heap (h)
+                                     (let ((keep (make-array 64 :initial-element nil)))
+                                       (dotimes (r rounds r)
+                                         (dotimes (i 2000)
+                                           (setf (aref keep (mod i 64)) (list i (make-string 8 :initial-element #\v))))
+                                         (assert (null (verify-heap h))))))
+                                (release-heap h))))
+                          :name (format nil "verify-worker-~D" k)))))
+    (dolist (w workers)
+      (assert (eql (sb-thread:join-thread w :timeout 120) rounds)))
+    (setf stop t)
+    (assert (plusp (sb-thread:join-thread gc-thread :timeout 60)))))
+
 (with-test (:name (:local-heap :threads :cross-thread-send))
   (let* ((h (make-heap))
          (sender (sb-thread:make-thread
