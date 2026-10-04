@@ -1255,6 +1255,12 @@ the form names in this process.")
             (:shadowing-import (shadowing-import (object (second args)) (object (first args))) (done))
             (:shadow (shadow (object (second args)) (object (first args))) (done))
             (:use-package (use-package (object (second args)) (object (first args))) (done))
+            (:package-nickname
+             ;; A package-local nickname: (package string other-package), the
+             ;; last NIL to remove the nickname.
+             (sb-impl::pkgnick-update (object (first args)) (object (second args))
+                                      (object (third args)))
+             (done))
             (:fdefn
              ;; The fdefn is the fragment's, installed under its name again:
              ;; in the symbol's info for a (SETF symbol) name, as

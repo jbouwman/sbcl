@@ -431,7 +431,7 @@
     (with-scratch-file (fasl "fasl")
       (with-scratch-file (file "sbfr")
         (with-open-file (s source :direction :output :if-exists :supersede)
-          (write-string "(defpackage \"BUILD-HEAP-REPLAYED\" (:use \"CL\") (:export \"NORM\" \"POINT\"))
+          (write-string "(defpackage \"BUILD-HEAP-REPLAYED\" (:use \"CL\") (:export \"NORM\" \"POINT\") (:local-nicknames (\"K\" \"KEYWORD\")))
 (in-package \"BUILD-HEAP-REPLAYED\")
 (defstruct point x y)
 (defun norm (p) (+ (abs (point-x p)) (abs (point-y p))))
@@ -458,7 +458,7 @@
                  (base (+ sb-vm:dynamic-space-start (* 3 (floor (sb-ext:dynamic-space-size) 4))))
                  (written (funcall (intern "WRITE-FRAGMENT" "SB-COREFRAG-WRITER") recorder file :base base)))
             (assert (= (getf written :members) count))
-            (let* ((forms (format nil "(multiple-value-bind (runs bytes sites replayed skipped) (sb-fiber:activate-fragment-file ~S) (declare (ignore runs bytes sites)) (let* ((package (find-package \"BUILD-HEAP-REPLAYED\")) (make-point (and package (find-symbol \"MAKE-POINT\" package))) (p (and make-point (funcall make-point :x -3 :y 4)))) (format t \"~~&RESULT ~~S~~%\" (list replayed skipped (and package t) (and p (funcall (find-symbol \"NORM\" package) p)) cl-user::*replayed-value* (and (fboundp '(setf cl-user::replayed-norm)) t) (and (find-symbol \"BUILD-HEAP-REPLAYED-KEYWORD\" \"KEYWORD\") t) (and p (princ-to-string p)) (and p (funcall (find-symbol \"AREA\" package) p)) (and package (typep (make-condition (find-symbol \"REPLAYED-ERROR\" package)) 'error)) (sb-kernel:type-specifier (sb-int:info :function :type 'cl-user::replayed-norm)) (and package (typep 3 (find-symbol \"SMALL\" package)))))))"
+            (let* ((forms (format nil "(multiple-value-bind (runs bytes sites replayed skipped) (sb-fiber:activate-fragment-file ~S) (declare (ignore runs bytes sites)) (let* ((package (find-package \"BUILD-HEAP-REPLAYED\")) (make-point (and package (find-symbol \"MAKE-POINT\" package))) (p (and make-point (funcall make-point :x -3 :y 4)))) (format t \"~~&RESULT ~~S~~%\" (list replayed skipped (and package t) (and p (funcall (find-symbol \"NORM\" package) p)) cl-user::*replayed-value* (and (fboundp '(setf cl-user::replayed-norm)) t) (and (find-symbol \"BUILD-HEAP-REPLAYED-KEYWORD\" \"KEYWORD\") t) (and p (princ-to-string p)) (and p (funcall (find-symbol \"AREA\" package) p)) (and package (typep (make-condition (find-symbol \"REPLAYED-ERROR\" package)) 'error)) (sb-kernel:type-specifier (sb-int:info :function :type 'cl-user::replayed-norm)) (and package (typep 3 (find-symbol \"SMALL\" package))) (and package (mapcar (function car) (package-local-nicknames package)))))))"
                                   (namestring file)))
                    (output (with-output-to-string (s)
                              (run-program sb-ext:*runtime-pathname*
@@ -477,7 +477,7 @@
                 (assert (equal results
                                (list t 7 '(:built) t t "#<replayed point>" -12 t
                                      (sb-kernel:type-specifier (sb-kernel:specifier-type '(function (t) number)))
-                                     t))
+                                     t '("K")))
                         () "the child reported ~S, skipping ~S" results skipped)))))))))
 
 ;;; --- Building after a sealed fragment ---
