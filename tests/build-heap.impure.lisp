@@ -274,7 +274,8 @@
               (assert (not (member-p stray)))
               ;; Global objects are never members, whatever refers to them.
               (assert (not (member-p (find-package "CL"))))
-              (let ((record (find (sb-int:find-fdefn 'build-heap-sealed-hook)
+              (let ((record (find #+linkage-space 'build-heap-sealed-hook
+                                                   #-linkage-space (sb-int:find-fdefn 'build-heap-sealed-hook)
                                   (records-of-kind recorder :set-function)
                                   :key #'fragment-record-target)))
                 (assert record)
