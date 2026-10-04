@@ -235,9 +235,10 @@
 (defun build-heap-sealed-hook () :global)
 (defvar *build-heap-sealed-value* nil)
 
-;;; A sealed fragment's objects are those of its heap that the recorder
-;;; reaches, with each record's replayed value; what the load or anything
-;;; else left in the heap beyond them is not part of it.
+;;; A sealed fragment's objects are those of its heap that its records
+;;; reach, with each record's replayed value; what the load or anything
+;;; else left in the heap beyond them is not part of it, nor is the
+;;; recorder itself.
 (with-test (:name (:build-heap :seal :members))
   (with-scratch-file (source "lisp")
     (with-scratch-file (fasl "fasl")
@@ -265,7 +266,7 @@
           (assert (= count (hash-table-count members)))
           (flet ((member-p (x) (gethash x members)))
             (let ((norm (fdefinition (find-symbol "NORM" "BUILD-HEAP-SEALED"))))
-              (assert (member-p recorder))
+              (assert (not (member-p recorder)))
               (assert (member-p (find-package "BUILD-HEAP-SEALED")))
               (assert (member-p (sb-kernel:find-layout
                                  (find-symbol "POINT" "BUILD-HEAP-SEALED"))))

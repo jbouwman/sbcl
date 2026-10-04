@@ -472,7 +472,7 @@ this thread."
 (defun seal-fragment (recorder)
   "Finish the fragment RECORDER was recording: note in each record the value
 it replays, seal the build heap so that nothing more is allocated in it, and
-find the fragment's objects, the heap's objects that RECORDER reaches.
+find the fragment's objects, the heap's objects that the records reach.
 Return their number.  The heap must not be installed."
   (let ((heap (fragment-recorder-heap-address recorder)))
     (when (fragment-recorder-unaccounted recorder)
@@ -481,23 +481,24 @@ Return their number.  The heap must not be installed."
               (length (fragment-recorder-unaccounted recorder))))
     (when (= (current-local-heap-address) heap)
       (error "The build heap of a fragment being sealed is installed."))
-    ;; The values are consed in the heap, where the trace can follow them.
     (dolist (record (fragment-recorder-records recorder))
-      (let ((current (fragment-record-current-values
-                      record (fragment-recorder-heap-id recorder))))
-        (when current
-          (unless (nth-value 1 (sb-kernel::call-with-heap-of
-                                recorder
-                                (lambda ()
-                                  (setf (fragment-record-replay-values record)
-                                        (copy-list current)))))
-            (error "The build heap of a fragment being sealed is sealed ~
-                    or installed on another thread.")))))
+      (setf (fragment-record-replay-values record)
+            (fragment-record-current-values record (fragment-recorder-heap-id recorder))))
     (let ((rc (%seal-local-heap heap)))
       (unless (zerop rc)
         (error "Sealing the build heap failed: ~D" rc)))
-    (without-gcing
-      (%trace-fragment heap (get-lisp-obj-address recorder)))))
+    ;; The roots are what the records refer to: their targets, arguments
+    ;; and values, in a vector outside the heap, so that the fragment does
+    ;; not carry the records themselves.
+    (let ((roots (sb-kernel::with-global-heap
+                   (coerce (loop for record in (fragment-recorder-records recorder)
+                                 collect (fragment-record-target record)
+                                 append (fragment-record-args record)
+                                 append (fragment-record-replay-values record))
+                           'simple-vector))))
+      (without-gcing
+        (with-pinned-objects (roots)
+          (%trace-fragment heap (get-lisp-obj-address roots)))))))
 
 (defun map-fragment-members (function recorder)
   "Call FUNCTION on each object of the fragment RECORDER was recording, in
