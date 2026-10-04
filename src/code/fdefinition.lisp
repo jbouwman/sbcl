@@ -106,9 +106,12 @@
        (cond ((and fdefn (neq fdefn 0)) fdefn)
              ((null name) *fdefn-of-nil*)
              (t (sb-kernel::with-global-heap
-                  (let* ((new (make-fdefn name))
-                         (actual (sb-vm::cas-symbol-fdefn name 0 new)))
-                    (if (eql actual 0) new (the fdefn actual))))))))
+                  ;; A fragment being built records the fdefn made for a
+                  ;; global symbol, as the hairy case below does.
+                  (sb-kernel::with-fragment-record (:fdefn name name)
+                    (let* ((new (make-fdefn name))
+                           (actual (sb-vm::cas-symbol-fdefn name 0 new)))
+                      (if (eql actual 0) new (the fdefn actual)))))))))
     ((find-fdefn name))
     (t
       ;; We won't reach here if the name was not legal
