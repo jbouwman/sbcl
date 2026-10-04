@@ -11,7 +11,10 @@
 ;;;; the fragment, which is how an activator relocates it without a walk.
 ;;;; References to objects outside the fragment are left as the builder
 ;;;; had them and listed as imports; resolving them by name is the
-;;;; activator's business, not the writer's.
+;;;; activator's business, not the writer's.  The references the
+;;;; fragment's code makes through linkage cells are listed by site, with
+;;;; the name each cell is for: the builder's cells are its own, and the
+;;;; activator resolves the names again and patches the references.
 
 (defpackage "SB-COREFRAG-WRITER"
   (:use "CL")
@@ -24,7 +27,7 @@
 (defun stage (name) (when *verbose* (format *trace-output* "~&;; writer: ~A~%" name) (finish-output *trace-output*)))
 
 (defconstant +magic+ #x53424652)        ; "SBFR"
-(defconstant +version+ 1)
+(defconstant +version+ 2)
 (defconstant +page-bytes+ sb-vm:gencgc-page-bytes)
 (defconstant +word-bytes+ sb-vm:n-word-bytes)
 ;;; As collector_alloc_fallback decides: three quarters of a page or more
@@ -46,6 +49,13 @@
 (defconstant +section-imports+ 5)
 (defconstant +section-records+ 6)
 (defconstant +section-provenance+ 7)
+(defconstant +section-linkage+ 8)
+
+;;; The linkage index an fname carries in its second word, which the
+;;; builder assigned: FNAME-LINKAGE-INDEX reads it from bit 3 up, the low
+;;; three bits being flags, of a symbol and of an fdefn alike.  Zero on a
+;;; target without linkage space.
+(defconstant +fname-index-mask+ (ash (1- (ash 1 sb-vm:n-linkage-index-bits)) 3))
 
 (define-condition fragment-file-error (error)
   ((message :initarg :message :reader fragment-file-error-message))
@@ -194,6 +204,12 @@
   (or (typep x '(or bignum float (complex float) sb-sys:system-area-pointer))
       (and (arrayp x) (sb-kernel:simple-array-p x) (not (simple-vector-p x)))))
 
+(defun set-word-index-tagged (layout run offset x stats)
+  ;; The layout word, then the slots the layout's bitmap marks as tagged.
+  (forward-word layout run (+ offset (* sb-vm:instance-slots-offset +word-bytes+)) x stats)
+  (sb-kernel:do-instance-tagged-slot (i x)
+    (forward-word layout run (+ offset (* (+ i sb-vm:instance-slots-offset) +word-bytes+)) x stats)))
+
 ;;; Forward the tagged words of X, copied at byte OFFSET of RUN.
 (defun relocate-object (layout run offset nbytes x stats)
   (let ((buffer (run-buffer run))
@@ -241,8 +257,13 @@
            (when new (set-word 1 new)))
          (loop for i from 2 below nwords do (forward i)))
         (symbol
-         (forward sb-vm:symbol-value-slot) (forward sb-vm:symbol-info-slot) (forward sb-vm:symbol-name-slot))
+         ;; The builder's linkage index is cleared: the activating process
+         ;; assigns its own when it resolves the name.
+         (set-word sb-vm:symbol-hash-slot (logandc2 (word-at sb-vm:symbol-hash-slot) +fname-index-mask+))
+         (forward sb-vm:symbol-value-slot) (forward sb-vm:symbol-fdefn-slot)
+         (forward sb-vm:symbol-info-slot) (forward sb-vm:symbol-name-slot))
         (sb-kernel:fdefn
+         (set-word sb-vm:symbol-hash-slot (logandc2 (word-at sb-vm:symbol-hash-slot) +fname-index-mask+))
          (forward sb-vm:fdefn-name-slot) (forward sb-vm:fdefn-fun-slot))
         (sb-ext:weak-pointer
          (forward sb-vm:weak-pointer-value-slot))
@@ -253,12 +274,6 @@
          ;; forwarded when it names a member, and nothing is inferred otherwise.
          (unless (unboxed-p x)
            (loop for i from 1 below nwords do (forward-maybe i))))))))
-
-(defun set-word-index-tagged (layout run offset x stats)
-  ;; The layout word, then the slots the layout's bitmap marks as tagged.
-  (forward-word layout run (+ offset (* sb-vm:instance-slots-offset +word-bytes+)) x stats)
-  (sb-kernel:do-instance-tagged-slot (i x)
-    (forward-word layout run (+ offset (* (+ i sb-vm:instance-slots-offset) +word-bytes+)) x stats)))
 
 (defun copy-and-relocate (layout)
   (let ((stats (make-relocation-stats)))
@@ -308,7 +323,8 @@
   (let ((new (and (not (sb-int:fixnump x)) (not (characterp x))
                   (forward-address layout (sb-kernel:get-lisp-obj-address x)))))
     (cond (new (list :member new))
-          ((or (symbolp x) (packagep x) (stringp x) (numberp x) (characterp x)) (list :global x))
+          ((or (symbolp x) (stringp x) (numberp x) (characterp x)) (list :global x))
+          ((packagep x) (list :global :package (package-name x)))
           ((consp x) (list :list (mapcar (lambda (e) (object-reference layout e)) x)))
           ((typep x 'sb-kernel:fdefn) (list :global :fdefn (sb-kernel:fdefn-name x)))
           (t (list :global :unnamed (type-of x))))))
@@ -341,6 +357,45 @@
                   (mapcar (lambda (a) (object-reference layout a)) (sb-fiber:fragment-record-args record))
                   (mapcar (lambda (v) (object-reference layout v)) (sb-fiber:fragment-record-replay-values record))))
           (reverse (sb-fiber:fragment-records recorder))))
+
+;;;; Linkage sites
+
+;;; The name linkage cell INDEX is for, on a target with linkage space,
+;;; where alone there are sites.
+(defun linkage-name (index)
+  (let ((reader (find-symbol "LINKAGE-ADDR->NAME" "SB-VM")))
+    (and reader (funcall reader index :index))))
+
+;;; The references the fragment's code makes through linkage cells, as
+;;; the activator reads them: per code object its planned address, then
+;;; per site the byte offset of the reference into the instructions, the
+;;; fixup kind that wrote it, and the address of the name the cell is for:
+;;; planned when the name is a member, the builder's otherwise, as for
+;;; any import.  Returns the list and the number of sites.
+(defun linkage-sites (layout recorder)
+  (let ((sites (sb-fiber:fragment-linkage-sites recorder))
+        (result '())
+        (nsites 0))
+    (dolist (run (layout-runs layout))
+      (dolist (entry (run-objects run))
+        (destructuring-bind (old-raw new-raw size x) entry
+          (declare (ignore size))
+          (when (typep x 'sb-kernel:code-component)
+            (let ((code-sites (gethash (+ old-raw sb-vm:other-pointer-lowtag) sites)))
+              (cond (code-sites
+                     (push (cons (+ new-raw sb-vm:other-pointer-lowtag)
+                                 (mapcar (lambda (site)
+                                           (destructuring-bind (offset kind index) site
+                                             (let* ((fname (or (linkage-name index)
+                                                               (fail "linkage cell ~D, referenced by ~S, is for no name" index x)))
+                                                    (address (sb-kernel:get-lisp-obj-address fname)))
+                                               (incf nsites)
+                                               (list offset kind (or (forward-address layout address) address)))))
+                                         (sort (copy-list code-sites) #'< :key #'first)))
+                           result))
+                    ((sb-c:unpack-code-fixup-locs (sb-vm::%code-fixups x))
+                     (fail "~S references linkage cells but no site was noted for it: was it loaded with the recorder bound?" x))))))))
+    (values (nreverse result) nsites)))
 
 ;;;; The file
 
@@ -379,6 +434,14 @@
                   until (or (zerop byte) (= byte 10))
                   do (write-char (code-char byte) s))))
         (lisp-implementation-version))))
+
+(defun pad-to-page (octets)
+  (let ((n (* (ceiling (length octets) +page-bytes+) +page-bytes+)))
+    (if (= n (length octets))
+        octets
+        (let ((v (make-array n :element-type '(unsigned-byte 8) :initial-element 0)))
+          (replace v octets)
+          v))))
 
 (defun pages-octets (layout)
   (progn
@@ -419,14 +482,6 @@
             (replace out p :start1 at)
             (incf at (length p))))))))
 
-(defun pad-to-page (octets)
-  (let ((n (* (ceiling (length octets) +page-bytes+) +page-bytes+)))
-    (if (= n (length octets))
-        octets
-        (let ((v (make-array n :element-type '(unsigned-byte 8) :initial-element 0)))
-          (replace v octets)
-          v))))
-
 (defun fnv1a-64 (octets)
   (let ((hash #xcbf29ce484222325))
     (loop for byte across octets
@@ -457,16 +512,21 @@ from the planned address BASE. Return a plist of what was written."
                                               (list (first i) (object-reference layout (sb-kernel:%make-lisp-obj (second i)))))
                                             (reverse (stats-imports stats)))))
            (records (progn (stage "records") (printed-octets (records layout recorder))))
+           (.s-linkage. (stage "linkage"))
+           (linkage (multiple-value-bind (sites nsites) (linkage-sites layout recorder)
+                      (cons nsites (printed-octets sites))))
            (provenance (printed-octets (list :name name :members (layout-members layout)
                                              :member-bytes (layout-member-bytes layout)
                                              :runs (mapcar (lambda (r) (list (run-type r) (run-base r) (run-nbytes r) (run-npages r)))
                                                            (layout-runs layout))
                                              :pointers (stats-pointers stats)
                                              :imports (length (stats-imports stats))
+                                             :linkage-sites (car linkage)
                                              :written (get-universal-time))))
            (sections (list (cons +section-pages+ pages) (cons +section-pointer-map+ pointer-map)
                            (cons +section-exports+ exports) (cons +section-imports+ imports)
-                           (cons +section-records+ records) (cons +section-provenance+ provenance)))
+                           (cons +section-records+ records) (cons +section-linkage+ (cdr linkage))
+                           (cons +section-provenance+ provenance)))
            (.s-identity. (stage "identity"))
            (identity (printed-octets (list :build-id (build-id)
                                            :lisp (lisp-implementation-version)
@@ -476,7 +536,7 @@ from the planned address BASE. Return a plist of what was written."
                                            :id (fnv1a-64 (let ((all (make-array (reduce #'+ sections :key (lambda (s) (length (cdr s))))
                                                                                   :element-type '(unsigned-byte 8))) (at 0))
                                                            (dolist (s sections all) (replace all (cdr s) :start1 at) (incf at (length (cdr s))))))))))
-      (declare (ignorable .s-imports. .s-identity.))
+      (declare (ignorable .s-imports. .s-linkage. .s-identity.))
       (push (cons +section-identity+ identity) sections)
       (stage "file")
       ;; Header: magic, version, section count, then (id offset length) per section.
@@ -495,7 +555,8 @@ from the planned address BASE. Return a plist of what was written."
       (list :members (layout-members layout) :member-bytes (layout-member-bytes layout)
             :runs (length (layout-runs layout))
             :bytes (reduce #'+ (layout-runs layout) :key #'run-nbytes)
-            :pointers (stats-pointers stats) :imports (length (stats-imports stats))))))
+            :pointers (stats-pointers stats) :imports (length (stats-imports stats))
+            :linkage-sites (car linkage)))))
 
 ;;;; Reading back
 
@@ -568,8 +629,10 @@ from the planned address BASE. Return a plist of what was written."
 invariants: every pointer-map bit marks a word holding a pointer to an
 object start inside the fragment's runs, no other word of a data run
 points into them, the allocation bitmap counts as many objects as the
-provenance says, and every export names an object start. Return a plist
-of counts; signal FRAGMENT-FILE-ERROR on the first violation."
+provenance says, every export names an object start, and every linkage
+site lies in a code object of the fragment and names an object start in
+it or an address outside it. Return a plist of counts; signal
+FRAGMENT-FILE-ERROR on the first violation."
   (with-open-file (stream pathname :element-type '(unsigned-byte 8))
     (let* ((sections (read-sections stream))
            (identity (read-printed (section sections +section-identity+)))
@@ -577,7 +640,8 @@ of counts; signal FRAGMENT-FILE-ERROR on the first violation."
            (runs (parse-runs (section sections +section-pages+)))
            (pointer-map (section sections +section-pointer-map+))
            (exports (read-printed (section sections +section-exports+)))
-           (total-objects 0) (npointers 0) (nwords 0) (map-offset 0))
+           (linkage (read-printed (section sections +section-linkage+)))
+           (total-objects 0) (npointers 0) (nwords 0) (map-offset 0) (nsites 0))
       (unless (= (getf identity :page-bytes) +page-bytes+) (fail "page size ~D" (getf identity :page-bytes)))
       (flet ((object-start-p (address)
                (dolist (run runs nil)
@@ -621,5 +685,23 @@ of counts; signal FRAGMENT-FILE-ERROR on the first violation."
             (unless (if (eq (first e) :function)
                         (some (lambda (r) (and (>= address (second r)) (< address (+ (second r) (third r))))) runs)
                         (object-start-p (- address (logand address sb-vm:lowtag-mask))))
-              (fail "export ~S names no object in the fragment" e)))))
-      (list :members total-objects :pointers npointers :words nwords :runs (length runs) :exports (length exports)))))
+              (fail "export ~S names no object in the fragment" e))))
+        (dolist (entry linkage)
+          (destructuring-bind (code-address &rest sites) entry
+            (let ((run (find-if (lambda (r) (and (>= code-address (second r)) (< code-address (+ (second r) (third r))))) runs)))
+              (unless (and run (= (first run) +type-code+)
+                           (object-start-p (- code-address (logand code-address sb-vm:lowtag-mask))))
+                (fail "linkage sites at ~X name no code object in the fragment" code-address))
+              (dolist (site sites)
+                (destructuring-bind (offset kind name-address) site
+                  (declare (ignore kind))
+                  (unless (< (+ code-address offset) (+ (second run) (third run)))
+                    (fail "linkage site ~D of the code object at ~X lies outside its run" offset code-address))
+                  (when (and (some (lambda (r) (and (>= name-address (second r)) (< name-address (+ (second r) (third r))))) runs)
+                             (not (object-start-p (- name-address (logand name-address sb-vm:lowtag-mask)))))
+                    (fail "linkage site ~D of the code object at ~X names no object in the fragment" offset code-address))
+                  (incf nsites))))))
+        (unless (= nsites (getf provenance :linkage-sites))
+          (fail "~D linkage sites, ~D written" nsites (getf provenance :linkage-sites))))
+      (list :members total-objects :pointers npointers :words nwords :runs (length runs) :exports (length exports)
+            :linkage-sites nsites))))

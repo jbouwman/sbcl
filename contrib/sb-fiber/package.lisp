@@ -75,6 +75,7 @@
    #:with-fragment-recorder
    #:with-fragment-record
    #:fragment-records
+   #:fragment-linkage-sites
    #:fragment-record-kind
    #:fragment-record-target
    #:fragment-record-args

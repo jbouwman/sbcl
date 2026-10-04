@@ -28,7 +28,7 @@
 #include "corefrag.h"
 
 #define FRAG_MAGIC 0x53424652
-#define FRAG_VERSION 1
+#define FRAG_VERSION 2
 #define FRAG_SECTION_PAGES 2
 #define FRAG_ALLOC_UNIT (2*N_WORD_BYTES)
 

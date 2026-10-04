@@ -90,6 +90,7 @@
                     (let* ((warn #+x86-64 (= (sap-ref-32 (code-instructions code-obj) offset) 1))
                            (index (ensure-linkage-index name (not warn))))
                       (unless (permanent-fname-p name) (setq callees (adjoin index callees)))
+                      #+sb-local-heaps (sb-vm::note-linkage-site real-code-obj offset kind index)
                       index))
                    (:code-object (get-lisp-obj-address real-code-obj))
                    #+sb-thread (:symbol-tls-index (ensure-symbol-tls-index name))

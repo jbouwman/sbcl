@@ -562,6 +562,13 @@ a hash table.  Outside a build, BODY runs as it is."
   "The records RECORDER noted, oldest first."
   (reverse (sb-vm::fragment-recorder-records recorder)))
 
+(defun fragment-linkage-sites (recorder)
+  "The linkage cell references the loader patched into the code of the
+fragment RECORDER was recording: a hash table from the address of a code
+object to its sites, each (offset kind index), newest first.  Empty on a
+target without linkage space."
+  (sb-vm::fragment-recorder-linkage-sites recorder))
+
 (defun fragment-record-kind (record) (sb-vm::fragment-record-kind record))
 (defun fragment-record-target (record) (sb-vm::fragment-record-target record))
 (defun fragment-record-args (record) (sb-vm::fragment-record-args record))
@@ -1028,20 +1035,136 @@ into a local heap, and pointers between different local heaps."
   (path c-string)
   (out (* unsigned-long)))
 
+;;; The file's header, as the writer lays it out (corefrag-writer.lisp):
+;;; magic, version and section count, then (id offset length) per
+;;; section.  The sections read here are printed forms.
+(defconstant +fragment-magic+ #x53424652)
+(defconstant +fragment-version+ 2)
+(defconstant +fragment-section-records+ 6)
+(defconstant +fragment-section-linkage+ 8)
+
+(defun read-fragment-word (stream)
+  (let ((word 0))
+    (dotimes (i sb-vm:n-word-bytes word)
+      (setf (ldb (byte 8 (* 8 i)) word) (read-byte stream)))))
+
+;;; Section ID of the fragment file at PATH, read back as the form the
+;;; writer printed, or NIL when the file has no such section.
+(defun read-fragment-section (path id)
+  (with-open-file (stream path :element-type '(unsigned-byte 8))
+    (unless (= (read-fragment-word stream) +fragment-magic+)
+      (error "~A is not a fragment file" path))
+    (let ((version (read-fragment-word stream)))
+      (unless (= version +fragment-version+)
+        (error "~A is a version ~D fragment file; this runtime reads version ~D"
+               path version +fragment-version+)))
+    (dotimes (i (read-fragment-word stream))
+      (let ((section (read-fragment-word stream))
+            (offset (read-fragment-word stream))
+            (length (read-fragment-word stream)))
+        (when (= section id)
+          (file-position stream offset)
+          (let ((octets (make-array length :element-type '(unsigned-byte 8))))
+            (read-sequence octets stream)
+            (return
+              (with-standard-io-syntax
+                (let ((*package* (find-package "KEYWORD")) (*read-eval* nil))
+                  (read-from-string
+                   (sb-ext:octets-to-string octets :external-format :utf-8)))))))))))
+
+;;; The object a reference of the writer's names: a member by its planned
+;;; address, now mapped; a global symbol, string, number or character as
+;;; itself; a global fdefn or package by name.
+(defun fragment-reference-object (reference)
+  (ecase (first reference)
+    (:member (sb-kernel:%make-lisp-obj (second reference)))
+    (:global (destructuring-bind (x &optional (y nil y-p)) (rest reference)
+               (cond ((not y-p) x)
+                     ((eq x :fdefn) (sb-kernel:find-or-create-fdefn y))
+                     ((eq x :package) (or (find-package y) (error "no package ~A" y)))
+                     (t (error "a fragment record refers to ~A, which has no name" y)))))
+    (:list (mapcar #'fragment-reference-object (second reference)))))
+
+;;; Resolve the names the fragment's code calls through linkage cells and
+;;; patch each reference.  The builder assigned the cells it had free;
+;;; this process assigns its own by ENSURE-LINKAGE-INDEX, which also fills
+;;; the cell of a name the fragment defines from the name's function
+;;; slot, mapped with the fragment.  The code's callee list, which the
+;;; collector follows to the names, is written again with the new
+;;; indices.  LINKAGE is the file's linkage section: per code object its
+;;; address, then per site the offset of the reference, the fixup kind
+;;; that wrote it, and the address of the name.
+#+linkage-space
+(defun relink-fragment (linkage)
+  (let ((nsites 0))
+    (dolist (entry linkage nsites)
+      (destructuring-bind (code-address &rest sites) entry
+        (let ((code (sb-kernel:%make-lisp-obj code-address))
+              (callees '()))
+          (sb-sys:with-pinned-objects (code)
+            (dolist (site sites)
+              (destructuring-bind (offset kind name-address) site
+                (let* ((fname (sb-kernel:%make-lisp-obj name-address))
+                       (index (sb-int:ensure-linkage-index fname)))
+                  (sb-vm:fixup-code-object code offset index kind :linkage-cell)
+                  (unless (sb-int:permanent-fname-p
+                           (if (sb-kernel:fdefn-p fname) (sb-kernel:fdefn-name fname) fname))
+                    (pushnew index callees))
+                  (incf nsites)))))
+          (multiple-value-bind (old abs32 imm)
+              (sb-c:unpack-code-fixup-locs (sb-vm::%code-fixups code))
+            (declare (ignore old))
+            (setf (sb-vm::%code-fixups code)
+                  (sb-c:pack-code-fixup-locs callees abs32 imm))))))))
+
+#-linkage-space
+(defun relink-fragment (linkage)
+  (when linkage
+    (error "the fragment references linkage cells, which this runtime has none of"))
+  0)
+
+;;; Replay the fragment's records.  A :SET-FUNCTION record names a
+;;; function name, of the fragment or of this image, and the function it
+;;; held when the fragment was sealed, which FSET installs again: in the
+;;; name, and in its linkage cell when it has one.  The other kinds are
+;;; not replayed yet.  Returns the number of definitions installed and
+;;; the number of records of other kinds.
+(defun replay-fragment-records (records)
+  (let ((definitions 0) (others 0))
+    (dolist (record records (values definitions others))
+      (destructuring-bind (kind target args values) record
+        (declare (ignore args))
+        (case kind
+          (:set-function
+           (when values
+             (sb-int:fset (fragment-reference-object target)
+                          (fragment-reference-object (first values)))
+             (incf definitions)))
+          (t (incf others)))))))
+
 (defun activate-fragment-file (pathname)
   "Map the page runs of the fragment file at PATHNAME at their planned
-addresses and install them in the collector as pseudo-static pages.  This
-is the prebound case: the file was written against this core and its
-planned pages are free.  Nothing is relocated, no import is resolved and
-no record is replayed.  Returns the number of runs and the bytes mapped."
+addresses and install them in the collector as pseudo-static pages; then
+resolve the names the fragment's code calls through linkage cells and
+patch the references, and replay its function definitions.  This is the
+prebound case: the file was written against this core and its planned
+pages are free; nothing is relocated and no other import is resolved.
+Returns the number of runs and the bytes mapped, the number of linkage
+references patched, and the number of definitions installed."
   (let ((path (sb-ext:native-namestring (merge-pathnames pathname) :as-file t)))
-    (with-alien ((out (array unsigned-long 2)))
-      (let ((rc (sb-sys:without-gcing (%activate-fragment-file path (cast out (* unsigned-long))))))
-        (case rc
-          (0 (values (deref out 0) (deref out 1)))
-          (-1 (error "~A is not a fragment file" path))
-          (-2 (error "~A was written for another fragment file version" path))
-          (-3 (error "a run of ~A lies outside dynamic space or is not page-aligned" path))
-          (-4 (error "a planned page of ~A is in use" path))
-          (-5 (error "mapping a run of ~A failed" path))
-          (t (error "unexpected return code ~D activating ~A" rc path)))))))
+    (multiple-value-bind (runs bytes)
+        (with-alien ((out (array unsigned-long 2)))
+          (let ((rc (sb-sys:without-gcing
+                      (%activate-fragment-file path (cast out (* unsigned-long))))))
+            (case rc
+              (0 (values (deref out 0) (deref out 1)))
+              (-1 (error "~A is not a fragment file" path))
+              (-2 (error "~A was written for another fragment file version" path))
+              (-3 (error "a run of ~A lies outside dynamic space or is not page-aligned" path))
+              (-4 (error "a planned page of ~A is in use" path))
+              (-5 (error "mapping a run of ~A failed" path))
+              (t (error "unexpected return code ~D activating ~A" rc path)))))
+      (let* ((sites (relink-fragment (read-fragment-section path +fragment-section-linkage+)))
+             (definitions (replay-fragment-records
+                           (read-fragment-section path +fragment-section-records+))))
+        (values runs bytes sites definitions)))))
