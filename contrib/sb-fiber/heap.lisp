@@ -1119,7 +1119,9 @@ the form names in this process.")
                          (funcall *fragment-resolver* (first parts))
                          (error "a fragment refers to ~S by a name, and no resolver is set"
                                 (first parts))))
-             (:type (sb-kernel:specifier-type (fragment-reference-object (first parts))))
+             ;; VALUES-SPECIFIER-TYPE takes a VALUES specifier too, as a function's
+             ;; return type is.
+             (:type (sb-kernel:values-specifier-type (fragment-reference-object (first parts))))
              (:key-info (sb-kernel::make-key-info (fragment-reference-object (first parts))
                                                  (fragment-reference-object (second parts))))
              (:source-location
