@@ -58,5 +58,10 @@ jobs:
       run: cd ./doc/manual && sh generate-texinfo.sh
     - name: test
       run: cd tests; ./run-tests.sh --slow
+    - name: verify heap ownership
+      if: contains(matrix.options, 'sb-local-heaps')
+      env:
+        SBCL_PH_VERIFY: "1"
+      run: cd tests; ./run-tests.sh local-heap.pure.lisp local-heap.impure.lisp fiber-carriers.impure.lisp fiber.impure.lisp
     - name: ansi-test
       run: cd tests; ./ansi-tests.sh
