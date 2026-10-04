@@ -10,11 +10,16 @@ jobs:
     strategy: 
       matrix:
         arch: [arm64, x86-64]
-        options: [--with-sb-thread --with-nonstop-foreign-call --with-tls-based-mv-return, --with-mark-region-gc --with-nonstop-foreign-call --with-tls-based-mv-return]
+        options: [--with-sb-thread --with-nonstop-foreign-call --with-tls-based-mv-return, --with-mark-region-gc --with-nonstop-foreign-call --with-tls-based-mv-return, --fancy --with-sb-fiber --without-gencgc --with-mark-region-gc --with-sb-local-heaps]
       fail-fast: false
 
     steps:
     - uses: actions/checkout@v1
+    - name: Fetch upstream release tags for version generation
+      shell: bash
+      run: |
+        git fetch https://github.com/sbcl/sbcl.git 'refs/tags/sbcl*:refs/tags/sbcl*'
+        git checkout --detach
     - name: instal host sbcl
       run: brew install sbcl
     - name: build
@@ -41,5 +46,10 @@ jobs:
       run: cd ./doc/manual && sh generate-texinfo.sh
     - name: test
       run: cd tests; ./run-tests.sh --slow
+    - name: verify heap ownership
+      if: contains(matrix.options, 'sb-local-heaps')
+      env:
+        SBCL_PH_VERIFY: "1"
+      run: cd tests; ./run-tests.sh local-heap.pure.lisp local-heap.impure.lisp fiber-carriers.impure.lisp fiber.impure.lisp
     - name: ansi-test
       run: cd tests; ./ansi-tests.sh

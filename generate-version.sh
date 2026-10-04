@@ -29,6 +29,26 @@ EOF
         printf "\"%s\"\n" $VERSION >> version.lisp-expr
         exit 0
     fi
+
+    # Forks and shallow CI checkouts may have a commit but no release tags.
+    # Keep a numeric source-series prefix for ASSERT-VERSION->= and append
+    # the exact source identity. NEWS supplies the series; no release number
+    # is hard-coded. Package-builder versions were preserved above.
+    if command -v git >/dev/null 2>&1 &&
+       version_root=`git rev-parse --show-toplevel 2>/dev/null` &&
+       test -f "$version_root/run-sbcl.sh" &&
+       version_hash=`git rev-parse --verify HEAD 2>/dev/null` &&
+       version_series=`sed -n 's/^changes in sbcl-\([0-9][0-9.]*\) relative to .*/\1/p' NEWS 2>/dev/null | head -n 1` &&
+       test -n "$version_series"
+    then
+        version_dirty=""
+        if ! git diff HEAD --no-ext-diff --quiet --exit-code
+        then
+            version_dirty="-WIP"
+        fi
+        printf '"%s-untagged-%s%s"\n' "$version_series" "$version_hash" "$version_dirty" > version.lisp-expr
+        exit 0
+    fi
     
     echo "Can't 'git describe' SBCL source and version.lisp-expr is missing." >&2
     echo "To fix this, either install git or create a fake version.lisp-expr file." >&2
