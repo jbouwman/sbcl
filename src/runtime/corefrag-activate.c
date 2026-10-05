@@ -10,6 +10,12 @@
  * generation. Relocation of a run whose pages are taken, resolution of
  * imports by name, and the replay of records are the Lisp half's, not
  * done here.
+ *
+ * On darwin-jit dynamic space is JIT memory that a thread writes only
+ * with write protection off and that executes only from pages made
+ * executable: a run is read into it rather than mapped from the file,
+ * a code run is made executable as the core's code pages are at boot,
+ * and a patch toggles the protection.
  */
 
 #include "genesis/sbcl.h"
@@ -25,6 +31,7 @@
 #include "gc.h"
 #include "interr.h"
 #include "validate.h"
+#include "thread.h"
 #include "corefrag.h"
 
 #define FRAG_MAGIC 0x53424652
@@ -111,9 +118,15 @@ int corefrag_activate_file(char *path, uword_t *out)
     acquire_gc_page_table_lock();
     for (uword_t r = 0; r < nruns; r++) {
         struct frag_run *run = &runs[r];
+#ifdef LISP_FEATURE_DARWIN_JIT
+        THREAD_JIT_WP(0);
+        load_core_bytes_jit(fd, run->bytes_offset, (os_vm_address_t)run->base, run->nbytes);
+        THREAD_JIT_WP(1);
+#else
         if (!load_core_bytes(fd, run->bytes_offset, (os_vm_address_t)run->base, run->nbytes, 0)) {
             release_gc_page_table_lock(); free(runs); close(fd); return -5;
         }
+#endif
         /* The allocation bitmap: one bit per unit, a whole number of bytes
          * per page, so the run's bytes land at the page's offset. */
         page_index_t first = find_page_index((void*)run->base);
@@ -139,6 +152,24 @@ int corefrag_activate_file(char *path, uword_t *out)
             bytes_allocated += words << WORD_SHIFT;
             generations[gen].bytes_allocated += words << WORD_SHIFT;
         }
+        if (is_code(run->type)) {
+#ifdef LISP_FEATURE_DARWIN_JIT
+            /* As gc_load_corefile_ptes does for the core's code pages,
+             * including the touch of every page after protecting it
+             * (darwin_jit_code_pages_kludge). */
+            for (uword_t p = 0; p < run->npages; p++) set_page_executable(first + p, 1);
+            os_protect((os_vm_address_t)run->base, run->nbytes, OS_VM_PROT_ALL);
+            THREAD_JIT_WP(0);
+            for (uword_t i = 0; i < run->nbytes; i += 4096) {
+                volatile char *page_start = (char*)run->base + i;
+                page_start[0] = page_start[0];
+            }
+            THREAD_JIT_WP(1);
+#endif
+#ifdef LISP_FEATURE_ARM64
+            os_flush_icache((os_vm_address_t)run->base, run->nbytes);
+#endif
+        }
         if (first + (page_index_t)run->npages > next_free_page)
             next_free_page = first + run->npages;
         total += run->nbytes;
@@ -158,7 +189,9 @@ bad:
  * a reference from them to a younger object by the mark. */
 void corefrag_patch_word(uword_t address, lispobj value)
 {
+    THREAD_JIT_WP(0);
     *(lispobj*)address = value;
+    THREAD_JIT_WP(1);
     gc_card_mark[addr_to_card_index((void*)address)] = CARD_MARKED;
 }
 

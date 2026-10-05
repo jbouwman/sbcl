@@ -364,6 +364,16 @@
             (with-fragment-recorder (recorder)
               (with-heap (heap) (load stream))))
           (assert-all-accounted recorder)
+          ;; Without linkage space the build made CL-USER::ACTIVATED-NORM's
+          ;; fdefn: the process's, not a member, and the definition stored
+          ;; into it is a record.
+          (unless (member :linkage-space sb-impl:+internal-features+)
+            (let ((fdefn (sb-int:find-fdefn 'cl-user::activated-norm)))
+              (assert (null (object-heap fdefn)))
+              (assert (find-if (lambda (record)
+                                 (and (eq (fragment-record-kind record) :set-function)
+                                      (eq (fragment-record-target record) fdefn)))
+                               (fragment-records recorder)))))
           (assert (> (sb-kernel:code-jump-table-words
                       (sb-kernel:fun-code-header
                        (symbol-function (find-symbol "PICK" "BUILD-HEAP-ACTIVATED"))))
@@ -454,6 +464,14 @@
             (with-fragment-recorder (recorder)
               (with-heap (heap) (load stream))))
           (assert-all-accounted recorder)
+          ;; The fdefn of (SETF CL-USER::REPLAYED-NORM), a global name, is
+          ;; the process's, and the definition stored into it a record.
+          (let ((fdefn (sb-int:find-fdefn '(setf cl-user::replayed-norm))))
+            (assert (null (object-heap fdefn)))
+            (assert (find-if (lambda (record)
+                               (and (eq (fragment-record-kind record) :set-function)
+                                    (eq (fragment-record-target record) fdefn)))
+                             (fragment-records recorder))))
           (let* ((count (seal-fragment recorder))
                  (base (+ sb-vm:dynamic-space-start (* 3 (floor (sb-ext:dynamic-space-size) 4))))
                  (written (funcall (intern "WRITE-FRAGMENT" "SB-COREFRAG-WRITER") recorder file :base base)))

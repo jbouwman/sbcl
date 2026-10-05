@@ -979,6 +979,17 @@ NOTE: This interface is experimental and subject to change."
   #-(and sb-local-heaps (not sb-xc-host))
   `(progn ,@body))
 
+;;; As WITH-GLOBAL-HEAP, on OBJECT's behalf: a build heap takes
+;;; WITH-GLOBAL-HEAP, but BODY runs with the global heap installed unless
+;;; OBJECT is the build heap's own.  See CALL-WITH-GLOBAL-HEAP-FOR.
+(defmacro sb-kernel::with-global-heap-for ((object) &body body)
+  #+(and sb-local-heaps (not sb-xc-host))
+  (with-unique-names (thunk)
+    `(dx-flet ((,thunk () ,@body))
+       (sb-kernel::call-with-global-heap-for ,object #',thunk)))
+  #-(and sb-local-heaps (not sb-xc-host))
+  `(progn ,object ,@body))
+
 ;;; The recorder of the core fragment being built on this thread, or NIL.
 ;;; See CALL-WITH-FRAGMENT-RECORD.
 (defvar sb-kernel::*fragment-recorder* nil)

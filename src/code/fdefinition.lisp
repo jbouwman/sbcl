@@ -105,17 +105,26 @@
      (let ((fdefn (sb-vm::%symbol-fdefn name)))
        (cond ((and fdefn (neq fdefn 0)) fdefn)
              ((null name) *fdefn-of-nil*)
-             (t (sb-kernel::with-global-heap
+             (t
+              ;; The fdefn of a symbol outside a fragment being built is
+              ;; the process's: recorded, as the hairy case below does, and
+              ;; made in the global heap, so that the definition stored into
+              ;; it is a record too.  A build heap keeps the fdefns of its
+              ;; own symbols.  The record comes first: recording asks for
+              ;; the build heap to be the current one.
+              (sb-kernel::with-fragment-record (:fdefn name name)
+                (sb-kernel::with-global-heap-for (name)
                   (let* ((new (make-fdefn name))
                          (actual (sb-vm::cas-symbol-fdefn name 0 new)))
-                    (if (eql actual 0) new (the fdefn actual))))))))
+                    (if (eql actual 0) new (the fdefn actual)))))))))
     ((find-fdefn name))
     (t
       ;; We won't reach here if the name was not legal
-      (sb-kernel::with-global-heap
       (sb-kernel::with-fragment-record
           (:fdefn (with-globaldb-name (key1 key2) name :simple (progn key2 key1) :hairy nil)
            name)
+      (sb-kernel::with-global-heap-for
+          ((with-globaldb-name (key1 key2) name :simple (progn key2 key1) :hairy name))
         (let (made-new)
           (dx-flet ((new (name)
                       (setq made-new t)

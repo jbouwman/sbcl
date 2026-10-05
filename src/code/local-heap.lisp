@@ -78,17 +78,36 @@ immediate or lives in the global heap."
 ;;; The checking state in effect on entry, suspended or not, is in effect
 ;;; inside and restored on exit: reinstalling the heap would otherwise set
 ;;; it from the heap's mode and end a suspension around this form.
+(defun %call-with-global-heap-installed (prev thunk)
+  (declare (function thunk) (dynamic-extent thunk))
+  (let ((check (sap-int (current-thread-offset-sap thread-local-heap-check-slot))))
+    (%install-global-heap)
+    (unwind-protect (funcall thunk)
+      (%switch-local-heap prev)
+      (%store-check-resume check))))
+
 (defun sb-kernel::call-with-global-heap (thunk)
   (declare (function thunk) (dynamic-extent thunk))
   (let ((prev (current-local-heap-address)))
     (if (or (zerop prev)
             (= (%local-heap-stat prev heap-kind-stat) build-heap-kind))
         (funcall thunk)
-        (let ((check (sap-int (current-thread-offset-sap thread-local-heap-check-slot))))
-          (%install-global-heap)
-          (unwind-protect (funcall thunk)
-            (%switch-local-heap prev)
-            (%store-check-resume check))))))
+        (%call-with-global-heap-installed prev thunk))))
+
+;;; As CALL-WITH-GLOBAL-HEAP, on OBJECT's behalf.  A build heap takes
+;;; WITH-GLOBAL-HEAP, its global metadata being the fragment's, but what
+;;; is made for an object outside the fragment belongs with that object:
+;;; the fdefn of a global name is the process's cell for the name, which
+;;; the fragment fills through a record.  THUNK runs in the build heap
+;;; when OBJECT is its, and with the global heap installed otherwise.
+(defun sb-kernel::call-with-global-heap-for (object thunk)
+  (declare (function thunk) (dynamic-extent thunk))
+  (let ((prev (current-local-heap-address)))
+    (if (or (zerop prev)
+            (and (= (%local-heap-stat prev heap-kind-stat) build-heap-kind)
+                 (= (object-owner object) (%local-heap-stat prev heap-id-stat))))
+        (funcall thunk)
+        (%call-with-global-heap-installed prev thunk))))
 
 (define-alien-routine ("local_heap_from_id" %local-heap-from-id) unsigned-long
   (id (unsigned 32)))

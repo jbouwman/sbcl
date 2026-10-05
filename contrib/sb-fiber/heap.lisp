@@ -1279,16 +1279,21 @@ the form names in this process.")
              (let ((name (object (first args))))
                (if values
                    (let ((fdefn (object (first values))))
-                     (if (and (listp name) (listp (cdr name)) (null (cddr name))
-                              (symbolp (first name)) (symbolp (second name)))
-                         (sb-int:set-info-value
-                          name (sb-int:meta-info-number (sb-int:meta-info :function :definition))
-                          fdefn)
-                         (let ((found (sb-impl::get-fancily-named-fdefn
-                                       name (lambda (name) (declare (ignore name)) fdefn))))
-                           (unless (eq found fdefn)
-                             (error "~S already names ~S; the fragment carries ~S"
-                                    name found fdefn)))))
+                     (cond #-linkage-space
+                           ((symbolp name)
+                            ;; Without linkage space a symbol holds its fdefn.
+                            (sb-vm::cas-symbol-fdefn name 0 fdefn))
+                           ((and (listp name) (listp (cdr name)) (null (cddr name))
+                                 (symbolp (first name)) (symbolp (second name)))
+                            (sb-int:set-info-value
+                             name (sb-int:meta-info-number (sb-int:meta-info :function :definition))
+                             fdefn))
+                           (t
+                            (let ((found (sb-impl::get-fancily-named-fdefn
+                                          name (lambda (name) (declare (ignore name)) fdefn))))
+                              (unless (eq found fdefn)
+                                (error "~S already names ~S; the fragment carries ~S"
+                                       name found fdefn))))))
                    (sb-kernel:find-or-create-fdefn name)))
              (done))
             (:forward-layout
