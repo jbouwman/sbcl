@@ -1,0 +1,51 @@
+# Advances this mirror's `upstream` branch to sbcl/sbcl master.
+#
+# `upstream` is a fetch of upstream SBCL and is never committed to; the
+# fork's deltas live on `epsilon` and are rebased or merged forward from
+# here. The push does not force, so a rewritten upstream history fails
+# this job rather than replacing the branch.
+#
+# The bare repository under the workspace persists on the self-hosted
+# runner, so after the first run each fetch transfers only new commits.
+# The token appears in command-line URLs only and is not written to its
+# configuration.
+
+name: upstream
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - name: Advance upstream to sbcl/sbcl master
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_WORKSPACE/upstream.git"
+          [ -d "$repo" ] || git init -q --bare "$repo"
+          cd "$repo"
+          mirror="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --no-tags "$mirror" +refs/heads/upstream:refs/heads/mirror
+          git fetch -q --no-tags https://github.com/sbcl/sbcl.git +refs/heads/master:refs/heads/sbcl-master
+          have=$(git rev-parse mirror)
+          want=$(git rev-parse sbcl-master)
+          if [ "$have" = "$want" ]; then
+            echo "upstream is at sbcl/sbcl master ($want)"
+            exit 0
+          fi
+          git push -q "$mirror" refs/heads/sbcl-master:refs/heads/upstream
+          echo "upstream advanced $have..$want ($(git rev-list --count "$have..$want") commits)"
