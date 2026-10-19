@@ -577,8 +577,13 @@ int local_heap_classify_store(lispobj value, lispobj object, uword_t pc)
     struct thread *th = get_sb_vm_thread();
     struct local_heap *h = th->local_heap_check;
     if (!h) return 0;
-    /* Stack-allocated objects belong to the storing process. */
-    if (!is_lisp_pointer(object) || is_in_stack_space(object)) return 0;
+    if (!is_lisp_pointer(object)) return 0;
+    /* Stack-allocated objects belong to the storing process.  One it can
+     * store into is on its own running stack, whose bounds a fiber switch
+     * installs in the thread, so no other thread's stack is tested. */
+    if (th->control_stack_start <= (lispobj*)object
+        && (lispobj*)object < th->control_stack_end)
+        return 0;
     uint32_t value_owner = effective_owner(local_heap_owner_of(value), h);
     uint32_t object_owner = effective_owner(local_heap_owner_of(object), h);
     int kind = 0;

@@ -712,6 +712,72 @@ drained."
       (release-heap b)
       (release-heap a))))
 
+;;; A stack-allocated object belongs to the storing process, on a thread's
+;;; own stack or on a fiber's, so storing the heap's value into it is no
+;;; violation.
+
+(defun store-into-stack-cell ()
+  (let ((cell (list nil)))
+    (declare (dynamic-extent cell))
+    (store-into-car cell (list :mine))
+    (car cell)))
+
+(with-test (:name (:local-heap :checked :store-into-stack-object))
+  (reset-heap-violations)
+  (let ((h (make-heap :check-stores :error)))
+    (unwind-protect
+         (with-heap (h)
+           (assert (equal (store-into-stack-cell) '(:mine))))
+      (release-heap h)))
+  (with-fiber-thread ()
+    (let* ((h (make-heap :check-stores :error))
+           (f (make-fiber (lambda () (with-heap (h) (store-into-stack-cell))))))
+      (unwind-protect
+           (assert (equal (join-fiber f) '(:mine)))
+        (release-fiber f)
+        (release-heap h))))
+  (assert (zerop (nth-value 1 (take-heap-violations)))))
+
+;;; The store check tests only the storing thread's stack, so its cost
+;;; does not grow with the number of threads.  Checked stores are measured
+;;; against unchecked ones under the same thread count: a check that walks
+;;; every thread's stack bounds costs some hundreds of times as much.
+
+(defun store-time (check-stores n)
+  "The least internal real time, of three runs, that N stores of a global
+value into a global cons take under a heap made with CHECK-STORES.  A
+fixnum, so the result is not an object of the released heap."
+  (let ((h (make-heap :check-stores check-stores))
+        (cell (list nil)))
+    (unwind-protect
+         (loop repeat 3
+               minimize (with-heap (h)
+                          (let ((start (get-internal-real-time)))
+                            (dotimes (i n) (store-into-car cell :global))
+                            (- (get-internal-real-time) start))))
+      (release-heap h))))
+
+(with-test (:name (:local-heap :checked :store-cost-independent-of-threads))
+  (let* ((n 1000000)
+         (gate (sb-thread:make-semaphore))
+         (parked (loop repeat 256
+                       collect (sb-thread:make-thread
+                                #'sb-thread:wait-on-semaphore
+                                :arguments (list gate)))))
+    (unwind-protect
+         (let ((unchecked (store-time nil n))
+               (checked (store-time :error n)))
+           (assert (<= checked (max (* 100 unchecked)
+                                    (floor internal-time-units-per-second 10)))
+                   ()
+                   "~D checked stores took ~,3Fs, unchecked ~,3Fs, with ~D threads"
+                   n
+                   (/ checked internal-time-units-per-second 1.0)
+                   (/ unchecked internal-time-units-per-second 1.0)
+                   (length (sb-thread:list-all-threads))))
+      (sb-thread:signal-semaphore gate 256)
+      (mapc #'sb-thread:join-thread parked))))
+
 (with-test (:name (:local-heap :violations :collection-has-no-store-site))
   (reset-heap-violations)
   (let ((h (make-heap :check-stores nil)))
