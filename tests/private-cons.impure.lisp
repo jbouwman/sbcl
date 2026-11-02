@@ -31,6 +31,20 @@
   (alien-funcall (extern-alien "gc_private_free" (function void unsigned))
                  list))
 
+;;; With local heaps the conses stay out of dynamic space, where an edge
+;;; left by a released heap could pass for a global object.
+#+sb-local-heaps
+(defun test-private-consing ()
+  (let* ((n (* 3 (/ sb-vm:gencgc-page-bytes (* 2 sb-vm:n-word-bytes))))
+         (conses (loop for i from 1 to n collect (private-list i))))
+    (dolist (cons conses)
+      (assert (minusp (sb-vm::find-page-index cons))))
+    (loop for cons in conses
+          for i from 1
+          do (assert (= (sb-sys:sap-ref-word (sb-sys:int-sap cons) 0) i)))
+    (alien-funcall (extern-alien "gc_dispose_private_pages" (function void)))))
+
+#-sb-local-heaps
 (progn
 (defun page-words-used (index)
   (ash (slot (deref sb-vm::page-table index) 'sb-vm::words-used*) -1))

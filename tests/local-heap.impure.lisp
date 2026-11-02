@@ -1145,6 +1145,27 @@ fixnum, so the result is not an object of the released heap."
 
 (defvar *dangling-holder* nil)
 
+(defun free-page-holding-line (npages)
+  "The first free page below NPAGES with a nonzero line, or NIL.  Heap
+claims charge for whole runs of lines and assume a free page has none."
+  (flet ((free-p (page)
+           (zerop (slot (deref sb-vm:page-table page) 'sb-vm::flags))))
+    (let ((lines (extern-alien "line_bytemap" system-area-pointer))
+          (lines-per-page (floor sb-vm:gencgc-page-bytes
+                                 (ash 8 sb-vm:n-lowtag-bits))))
+      (dotimes (page npages)
+        (when (and (free-p page)
+                   (loop for line from (* page lines-per-page)
+                         repeat lines-per-page
+                         thereis (plusp (sb-sys:sap-ref-8 lines line)))
+                   (free-p page))
+          (return page))))))
+
+(defun gc-leaving-free-pages-clean ()
+  (let ((npages (extern-alien "next_free_page" sb-kernel::page-index-t)))
+    (sb-ext:gc :full t)
+    (assert (not (free-page-holding-line npages)))))
+
 ;;; A global object built from a heap's objects is not a store the
 ;;; barrier sees.  Once the heap is released the edge dangles, and a
 ;;; global collection must not mark through it.
@@ -1156,9 +1177,26 @@ fixnum, so the result is not an object of the released heap."
         (setq local (list (make-list 300) (make-array 100000))))
       (setq *dangling-holder* (cons local nil))
       (release-heap heap))
-    (sb-ext:gc :full t)
+    (gc-leaving-free-pages-clean)
     (churn-heaps 4 (* 256 1024))
-    (sb-ext:gc :full t)
+    (gc-leaving-free-pages-clean)
+    (setq *dangling-holder* nil)))
+
+;;; The collector's private conses must stay off the page a released
+;;; vector occupied: the edge would then pass for a global object and
+;;; tracing would read a header the conses overwrote.
+(defun hold-vector-past-release ()
+  (let ((heap (make-heap))
+        (vector nil))
+    (with-heap (heap)
+      (setq vector (make-array 100000)))
+    (setq *dangling-holder* (cons vector nil))
+    (release-heap heap)))
+
+(with-test (:name (:local-heap :global-object-with-edge-to-released-vector))
+  (dotimes (i 20)
+    (hold-vector-past-release)
+    (gc-leaving-free-pages-clean)
     (setq *dangling-holder* nil)))
 
 ;;; The same through a cons's cdr, which tracing follows without the

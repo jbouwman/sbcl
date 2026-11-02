@@ -15,6 +15,12 @@
  * mutex, and the Lisp thread making the foreign call is stopped for GC,
  * then GC can't proceed)
  *
+ * With local heaps these conses stay out of dynamic space. A collection
+ * can meet an edge left by a released heap, and the page that heap gave
+ * back is the one a free-page search returns. The test in mark() rejects
+ * such an edge only while the page reads free, so the chunks come from
+ * os_allocate, and not from malloc for the reason above.
+ *
  * Logically this code is common to both GCs, but it requires some
  * knowledge of gencgc's structures. You might think it should be split
  * into two wholly separate implementation files, but the single file
@@ -24,16 +30,30 @@
 
 #define PRIVATE_CONS_DEBUG 0
 
-#ifdef LISP_FEATURE_CHENEYGC
+#if defined LISP_FEATURE_CHENEYGC || defined LISP_FEATURE_SB_LOCAL_HEAPS
 
 static struct cons* private_cons_chain;
 static int private_cons_n_avail;
 
+#ifdef LISP_FEATURE_SB_LOCAL_HEAPS
+#define CHUNKSIZE GENCGC_PAGE_BYTES
+static struct cons* private_chunk_alloc()
+{
+    struct cons* chunk = (struct cons*)os_allocate(CHUNKSIZE);
+    if (!chunk) lose("Ran out of memory for GC-private conses");
+    return chunk;
+}
+#define private_chunk_free(chunk) os_deallocate((os_vm_address_t)(chunk), CHUNKSIZE)
+#else
 #define CHUNKSIZE 4096
+#define private_chunk_alloc() malloc(CHUNKSIZE)
+#define private_chunk_free(chunk) free(chunk)
+#endif
+
 static struct cons* private_cons_impl()
 {
     if (!private_cons_n_avail) {
-        struct cons* new = malloc(CHUNKSIZE);
+        struct cons* new = private_chunk_alloc();
         private_cons_n_avail = (CHUNKSIZE / sizeof (struct cons)) - 1;
         /* Treating 'new' as an array of 'private_cons_n_avail' conses,
          * we allocate backwards toward the 0th element.
@@ -53,7 +73,7 @@ static void release_pages_impl()
     for ( ; list ; list = next ) {
         if (PRIVATE_CONS_DEBUG) fprintf(stderr, "Freeing %p\n", list);
         next = (struct cons*)list->cdr;
-        free(list);
+        private_chunk_free(list);
     }
     private_cons_chain = NULL;
     private_cons_n_avail = 0;

@@ -407,6 +407,17 @@ static void ph_account_claim(struct local_heap *h, page_index_t p, uword_t claim
     h->bytes_claimed += claimed;
 }
 
+/* A claim charges for its whole run, so a used line in the run is a
+ * remainder that the heap's release finds on an unowned page.  Lines of
+ * free blocks are zero; fail here, where the run can still be named. */
+static void ph_check_claim(page_index_t p, block_index_t first, int count)
+{
+    if (ph_lines_all_free(block_to_line(first), block_to_line(first + count))) return;
+    ph_dump_page(p);
+    lose("local heap claim of %d blocks at block %ld of page %d has used lines",
+         count, (long)(first - page_to_block(p)), (int)p);
+}
+
 /* Claim lines for a small-object region: free lines inside runs the
  * heap already owns (there can only be some after a local GC), then
  * free blocks on a process page, then a free page.  Heaps claim bigger
@@ -446,6 +457,7 @@ static bool ph_claim_small(struct local_heap *h, sword_t nbytes,
     page_index_t p = build ? -1 : ph_find_free_run(type, need, want, &first, &count);
     if (p != -1) {
         bool listed = ph_heap_on_page(h, p);
+        ph_check_claim(p, first, count);
         ph_own_blocks(h, first, count);
         if (!try_allocate_small(nbytes, region, block_to_line(first), block_to_line(first + count)))
             lose("free blocks on page %d have no free lines", (int)p);
@@ -469,6 +481,7 @@ static bool ph_claim_small(struct local_heap *h, sword_t nbytes,
     ph_process_page[p] = 1;
     if (p + 1 > next_free_page) next_free_page = p + 1;
     first = page_to_block(p);
+    ph_check_claim(p, first, want);
     ph_own_blocks(h, first, want);
     if (!try_allocate_small(nbytes, region, block_to_line(first), block_to_line(first + want)))
         lose("free page %d has no free lines", (int)p);
